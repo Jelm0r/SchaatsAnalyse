@@ -32,7 +32,8 @@ from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 import schaats_perspectief
 from schaats_analyse import (
     video_info, segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
-    detecteer_ijslijn, PerspectiefConfig,
+    detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden,
+    sla_landmarks_op, laad_landmarks,
 )
 
 # Backend-selectie: gebruik YOLO-pose + ByteTrack als torch/ultralytics beschikbaar is
@@ -709,6 +710,18 @@ class MainWindow(QMainWindow):
         self.btn_start_analyse.clicked.connect(self._start_analyse_vanaf_start)
         v.addWidget(self.btn_start_analyse, alignment=Qt.AlignHCenter)
 
+        v.addSpacing(8)
+
+        self.btn_laad_landmarks = QPushButton("Landmarks laden (.npz)...")
+        self.btn_laad_landmarks.setFixedWidth(220)
+        self.btn_laad_landmarks.setEnabled(False)
+        self.btn_laad_landmarks.setToolTip(
+            "Laadt een eerder opgeslagen analyse (.npz) bij de gekozen video: de\n"
+            "afzethoeken worden direct herberekend uit de opgeslagen landmarks,\n"
+            "zonder de video opnieuw te detecteren (seconden i.p.v. minuten).")
+        self.btn_laad_landmarks.clicked.connect(self._laad_landmarks_vanaf_start)
+        v.addWidget(self.btn_laad_landmarks, alignment=Qt.AlignHCenter)
+
         v.addStretch(3)
         return paneel
 
@@ -790,10 +803,20 @@ class MainWindow(QMainWindow):
         self.lbl_stats = QLabel("gem — | min — | max —")
         tv.addWidget(self.lbl_stats)
 
+        knoppen = QHBoxLayout()
         self.btn_export = QPushButton("Exporteer CSV")
         self.btn_export.clicked.connect(self._exporteer_csv)
         self.btn_export.setEnabled(False)
-        tv.addWidget(self.btn_export)
+        knoppen.addWidget(self.btn_export)
+
+        self.btn_sla_landmarks = QPushButton("Landmarks opslaan (.npz)")
+        self.btn_sla_landmarks.setToolTip(
+            "Slaat de gedetecteerde landmarks van deze analyse op. Je kunt ze later\n"
+            "bij dezelfde video terugladen zonder opnieuw te hoeven analyseren.")
+        self.btn_sla_landmarks.clicked.connect(self._sla_landmarks_op)
+        self.btn_sla_landmarks.setEnabled(False)
+        knoppen.addWidget(self.btn_sla_landmarks)
+        tv.addLayout(knoppen)
 
         paneel.addWidget(tabel_groep)
 
@@ -837,6 +860,7 @@ class MainWindow(QMainWindow):
         self.input_pad = pad
         self.lbl_gekozen_video.setText(os.path.basename(pad))
         self.btn_start_analyse.setEnabled(True)
+        self.btn_laad_landmarks.setEnabled(True)
 
     def _start_analyse_vanaf_start(self):
         # Modelkeuze is alleen relevant voor de MediaPipe-backend; YOLO gebruikt zijn
@@ -929,6 +953,7 @@ class MainWindow(QMainWindow):
     def _start_analyse(self):
         self._zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
+        self.btn_sla_landmarks.setEnabled(False)
 
         self.progress = QProgressDialog("Video analyseren...", None, 0, 100, self)
         self.progress.setWindowModality(Qt.WindowModal)
@@ -958,6 +983,13 @@ class MainWindow(QMainWindow):
 
     def _analyse_klaar(self, info, resultaten, events):
         self.progress.close()
+        self._toon_resultaten(info, resultaten, events)
+
+    def _toon_resultaten(self, info, resultaten, events, bron=None):
+        """
+        Vult de weergavepagina met een resultatenlijst. Gedeeld door een verse analyse
+        en door een uit .npz geladen analyse (`bron` = de bestandsnaam, voor de statusbalk).
+        """
         self.video_info = info
         self.resultaten = resultaten
         self.events = events
@@ -974,10 +1006,12 @@ class MainWindow(QMainWindow):
         self._vul_grafiek()
         self._zet_besturing_actief(True)
         self.btn_export.setEnabled(bool(events))
+        self.btn_sla_landmarks.setEnabled(bool(resultaten))
 
+        herkomst = f"  ·  geladen uit {bron}" if bron else ""
         self.statusBar().showMessage(
             f"{os.path.basename(self.input_pad)} — {info.w}×{info.h} @ {info.fps:.1f}fps, "
-            f"{len(resultaten)} frames, {len(events)} afzetten gevonden")
+            f"{len(resultaten)} frames, {len(events)} afzetten gevonden{herkomst}")
 
         self._ga_naar(0)
 
@@ -1186,6 +1220,74 @@ class MainWindow(QMainWindow):
         self._toon_frame(volgende)
 
     # ── Export ───────────────────────────────────────────────────────────
+    # ── Landmarks opslaan / laden (.npz) ─────────────────────────────────
+    def _sla_landmarks_op(self):
+        """Schrijft de landmarks van de huidige analyse weg; de afgeleiden niet (die
+        zijn herberekenbaar en worden bij het laden opnieuw bepaald)."""
+        if not self.resultaten or self.video_info is None:
+            return
+        standaard = os.path.splitext(os.path.basename(self.input_pad or "analyse"))[0] + ".npz"
+        pad, _ = QFileDialog.getSaveFileName(
+            self, "Landmarks opslaan", standaard, "Landmarks (*.npz)")
+        if not pad:
+            return
+        if not pad.lower().endswith(".npz"):
+            pad += ".npz"          # np.savez_compressed plakt 'm er anders zelf achter
+        try:
+            sla_landmarks_op(pad, self.resultaten, self.video_info)
+        except Exception as e:
+            QMessageBox.critical(self, "Fout bij opslaan", f"Kan niet opslaan:\n\n{e}")
+            return
+        kb = os.path.getsize(pad) / 1024
+        self.statusBar().showMessage(
+            f"Landmarks opgeslagen: {os.path.basename(pad)} ({kb:.0f} KB)", 5000)
+
+    def _laad_landmarks_vanaf_start(self):
+        """Laadt landmarks uit een .npz bij de gekozen video en berekent alleen de
+        afgeleiden opnieuw — geen detectie, dus klaar in seconden."""
+        pad, _ = QFileDialog.getOpenFileName(
+            self, "Landmarks laden", "", "Landmarks (*.npz);;Alle bestanden (*)")
+        if not pad:
+            return
+        try:
+            info, resultaten = laad_landmarks(pad)
+        except Exception as e:
+            QMessageBox.critical(self, "Fout bij laden",
+                                 f"Kan {os.path.basename(pad)} niet laden:\n\n{e}")
+            return
+
+        # Hoort dit .npz wel bij de gekozen video? Zo niet, dan zou het skelet op een
+        # heel ander beeld belanden — liever nu een nette melding.
+        try:
+            vinfo = video_info(self.input_pad)
+        except Exception as e:
+            QMessageBox.critical(self, "Fout", f"Kan de video niet lezen:\n\n{e}")
+            return
+        if (info.w, info.h) != (vinfo.w, vinfo.h):
+            QMessageBox.warning(
+                self, "Landmarks passen niet bij deze video",
+                f"De landmarks zijn opgeslagen voor {info.w}×{info.h}, maar de gekozen "
+                f"video is {vinfo.w}×{vinfo.h}.\n\nKies de video die bij dit bestand hoort.")
+            return
+        if len(resultaten) > vinfo.totaal + 1:
+            QMessageBox.warning(
+                self, "Landmarks passen niet bij deze video",
+                f"Het bestand bevat {len(resultaten)} frames, maar de video heeft er "
+                f"{vinfo.totaal}.\n\nKies de video die bij dit bestand hoort.")
+            return
+
+        self.smooth_n = self.spin_smooth.value()
+        self.threshold = self.spin_threshold.value()
+        self.perspectief = None      # kalibratie wordt niet meegeserialiseerd (fase 0)
+
+        # De horizon zit al per frame in het .npz; alleen de afgeleiden herberekenen.
+        verwerk_afgeleiden(resultaten, info.w, info.h, info.fps,
+                           self.smooth_n, self.threshold)
+        events = segmenteer_afzetten(resultaten)
+
+        self.stack.setCurrentWidget(self.pagina_analyse)
+        self._toon_resultaten(info, resultaten, events, bron=os.path.basename(pad))
+
     def _exporteer_csv(self):
         pad, _ = QFileDialog.getSaveFileName(self, "Exporteer afzethoeken", "afzethoeken.csv", "CSV (*.csv)")
         if not pad:

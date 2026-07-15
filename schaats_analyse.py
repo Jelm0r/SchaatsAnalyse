@@ -1206,6 +1206,79 @@ def forceer_alternerend(events, resultaten, merge_gap_s=0.35, min_tegen=2):
     return uit
 
 
+# ── Serialisatie (fase 0) ────────────────────────────────────────────────────────
+# Een analyse opslaan/terugladen zonder de video opnieuw te analyseren. Alleen de
+# landmarks + pose_gevonden + horizon zijn bron van waarheid; de afgeleiden
+# (been/hoek/gewicht/events) worden bij het terugladen herberekend met
+# verwerk_afgeleiden() + segmenteer_afzetten(). Backend-onafhankelijk: r.lm is óf een
+# MediaPipe-landmarklijst óf een Landmark-lijst — beide met .x/.y/.visibility.
+
+def resultaten_naar_arrays(resultaten, info):
+    """
+    Serialiseert een geanalyseerde FrameResultaat-lijst naar platte numpy-arrays.
+    z wordt bewust weggelaten (nergens gebruikt). Retourneert een dict geschikt voor
+    np.savez_compressed; de video-eigenschappen gaan als meta mee zodat het terugladen
+    geen video nodig heeft.
+    """
+    n = len(resultaten)
+    landmarks     = np.zeros((n, 33, 3), dtype=np.float32)   # x, y, visibility
+    pose_gevonden = np.zeros(n, dtype=bool)
+    horizon       = np.zeros(n, dtype=np.float32)
+    for i, r in enumerate(resultaten):
+        pose_gevonden[i] = r.pose_gevonden
+        horizon[i]       = r.horizon_deg
+        if r.pose_gevonden and r.lm is not None:
+            for j, p in enumerate(r.lm):
+                landmarks[i, j, 0] = p.x
+                landmarks[i, j, 1] = p.y
+                landmarks[i, j, 2] = p.visibility
+    return {
+        'landmarks':     landmarks,
+        'pose_gevonden': pose_gevonden,
+        'horizon_deg':   horizon,
+        'w':      np.int32(info.w),
+        'h':      np.int32(info.h),
+        'fps':    np.float32(info.fps),
+        'totaal': np.int32(info.totaal),
+    }
+
+
+def arrays_naar_resultaten(arrays):
+    """
+    Inverse van resultaten_naar_arrays: bouwt een verse (VideoInfo, FrameResultaat-lijst)
+    met platte Landmark-tuples in .lm (z=0). De afgeleiden zijn nog leeg — draai
+    verwerk_afgeleiden() + segmenteer_afzetten() om ze te vullen. frame_nr/tijd worden
+    exact gereconstrueerd uit de frame-index en fps, zoals analyseer_frames ze zet.
+    """
+    landmarks     = arrays['landmarks']
+    pose_gevonden = arrays['pose_gevonden']
+    horizon       = arrays['horizon_deg']
+    info = VideoInfo(int(arrays['w']), int(arrays['h']),
+                     float(arrays['fps']), int(arrays['totaal']))
+    fps = info.fps
+    resultaten = []
+    for i in range(len(landmarks)):
+        r = FrameResultaat(frame_nr=i, tijd=i / fps if fps > 0 else 0.0)
+        r.pose_gevonden = bool(pose_gevonden[i])
+        r.horizon_deg   = float(horizon[i])
+        if r.pose_gevonden:
+            r.lm = [Landmark(float(x), float(y), 0.0, float(v))
+                    for x, y, v in landmarks[i]]
+        resultaten.append(r)
+    return info, resultaten
+
+
+def sla_landmarks_op(pad, resultaten, info):
+    """Schrijft de analyse (landmarks + horizon + meta) gecomprimeerd naar een .npz."""
+    np.savez_compressed(pad, **resultaten_naar_arrays(resultaten, info))
+
+
+def laad_landmarks(pad):
+    """Laadt een .npz terug naar (VideoInfo, FrameResultaat-lijst); afgeleiden nog leeg."""
+    with np.load(pad) as arrays:
+        return arrays_naar_resultaten(arrays)
+
+
 def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
     """
     Groepeert per-frame resultaten tot afzet-events: aaneengesloten frames
@@ -1268,22 +1341,36 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
 
 def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                     num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
-                    horizon_deg=0.0, auto_horizon=False):
+                    horizon_deg=0.0, auto_horizon=False, save_npz=None, from_npz=None):
     """
     CLI-analyse in twee passes: eerst detecteren/tracken/smoothen (nodig omdat de
     offline smoothing álle frames vereist), daarna de video opnieuw lezen en de
     overlay erop tekenen en wegschrijven.
+
+    Met `save_npz` worden de landmarks (fase 0) na de analyse weggeschreven. Met
+    `from_npz` wordt de analyse overgeslagen: de landmarks worden uit dat .npz geladen
+    en alleen de afgeleiden opnieuw berekend — zo toon je aan dat een teruggeladen
+    analyse dezelfde tabel/overlay geeft zónder de video opnieuw te analyseren.
     """
     def toon_voortgang(frame_nr, totaal):
         if frame_nr % 30 == 0:
             pct = frame_nr / totaal * 100 if totaal > 0 else 0
             print(f"  {frame_nr}/{totaal} frames ({pct:.0f}%)")
 
-    print("[INFO] Pass 1/2: detectie + tracking + smoothing ...")
-    info, resultaten = analyseer(
-        input_pad, model_pad, smooth_n, threshold, force_fps,
-        num_poses=num_poses, doel_punt=doel_punt, smooth_landmarks=smooth_landmarks,
-        progress_callback=toon_voortgang, horizon_deg=horizon_deg, auto_horizon=auto_horizon)
+    if from_npz:
+        print(f"[INFO] Landmarks laden uit {from_npz} (geen detectie) ...")
+        info, resultaten = laad_landmarks(from_npz)
+        # Alleen de afgeleiden herberekenen; horizon_deg zit al per frame in het .npz.
+        verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, smooth_n, threshold)
+    else:
+        print("[INFO] Pass 1/2: detectie + tracking + smoothing ...")
+        info, resultaten = analyseer(
+            input_pad, model_pad, smooth_n, threshold, force_fps,
+            num_poses=num_poses, doel_punt=doel_punt, smooth_landmarks=smooth_landmarks,
+            progress_callback=toon_voortgang, horizon_deg=horizon_deg, auto_horizon=auto_horizon)
+        if save_npz:
+            sla_landmarks_op(save_npz, resultaten, info)
+            print(f"[INFO] Landmarks opgeslagen: {save_npz}")
 
     print(f"[INFO] Video: {info.w}×{info.h} @ {info.fps:.1f}fps, {info.totaal} frames")
     print(f"[INFO] Pass 2/2: overlay tekenen → {output_pad}")
@@ -1337,6 +1424,11 @@ if __name__ == "__main__":
     parser.add_argument("--auto-horizon", action="store_true",
                         help="Detecteer de ijslijn-kanteling automatisch, per frame (voor een "
                              "schommelende camera); overschrijft --horizon.")
+    parser.add_argument("--save-npz", default=None, metavar="PAD",
+                        help="Schrijf na de analyse de landmarks weg naar dit .npz (fase 0).")
+    parser.add_argument("--from-npz", default=None, metavar="PAD",
+                        help="Sla de detectie over en laad de landmarks uit dit .npz; "
+                             "berekent alleen de afgeleiden en tekent de overlay opnieuw.")
     args = parser.parse_args()
 
     # Als er geen --input is meegegeven, vraag er interactief om
@@ -1351,7 +1443,8 @@ if __name__ == "__main__":
     standaard_naam = "pose_landmarker_heavy.task" if args.heavy else "pose_landmarker_full.task"
     model_pad = args.model or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), standaard_naam)
-    if not os.path.isfile(model_pad):
+    if not args.from_npz and not os.path.isfile(model_pad):
+        # Bij --from-npz wordt niet gedetecteerd, dus is het model niet nodig.
         variant = "heavy" if args.heavy else "full"
         print(f"Modelbestand niet gevonden: {model_pad}")
         print(f"Download het via: https://storage.googleapis.com/mediapipe-models/"
@@ -1379,4 +1472,6 @@ if __name__ == "__main__":
         smooth_landmarks=not args.no_smooth,
         horizon_deg=args.horizon,
         auto_horizon=args.auto_horizon,
+        save_npz=args.save_npz,
+        from_npz=args.from_npz,
     )

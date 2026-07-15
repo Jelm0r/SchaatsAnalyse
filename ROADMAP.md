@@ -12,7 +12,22 @@ De fases bouwen op elkaar: 0 → 1 → 2 kunnen niet van volgorde wisselen; 3 (s
 
 ---
 
-## Fase 0 — Voorbereiding: resultaten serialiseerbaar maken
+## Fase 0 — Voorbereiding: resultaten serialiseerbaar maken ✅
+
+> **Af (16 juli 2026)** — geverifieerd op een echte video via de GUI: opslaan, GUI herstarten, terugladen → identieke tabel/grafiek/overlay, in een seconde i.p.v. een volledige detectie.
+>
+> **Wat er staat:**
+> - `schaats_analyse.py`, sectie "Serialisatie (fase 0)" vóór `segmenteer_afzetten`: `resultaten_naar_arrays()` / `arrays_naar_resultaten()` + `sla_landmarks_op()` / `laad_landmarks()` (`np.savez_compressed`).
+> - CLI: `--save-npz PAD` (landmarks wegschrijven na de analyse) en `--from-npz PAD` (detectie overslaan, alleen afgeleiden herberekenen + overlay tekenen; model niet nodig).
+> - GUI: knoppen "Landmarks opslaan (.npz)" (datapaneel) en "Landmarks laden (.npz)..." (startpagina). **Tijdelijk steigerwerk** — fase 1 vervangt het handmatig kiezen van bestanden door de bibliotheek; de functies eronder blijven gelijk.
+> - `_analyse_klaar` is gesplitst: het weergave-deel is nu `_toon_resultaten(info, resultaten, events, bron=None)`, gedeeld door een verse en een geladen analyse. **Dit is de naad die fase 1 hergebruikt.**
+>
+> **Afwijkingen van het plan hieronder:**
+> - Stap 2's "plain landmark-type" bleek al te bestaan (`Landmark`-namedtuple, `schaats_analyse.py` regel ~51, al gebruikt door de YOLO-backend) — geen nieuw type nodig.
+> - `arrays_naar_resultaten(arrays)` neemt géén `info`-argument: de video-meta (w/h/fps/totaal) gaat mee ín het `.npz` en komt er als `VideoInfo` weer uit → `(VideoInfo, resultaten)`. Terugladen vereist de video dus niet.
+> - Stap 4 klopte: `verwerk_afgeleiden()` had geen verborgen afhankelijkheid van de detectie-pass.
+>
+> **Niet meegeserialiseerd:** de perspectiefkalibratie (fase 7). Bij laden staat die dus uit — onschadelijk onder de frontale-camera-aanname.
 
 Alles hierna staat of valt met het kunnen **opslaan en terugladen** van een analyse. Nu leeft de `FrameResultaat`-lijst alleen in het geheugen van de GUI, en het `lm`-veld bevat een MediaPipe-landmarkobject dat niet direct naar schijf kan.
 
@@ -75,6 +90,7 @@ Nieuwe module **`schaats_db.py`**: `open_db(pad)` (maakt schema aan indien nodig
 
 - **Nieuwe startpagina = bibliotheek**: links de schaatserslijst (+ knop "nieuwe schaatser"), rechts de analyses van de geselecteerde schaatser (datum, titel, aantal afzetten, gem. hoek uit de cache). Dubbelklik → analyse openen.
 - **"Nieuwe analyse"-flow**: schaatser kiezen (of aanmaken) → video kiezen → bestaande `DoelKiezer` → `AnalyseWorker` draait → bij `klaar` automatisch opslaan in de bibliotheek → analyse-weergave openen. De huidige weergavepagina blijft vrijwel ongewijzigd; alleen leest `cap_weergave` voortaan de gekopieerde video uit `media/<id>/`.
+- **Aanhaakpunt uit fase 0**: een analyse openen = `laad_landmarks()` + `verwerk_afgeleiden()` + `segmenteer_afzetten()` → `_toon_resultaten(...)`. Die weg werkt al (de tijdelijke "Landmarks laden"-knop doet precies dit); fase 1 vervangt alleen de bestandsdialoog door de bibliotheekselectie en haalt daarna beide tijdelijke knoppen weg.
 - Analyse hernoemen/verwijderen (verwijderen = DB-rij + mediamap, met bevestiging).
 - Video-kopie kan bij grote bestanden even duren → in de worker-thread doen, niet op de UI-thread.
 
@@ -223,7 +239,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 
 | Fase | Wat | Omvang |
 |---|---|---|
-| 0 | Serialisatie (`npz` + plain landmarks) | klein, 1 sessie |
+| 0 | Serialisatie (`npz` + plain landmarks) | ✅ **af** (16 jul 2026) |
 | 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | groot, 2–3 sessies |
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
 | 3 | Skelet-editor met uitvloeien + undo | middelgroot, 1–2 sessies |
