@@ -1,0 +1,120 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Wat dit is
+
+Een schaatser-analyse-tool met **twee inwisselbare detectie-backends** en gedeelde kern:
+- `schaats_analyse.py` — CLI + de gedeelde kern (hoekberekening, gewichtsdetectie, afzet-segmentatie, offline smoothing, tekenen) **plus** de MediaPipe-backend. Detecteert het afzetbeen, berekent de afzethoek t.o.v. het ijs en de kniehoek, en kan een uitvoervideo met overlay + HUD schrijven.
+- `schaats_yolo.py` — de **YOLO-pose + ByteTrack-backend** (ultralytics) met **offline doelkeuze**: verzamelt eerst álle detecties van álle frames (hoge resolutie), kiest daarná globaal de doelschaatser via **pakkleur** (torso-HSV-histogram) + **rijrichting** (constante-snelheid-voorspelling), en verfijnt de keypoints met een **crop-pass**. Levert dezelfde `FrameResultaat`-lijst als de MediaPipe-backend, dus de gedeelde kern werkt ongewijzigd. Robuust bij kruisende schaatsers, occlusie en bewegingsonscherpte. Vereist een aparte omgeving (torch), zie hieronder.
+- `schaats_gui.py` — PySide6-GUI: speelt de video af met de skelet/afzetbeen-overlay live erop (scrubben, play/pause, laag-toggles), tabel met afzethoeken (klik op rij → spring naar frame), hoek-over-tijd-grafiek, CSV-export. **Kiest de backend automatisch**: YOLO als torch/ultralytics importeerbaar is (`IS_YOLO`), anders MediaPipe.
+- `schaats_perspectief.py` — **perspectiefcorrectie via baanlijnen** (ROADMAP fase 7): puur-numpy kalibratie (verdwijnpunten → brandpuntsafstand → homografie ijsvlak↔wereld) en 3D-hoekreconstructie met twee inwisselbare knie-constraints. Los importeerbaar in beide venvs (geen cv2/scipy/torch); synthetische zelftest: `python schaats_perspectief.py`. Opt-in aan de pijplijn gekoppeld via `PerspectiefConfig` (zie architectuur).
+
+## Commands
+
+```bash
+# GUI onder de YOLO-venv (aanbevolen): dubbelklik start_gui.bat, of:
+.venv-yolo\Scripts\python.exe schaats_gui.py
+
+# GUI/CLI onder MediaPipe (Python 3.14 met mediapipe):
+python schaats_gui.py
+python schaats_analyse.py --input video.mp4 --output resultaat.mp4
+
+# Syntax-check zonder uit te voeren
+python -m py_compile schaats_analyse.py schaats_gui.py schaats_yolo.py
+
+# Opties CLI (MediaPipe-backend): --model, --fps, --smooth (default 5),
+#   --threshold (default 0.015), --num-poses (default 5), --heavy, --target X,Y, --no-smooth,
+#   --horizon GRADEN (vaste camerakanteling t.o.v. ijs, default 0),
+#   --auto-horizon (detecteer de ijslijn per frame — voor een schommelende camera)
+```
+
+Geen testsuite, linter of build-stap aanwezig.
+
+### Dependencies / omgevingen
+
+Er zijn **twee Python-omgevingen** omdat torch/ultralytics geen wheels heeft voor de standaard Python 3.14, en Anaconda-Python (3.12 hier) botst met PySide6's Qt-DLL's:
+- **MediaPipe-backend**: Python 3.14 met `pip install mediapipe opencv-python numpy PySide6`.
+- **YOLO-backend**: `.venv-yolo` op **Python 3.11** (standalone, niet Anaconda!) met `pip install ultralytics PySide6 lap`. Aangemaakt met `py -3.11 -m venv .venv-yolo`. De YOLO-modelgewichten (`yolo11x-pose.pt`, ~118 MB) staan naast het script; ultralytics downloadt ze anders bij eerste gebruik. **Let op:** maak de venv niet met Anaconda-Python — dan faalt `import PySide6.QtCore` met "DLL load failed / Kan opgegeven procedure niet vinden".
+
+`pose_landmarker_full.task` (het MediaPipe pose-model, ~9.4 MB) moet in dezelfde map als het script staan. Het zit al in deze map. Als het ontbreekt, download het opnieuw met:
+```
+https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task
+```
+of geef een alternatief pad via `--model`.
+
+## Belangrijke valkuil: MediaPipe API
+
+Dit script gebruikt de **nieuwe MediaPipe Tasks API** (`mediapipe.tasks.python.vision.PoseLandmarker`), niet de oude `mp.solutions.pose` API. De oude "Solutions" API is verwijderd uit recente mediapipe-wheels (hier: mediapipe 0.10.35 op Python 3.14) — `mp.solutions` bestaat simpelweg niet meer in deze omgeving. Voeg dus geen code toe die op `mp.solutions.*` steunt; gebruik `PoseLandmarker.create_from_options(...)` met `running_mode=VIDEO` en `detect_for_video(mp_image, timestamp_ms)`, zoals in `analyseer_video()`.
+
+`cv2.putText` (Hershey-fonts) ondersteunt geen Unicode zoals `°` — dat rendert als `??`. Gebruik `"deg"` i.p.v. het gradensymbool in **on-screen tekst die met `cv2.putText` getekend wordt** (in `teken_hud`/`teken_been_overlay`). Dit geldt niet voor Qt-widgets in `schaats_gui.py` (QLabel etc. renderen `°` gewoon prima) — alleen voor tekst die via OpenCV op de frame-pixels wordt getekend.
+
+## Architectuur
+
+### `schaats_analyse.py` — analyse-kern + CLI
+
+De analyse is een **pijplijn in drie stappen**, samengebracht in **`analyseer()`** (retourneert `(VideoInfo, lijst[FrameResultaat])`):
+
+**Stap 1 — detectie + tracking (`analyseer_frames()`, generator).** Per frame draait `landmarker.detect_for_video()` met **`num_poses` > 1** (default 5): MediaPipe detecteert álle schaatsers in beeld. Een eigen **`DoelTracker`** kiest telkens de juiste pose: hij houdt een torso-centroïde (schouders+heupen, indices in `TORSO_IDX`) bij, voorspelt de volgende positie met een constante-snelheidsmodel, en koppelt de dichtstbijzijnde pose binnen een afstandspoort (`TRACK_GATE`). Zo springt de tracking niet over naar een andere schaatser als ze kruisen. Seeden gebeurt op een meegegeven `doel_punt` (muisklik in de GUI) of anders de grootste schaatser; na langdurig verlies (`TRACK_HERVIND_S`) wordt opnieuw geseed. Deze stap vult per `FrameResultaat` alléén de ruwe landmarks (`lm`) + `pose_gevonden` — nog géén afgeleiden.
+
+**Stap 2 — opschonen + offline smoothing (`smooth_landmarks_offline()`).** Omdat dit een batch-tool is (alle frames beschikbaar), verwerken we per landmark het hele traject. Eerst worden **onbetrouwbare frames** eruit gehaald: lage `visibility` (< `VIS_MIN`) óf een **occlusie-uitschieter** (Hampel-mediaanfilter, `_hampel_uitschieters` — vangt het geval dat bv. een arm vóór de heup schuift en het gewricht kortstondig verspringt). Die worden lineair weg-geïnterpoleerd (`_interpoleer_onbetrouwbaar`) — maar **alleen korte reeksen** (≤ `INTERP_MAX_S`, via `_begrens_interpolatie`): een lange onbetrouwbare reeks of een reeks aan een segmentrand houdt de ruwe detectie, omdat een lange rechte-lijn-interpolatie of een vastgeklemde rand het hele skelet náást de schaatser zet. Daarbovenop zit een **blurframe-vangnet**: zakt in één frame de visibility van het merendeel van de data-dragende gewrichten tegelijk onder `VIS_MIN` (fractie < `BLUR_FRAME_FRAC`), dan is dat een gecorreleerde confidence-dip door bewegingsonscherpte — géén occlusie — en wordt de complete ruwe detectie van dat frame vertrouwd (ook als Hampel gewrichten aanwees). Daarna smoothen we **bidirectioneel/zero-lag** met Savitzky–Golay (`_savgol`, puur numpy — scipy is niet aanwezig), per aaneengesloten segment van frames-mét-pose (niet over detectiegaten heen). Dit overschrijft `resultaat.lm` met opgeschoonde, gladde punten; jitter verdwijnt terwijl pieken (bv. volledige strekking) behouden blijven.
+
+**Stap 3 — afgeleiden (`verwerk_afgeleiden()`).** Ná de smoothing worden per frame de grootheden berekend uit de gladde `lm`:
+1. **`get_landmarks()`** → pixelcoördinaten (heup, knie, enkel, hiel, teen — links/rechts).
+2. **Afzetbeen-toewijzing** — standaard **cyclus-bewust** (`wijs_afzetbeen_cyclus`): het enkel-hoogteverschil (links − rechts) is een oscillator die met de slag meebeweegt; dat signaal wordt gesmoothd en met **hysterese** (`STANCE_BAND_FRAC`) omgezet naar een been, zodat het alleen wisselt bij een echte gewichtsoverdracht (geen per-frame geflikker). Per aaneengesloten pose-segment. De oude per-frame `bepaal_afzetbeen()` (laagste enkel + heupverschuiving-tiebreaker) blijft als fallback (`cyclus=False`).
+3. **`bereken_hoek_tov_ijs()`** → afzethoek (enkel→knie t.o.v. het ijs), plus `smooth_hoek` (gemiddelde over `--smooth` frames in `hoek_buffer`). De **horizon/camerakanteling** wordt hier van de gemeten hoek afgetrokken, zodat een scheve of schommelende camera de afzethoek niet vervuilt. De correctie zit **per frame** in `r.horizon_deg`, gezet door **`zet_horizon()`** (aangeroepen door `analyseer` ná de smoothing, gedeeld door beide backends):
+   - **Vast** (`horizon_deg`, default 0): één handmatig ingestelde hoek, overal gebroadcast. Bron: een getekende referentielijn (GUI: `HorizonKiezer` → `horizon_hoek_uit_lijn()`) of eenmalige detectie op één frame (`detecteer_ijslijn()`, Hough op het onderste beeld).
+   - **Auto per frame** (`auto_horizon=True`, GUI-checkbox "Automatisch per frame" / CLI `--auto-horizon`): **`bepaal_horizon_reeks()`** draait `detecteer_ijslijn()` op elk frame (losse video-pass) en maakt er een stabiel signaal van — detectiegaten en foute lijnen (Hampel) weg-geïnterpoleerd, daarna Savitzky–Golay over `HORIZON_SMOOTH_S` — zodat de horizon de trage schommeling volgt zonder per-frame Hough-jitter. Deze tweede pass deelt de voortgangsbalk met de detectie-pass (elk een helft) via **`fase_voortgang()`**, zodat het één doorlopende balk blijft; in beide backends toegepast.
+
+   Het is alleen een aftrek; voor grote kantelingen (>~10°) zou je de landmarks eerst moeten roteren. De getekende witte ijslijn in de overlay kantelt per frame mee (`teken_overlay_op_frame`/`teken_been_overlay` lezen `resultaat.horizon_deg`).
+4. **`detecteer_gewicht_op_been()`** combineert 3 signalen (enkel stijgt, knie >162°, heup verschuift weg boven `--threshold`) — bij 2+ signalen geldt het gewicht als "weg".
+
+Belangrijk: de afgeleiden worden dus **niet** meer tijdens de detectie-pass berekend, maar erna, zodat alles op de gesmoothte landmarks rust. De CLI (`analyseer_video()`) is daardoor **twee-pass**: eerst `analyseer()` (detectie+tracking+smoothing), dan de video opnieuw lezen om de overlay te tekenen en weg te schrijven. De GUI cachet de `FrameResultaat`-lijst en tekent live tijdens het afspelen/scrubben.
+
+**Tekenfuncties** (`teken_alle_landmarks`, `teken_been_overlay`, `teken_hud`, gebundeld in `teken_overlay_op_frame()`) zetten alles op een los frame: volledig skelet licht op de achtergrond, het afzetbeen dik uitgelicht (groen = gewicht erop, rood = afzet voltooid) met hoeklijn, en een HUD-paneel linksboven met tijd/hoeken/status. `teken_overlay_op_frame()` heeft per laag een aan/uit-vlag (`toon_skelet`/`toon_afzetbeen`/`toon_hud`) en wordt gedeeld door CLI én GUI.
+
+**`segmenteer_afzetten()`** groepeert de per-frame resultaten tot `AfzetEvent`s: aaneengesloten frames waarin hetzelfde been afzetbeen is én het gewicht er nog op zit (`gewicht_erop`). De hoek van een event is de gesmoothte hoek bij afzet-voltooiing (laatste frame van de reeks); `min_hoek`/`max_hoek` zijn het bereik binnen die afzet. Dit is de databron voor de tabel in de GUI.
+
+**Alternatie-feedback (`forceer_alternerend()`, standaard aan in `segmenteer_afzetten`).** Schaatsen is altijd L-R-L-R, dus twee gelijk-been events achter elkaar is onmogelijk. Per zo'n paar wordt de tussenruimte geïnspecteerd: was het andere been dáár niet het afzetbeen en is het gat klein → **opgesplitste afzet, samenvoegen** (`_merge_events`, `opmerking="samengevoegd"`); was het andere been kort wél afzetbeen (die korte afzet is door `min_lengte` weggefilterd) of is het gat groot → **gemiste tegen-afzet, markeren** (`opmerking="gemiste tegenafzet?"`, niet wegpoetsen). De GUI kleurt gemarkeerde rijen en telt ze in de statistiek. `AfzetEvent.opmerking` draagt deze status.
+
+State tussen frames (nodig voor de heuristieken) wordt in `verwerk_afgeleiden()` bijgehouden in `deque`'s met een vaste maxlen: `enkel_hist` (per been, 10 frames), `heup_hist` (10 frames), `hoek_buffer` (`--smooth` frames); bij een detectiegat worden die geleegd zodat er niet over het gat heen wordt vergeleken.
+
+**Tuning-constanten** (module-level in `schaats_analyse.py`): `NUM_POSES_DEFAULT` (max. te detecteren schaatsers), `TRACK_GATE` (max. genormaliseerde sprong per frame voordat de tracker "coast" i.p.v. overspringt), `TRACK_HERVIND_S` (verliesduur vóór herseeden), `SMOOTH_WINDOW_S`/`SMOOTH_POLY` (Savitzky–Golay vensterlengte in seconden + polynoomorde). CLI-vlaggen: `--num-poses`, `--heavy` (gebruikt `pose_landmarker_heavy.task`), `--target X,Y` (genormaliseerd startpunt), `--no-smooth`.
+
+`POSE_CONNECTIONS` (module-level) komt uit `mp_vision.PoseLandmarksConnections.POSE_LANDMARKS` en wordt gebruikt om het skelet te tekenen, omdat de Tasks API geen kant-en-klare `draw_landmarks()`-helper meer heeft zoals de oude Solutions API.
+
+### `schaats_yolo.py` — YOLO-pose + ByteTrack-backend met offline doelkeuze
+
+Alternatieve **detectie+tracking-stap** die stap 1 van de MediaPipe-pijplijn vervangt; stap 2 (offline smoothing) en 3 (afgeleiden) uit `schaats_analyse.py` worden hergebruikt. `analyseer()` heeft een **signatuur-compatibele** interface met `schaats_analyse.analyseer()` (het MediaPipe `model_pad`- en `num_poses`-argument worden genegeerd) en retourneert `(VideoInfo, lijst[FrameResultaat])`.
+
+Omdat dit een batch-tool is, gebeurt de doelkeuze **offline/globaal** i.p.v. streaming per frame — dat is de kern van de robuustheid:
+
+1. **Detectiepass op hoge resolutie (`_detecteer_alles`, `DETECT_IMGSZ`=1280).** `model.track(..., persist=True, tracker='bytetrack.yaml', imgsz=1280)` over de hele video; per frame worden álle personen bewaard als `Detectie` (ByteTrack-ID, centroid, bbox, area, MediaPipe-33-landmarks én torso-kleurhistogram). Op de standaard 640 worden verre/bewegingsonscherpe schaatsers simpelweg níet gedetecteerd (op de testvideo: frames 0–3 volledig gemist) — op 1280 wel. Kost ~2 s/frame op CPU met yolo11x-pose.
+2. **Pakkleur (`_torso_hist`, `KleurReferentie`).** HSV-histogram (`KLEUR_BINS` 8×4×3, L1-genormaliseerd) van de torso-polygon (schouders→heupen; fallback: bovenstuk bbox), vergeleken met 1 − Bhattacharyya (`_hist_sim`). Gevalideerd op de testvideo: doelschaatser scoort 0.54–1.0 tegen z'n eigen referentie, de andere schaatser ≤ 0.34. De referentie is een lopend gemiddelde van de laatste `REF_HIST_N` doel-histogrammen (verdisconteert schaal-/belichtingsverandering zonder naar een ander te kunnen driften).
+3. **Tracklet-splits op kleur (`_splits_op_kleur`).** ByteTrack "steelt" bij kruisende schaatsers geregeld het ID van de ander (op de testvideo: ID 4 wisselde op frame ~32 geruisloos van de zwarte naar de wit/rode schaatser). Daarom wordt elk tracklet geknipt waar de pakkleur `KLEUR_SPLIT_N` frames achtereen onder `KLEUR_SPLIT_MIN` zakt; korte dips (occlusie-mix) blijven behouden.
+4. **Seed (`_kies_seed`).** Met muisklik: chronologisch het eerste tracklet waarvan de bbox het klikpunt bevat. Zonder klik: de **grootste beweger** — mediane area × padlengte, met `MIN_VERPLAATSING` als ondergrens — zodat statische omstanders langs de boarding (die in beeld gróter kunnen zijn dan de verre schaatser) nooit gekozen worden.
+5. **Keten-stitching (`_stik_keten`).** Vanaf het seed-tracklet worden tracklets voor- én achterwaarts aaneengeregen. Een kandidaat telt alleen als (a) de pakkleur bij de referentie past (≥ `KLEUR_MATCH_MIN`) én (b) zijn startpositie binnen de poort van de constante-snelheid-extrapolatie over het gat ligt (`STITCH_GATE_BASIS` + `STITCH_GATE_GROEI`·gat — de rijrichting van een schaatser is voorspelbaar). Score = kleur-similarity − afstandspenalty.
+6. **Crop-verfijningspass (`_verfijn_landmarks`, `verfijn=True` default).** De video wordt opnieuw gelezen; per doel-frame gaat een vierkante uitsnede (`VERFIJN_MARGE` × bbox, min. `VERFIJN_MIN_PX`) door `model.predict(imgsz=VERFIJN_IMGSZ)`. De schaatser vult dan het inferentiebeeld → aanzienlijk nauwkeurigere keypoints (dus hoeken). Detectiegaten ≤ `GAP_VUL_S` krijgen een geïnterpoleerde crop en worden zo alsnog gevuld. `_kies_in_crop` gebruikt de kleurreferentie als poortwachter zodat een tweede schaatser in de uitsnede nooit wordt overgenomen; zonder kleurmatch wordt alleen een kandidaat vrijwel exact op de verwachte plek geaccepteerd, anders liever geen verfijning (pass-1-landmarks blijven dan staan).
+
+De voortgangsbalk verdeelt de passes (detectie / verfijning / evt. auto-horizon) in gelijke schijven via `fase_voortgang`. Resultaat op de testvideo ("Schaats frontaal.MOV", twee kruisende schaatsers + omstanders): 100% pose-dekking en perfect L-R-alternerende afzet-events, waar de oude streaming ID-volger detectiegaten en een schaatser-verwisseling had.
+
+- **COCO-17 → MediaPipe-33 mapping** (`COCO_NAAR_MP` in `_coco_naar_landmarks()`): schouders/ellebogen/polsen/heupen/knieën/enkels + neus worden op hun MediaPipe-index gezet; **hiel/teen bestaan niet in COCO** en worden op de enkel gelegd met `visibility=0` (niet getekend — `teken_alle_landmarks` slaat lage-visibility punten/connecties over — en niet gebruikt in de metingen). Ongebruikte 33-slots houden visibility 0. Hierdoor werken `get_landmarks`, de smoothing en het tekenen ongewijzigd op de YOLO-output.
+- `POSE_CONNECTIONS` staat nu **hardcoded** in `schaats_analyse.py` (voorheen uit `mp_vision` gehaald) en de mediapipe-import is **lazy** (lokaal in `analyseer_frames`), zodat `schaats_analyse.py` importeerbaar is in de YOLO-venv zónder mediapipe.
+
+### `schaats_perspectief.py` — perspectiefcorrectie via baanlijnen (fase 7)
+
+De afzethoek wordt zonder correctie in het **beeldvlak** gemeten; staat de camera niet loodrecht op het bewegingsvlak, dan vertekent het perspectief de hoek én verandert die vertekening met de positie van de schaatser in beeld. De correctie kalibreert de camera uit nagetrokken baanlijnen (vaste camera, één kalibratie per video) en rekent de hoek per frame terug naar het echte ijsvlak.
+
+- **Kalibratie (`kalibreer_uit_lijnen`)**: rijrichting-lijnen → verdwijnpunt V1, dwarslijnen → V2; V1–V2 = verdwijnlijn van het ijsvlak (ware horizon); f uit orthogonale verdwijnpunten (principal point in het midden, vierkante pixels); homografie + camerapositie met de lijnafstand (default 4.0 m) als schaal. **Minimale configuraties**: 2 rij + 2 dwars, óf 3 rij + 1 dwars (cross-ratio-verdwijnlijn), óf 2 rij + 1 dwars + opgegeven `f_px` — met 2+1 zonder f is het stelsel 1 DOF te kort, en bij een (bijna) **frontale camera** ligt V2 op oneindig en is zelfkalibratie van f principieel onmogelijk (→ `f_px` verplicht; de foutmeldingen leggen dit uit).
+- **Reconstructie (`reconstrueer_hoek`)**: enkel via de kijkstraal op het vlak `enkel_hoogte` (0.10 m — malleolus + schaats) boven het ijs; de knie-kijkstraal wordt geprikt met één van twee aannames achter één interface: `methode='onderbeen'` (bol met straal onderbeenlengte; twee snijpunten → keuzeregel rijrichting/minste-correctie, nog onderzoekswerk) of `'beenvlak'` (verticaal vlak in de rijrichting). Onderbeenlengte bij voorkeur opgemeten of `onderbeen_uit_lichaamslengte()` (0.246×, Winter); `kalibreer_onderbeenlengte()` onderschat systematisch (dorsiflexie) en is alleen een sanity-check. **Kwaliteitsvlaggen**: `conditie_deg` (been bijna in de kijkrichting) en `vlak_conditie_deg` (kijkstraal bijna in het beenvlak — juist bij frontale camera + rijrichting-vlak).
+- **Pijplijnkoppeling (opt-in, beide backends)**: `PerspectiefConfig` (in `schaats_analyse.py`) gaat mee door `analyseer(..., perspectief=...)` → `zet_horizon` (kanteling uit de kalibratie; auto-horizon vervalt) en `verwerk_afgeleiden` → `_perspectief_hoek` vervangt `bereken_hoek_tov_ijs` op dezelfde plek. De reconstructie werkt op **float-pixels uit `r.lm`** (`_lm_px`), niet de int-getrunceerde `lm_data` — op afstand is het onderbeen maar tientallen pixels. `_wereldtraject` prikt de **standbeen**-enkel op het ijs (zweefbeen hangt hoger → zou snelheid vertekenen) → `r.wereld_xy`, `r.snelheid`, rijrichting (met de baanlijn-richting als terugval). Nieuwe velden: `FrameResultaat.hoek_correctie/hoek_betrouwbaar/wereld_xy/snelheid`, `AfzetEvent.correctie/betrouwbaar/snelheid/slaglengte` (gevuld in `segmenteer_afzetten`); HUD toont correctie/snelheid/onbetrouwbaar-waarschuwing. Zonder `perspectief` is het gedrag byte-voor-byte als voorheen.
+- **GUI**: startpagina-checkbox "Perspectiefcorrectie via baanlijnen" → `KalibratieKiezer`-dialoog (vervangt de horizon-stap): lijnen natrekken met twee klikken per lijn (baanlijn/dwarslijn-radio), live kalibratie-feedback + getekende ware horizon, velden voor lijnafstand, brandpuntsafstand (0 = automatisch), methode en lichaams-/onderbeenlengte. Tabel krijgt dan kolommen Corr./v/Slag; rijen met onbetrouwbare hoek kleuren blauw.
+
+### `schaats_gui.py` — PySide6-GUI
+
+- **`AnalyseWorker`** (`QThread`) draait `analyseer()` + `segmenteer_afzetten()` op de achtergrond en emit `voortgang`/`klaar`/`fout`-signalen, zodat de UI niet blokkeert tijdens analyseren.
+- **`DoelKiezer`** (`QDialog`) toont vóór de analyse het eerste frame; de gebruiker klikt op de te volgen schaatser (genormaliseerd `doel_punt`, doorgegeven aan `analyseer()`) of kiest "volg grootste". Een **heavy-model**-checkbox op de startpagina wisselt naar `pose_landmarker_heavy.task` (als aanwezig, anders waarschuwing + terug naar full). Een **"Geen landmark-smoothing"**-checkbox slaat `smooth_landmarks_offline()` over (equivalent van CLI `--no-smooth`) — diagnose-stand: het skelet volgt de ruwe detecties exact, dus als het dan nog naast de schaatser staat zit het probleem in de detectie, niet in de opschoning.
+- **`MainWindow`** cachet na analyse alleen de `FrameResultaat`-lijst en `AfzetEvent`-lijst (geen pixeldata) in het geheugen. Voor weergave heeft het een eigen `cv2.VideoCapture` (`cap_weergave`) die per frame het originele beeld opnieuw leest; de overlay wordt daar live overheen getekend met `teken_overlay_op_frame()` — vandaar dat toggles (skelet/afzetbeen/HUD) direct werken zonder herberekening.
+- **Navigatie** (`_lees_frame_exact`): er wordt **nooit** met `cv2.CAP_PROP_POS_FRAMES` geseekt — op VFR-video's (bv. iPhone-.MOV) levert zo'n seek soms het beeld van een náástgelegen frame terwijl OpenCV wél het gevraagde nummer rapporteert; het (correcte) skelet lijkt dan achter te lopen op het beeld, ook tijdens het afspelen erna, want de fout blijft constant. In plaats daarvan houdt de GUI een sequentiële cursor bij (`_weergave_pos`): vooruit spoelen met `grab()`, achteruit springen door de capture te heropenen en opnieuw te spoelen. Het ruwe huidige frame wordt gecachet (`_laatste_frame`) zodat laag-toggles alleen de overlay opnieuw tekenen zonder te herlezen.
+- **Frame → Qt-beeld**: `QImage(frame.data, w, h, stride, QImage.Format_BGR888).copy()` — rechtstreeks vanuit BGR (geen `cv2.cvtColor` nodig), met `.copy()` zodat de QImage niet naar een numpy-buffer wijst die zo weer kan worden hergebruikt.
+- **Tabel ↔ video zijn twee-richtingsverkeer**: een rij-klik seekt de video; tijdens afspelen wordt de rij van het actieve afzet-event gemarkeerd (`_markeer_actieve_rij`), met `blockSignals` om een signaal-lus te voorkomen.

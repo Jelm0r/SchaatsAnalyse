@@ -1,0 +1,243 @@
+# Roadmap SchaatsAnalyse
+
+Plan voor de volgende ontwikkelfase, in volgorde van bouwen. Gemaakte keuzes (juli 2026):
+
+- **Delen**: één gedeelde cloudmap (OneDrive/Dropbox/netwerkschijf) met daarin een SQLite-bestand + mediabestanden. Geen server, geen accounts.
+- **Video's**: worden mee-gekopieerd naar de gedeelde map, zodat elke trainer de analyse mét beeld kan terugkijken.
+- **Schaal**: één team (±5–30 schaatsers, 1–5 trainers). Ontwerp mag daarop leunen; geen rechten-/rollensysteem nodig.
+- **Skelet-editor**: correcties vloeien uit naar buurframes met een **instelbaar venster** (0 = alleen het bewerkte frame).
+- **Opnameopstelling (aanname sinds juli 2026)**: er wordt **altijd recht van voren** gefilmd en de camera staat **altijd precies horizontaal**. Daardoor vervalt de noodzaak van camerakanteling-correctie (horizon) en perspectiefcorrectie in de dagelijkse workflow. Fases 5 en 7 blijven staan als **nice-to-have** voor eventuele latere opstellingen (schuine/schommelende camera), maar zijn **nu geen prioriteit**.
+
+De fases bouwen op elkaar: 0 → 1 → 2 kunnen niet van volgorde wisselen; 3 (skelet-editor) en 4 (delen) zijn daarna onafhankelijk van elkaar te bouwen. Fase 6 (sneller analyseren) staat los van de rest en kan op elk moment, ook eerder. Fase 5 (horizon-tracking) en 7 (perspectiefcorrectie) zijn onder de vaste opnameopstelling **nice-to-have** (zie hierboven); fase 7 deelt bouwstenen met fase 5 (lijnen aanwijzen/tracken) en omvat de horizoncorrectie als speciaal geval.
+
+---
+
+## Fase 0 — Voorbereiding: resultaten serialiseerbaar maken
+
+Alles hierna staat of valt met het kunnen **opslaan en terugladen** van een analyse. Nu leeft de `FrameResultaat`-lijst alleen in het geheugen van de GUI, en het `lm`-veld bevat een MediaPipe-landmarkobject dat niet direct naar schijf kan.
+
+**Te bouwen (in `schaats_analyse.py`):**
+
+1. `resultaten_naar_arrays(resultaten)` → dict met numpy-arrays:
+   - `landmarks`: `(n_frames, 33, 3)` float32 — genormaliseerde x, y, visibility (z gebruiken we nergens);
+   - `pose_gevonden`: `(n_frames,)` bool; `horizon_deg`: `(n_frames,)` float32.
+   - Afgeleiden (been/hoek/gewicht/events) **niet** opslaan als bron van waarheid: die zijn herberekenbaar uit de landmarks via `verwerk_afgeleiden()` + `segmenteer_afzetten()`. Wel cachen (zie fase 1) voor snelle weergave.
+2. `arrays_naar_resultaten(arrays, info)` → verse `FrameResultaat`-lijst met een **plain landmark-type** (bv. een klein `Landmark`-dataclassje met `x/y/visibility`) i.p.v. het MediaPipe-object. Alle bestaande code (`get_landmarks`, `teken_alle_landmarks`, smoothing) leest alleen `.x/.y/.visibility`, dus dit werkt zonder verdere aanpassing — wel even verifiëren. De YOLO-backend (`_coco_naar_landmarks`) maakt al eigen landmark-objecten, dus dit trekt beide backends gelijk.
+3. Opslag als **`.npz`** (`np.savez_compressed`): een video van 3000 frames is ± 1–2 MB. Los bestand naast de video, níet als blob in SQLite — houdt de database klein en cloudsync-vriendelijk.
+4. `verwerk_afgeleiden()` moet los aanroepbaar zijn op een teruggeladen lijst (is hij in essentie al — controleren dat er geen verborgen afhankelijkheid van de detectie-pass is).
+
+**Klaar wanneer:** een analyse wegschrijven naar `.npz`, GUI herstarten, terugladen en identieke tabel/grafiek/overlay zien — zonder de video opnieuw te analyseren.
+
+---
+
+## Fase 1 — Profielen + database
+
+**Doel:** elke schaatser een profiel; elke analyse hoort bij een profiel.
+
+### Opslagstructuur (de "bibliotheek")
+
+Eén map, later te delen via de cloud (fase 4). Pad instelbaar; standaard lokaal, bv. `Documenten\SchaatsAnalyse`:
+
+```
+<bibliotheek>/
+  schaats.db                 ← SQLite: profielen, analyses, events-cache
+  media/
+    <analyse-id>/
+      video.mp4              ← gekopieerd origineel (naam behouden mag ook)
+      landmarks.npz          ← gesmoothte landmarks (fase 0)
+      landmarks_ruw.npz      ← idem, vóór handmatige edits (fase 3)
+```
+
+`analyse-id` = een UUID, zodat twee trainers nooit botsende mapnamen maken.
+
+### Databaseschema (stdlib `sqlite3`, werkt in beide venvs, geen nieuwe dependency)
+
+```sql
+schaatser(id, naam, geboortejaar, notities, aangemaakt_op)
+analyse(id TEXT PRIMARY KEY,          -- UUID, tevens mapnaam onder media/
+        schaatser_id, titel, datum,
+        video_bestand,                 -- relatief pad binnen de bibliotheek
+        w, h, fps, totaal_frames,
+        backend,                       -- 'yolo' | 'mediapipe'
+        instellingen_json,             -- doel_punt, horizon, smooth, ...
+        aangemaakt_door,               -- trainersnaam (vrije tekst, zie fase 4)
+        bewerkt,                       -- 0/1: zijn er handmatige skelet-edits
+        aangemaakt_op)
+afzet_event_cache(analyse_id, idx, been, start_frame, eind_frame,
+                  hoek, min_hoek, max_hoek, opmerking)
+```
+
+`afzet_event_cache` is puur voor snelle lijstweergave ("laatste analyse: gem. 42°") zonder eerst de `.npz` te laden; bij openen van een analyse wordt alles vers herberekend uit de landmarks.
+
+Nieuwe module **`schaats_db.py`**: `open_db(pad)` (maakt schema aan indien nodig), CRUD voor schaatsers/analyses, `sla_analyse_op(...)` (kopieert video + schrijft npz + insert in één transactie), `laad_analyse(id)`. Houd alle SQL hier; GUI praat alleen met deze module.
+
+### GUI-wijzigingen (`schaats_gui.py`)
+
+- **Nieuwe startpagina = bibliotheek**: links de schaatserslijst (+ knop "nieuwe schaatser"), rechts de analyses van de geselecteerde schaatser (datum, titel, aantal afzetten, gem. hoek uit de cache). Dubbelklik → analyse openen.
+- **"Nieuwe analyse"-flow**: schaatser kiezen (of aanmaken) → video kiezen → bestaande `DoelKiezer` → `AnalyseWorker` draait → bij `klaar` automatisch opslaan in de bibliotheek → analyse-weergave openen. De huidige weergavepagina blijft vrijwel ongewijzigd; alleen leest `cap_weergave` voortaan de gekopieerde video uit `media/<id>/`.
+- Analyse hernoemen/verwijderen (verwijderen = DB-rij + mediamap, met bevestiging).
+- Video-kopie kan bij grote bestanden even duren → in de worker-thread doen, niet op de UI-thread.
+
+**Klaar wanneer:** volledige cyclus werkt — schaatser aanmaken, video analyseren, afsluiten, heropenen, analyse uit het profiel terugkijken.
+
+---
+
+## Fase 2 — Profielweergave verrijken
+
+Klein maar waardevol vervolg op fase 1 (kan ook later):
+
+- **Voortgang over tijd**: grafiekje per schaatser met de gemiddelde/beste afzethoek per analyse-datum (data zit al in `afzet_event_cache`).
+- Notitieveld per analyse ("linkerbocht geoefend, wind tegen").
+- CSV-export per schaatser (alle analyses) naast de bestaande per-analyse-export.
+
+---
+
+## Fase 3 — Skelet-editor (punten verslepen)
+
+**Doel:** na een analyse kleine detectiefoutjes repareren door landmarkpunten te verslepen; werkt op elke uit de database geladen analyse.
+
+### Interactie
+
+- **Bewerk-knop** op de weergavepagina zet de editor aan: afspelen pauzeert, alle landmarks van het huidige frame krijgen sleepbare handles (cirkeltjes; grijpradius ± 12 px op schermresolutie).
+- Muis-events op het videolabel: widget-coördinaten → frame-coördinaten terugrekenen (let op de schaling/letterboxing van het weergavelabel — dit omrekenpad bestaat al half in `DoelKiezer`/`HorizonKiezer`, herbruikbaar maken).
+- Slepen werkt op de **gesmoothte** landmarks (wat je ziet is wat je bewerkt); de smoothing-stap wordt na een edit dus níet opnieuw gedraaid, anders wordt de correctie meteen weer weggepoetst.
+- Versleepte punten krijgen `visibility = 1.0` (een handmatig gezet punt is per definitie betrouwbaar) en een markering "handmatig" zodat ze in de overlay een ander randje kunnen krijgen.
+
+### Uitvloeien naar buurframes (instelbaar)
+
+- Spinbox "uitvloeien: ± N frames" (default 8, 0 = alleen dit frame).
+- De verplaatsing (delta-x, delta-y van dát punt) wordt over het venster gewogen toegepast met een cosinus-afbouw: frame op afstand `k` krijgt `delta * 0.5*(1+cos(pi*k/N))`. Geen sprong in de beweging, en op afstand N is het effect precies 0.
+- Uitvloeien stopt bij een detectiegat (frames zonder pose) — niet over gaten heen smeren, zelfde principe als de smoothing.
+
+### Herberekenen + opslaan
+
+- Na elke drop (muisknop los): `verwerk_afgeleiden()` + `segmenteer_afzetten()` opnieuw over de resultatenlijst → tabel, grafiek en HUD verversen live. Dit is puur numpy-werk over reeds gedetecteerde landmarks, ruim snel genoeg.
+- **Undo/redo**-stack (bewaar per edit: landmark-index, venster, deltas) — bij handwerk op 12 px-punten ga je gegarandeerd een keer missen.
+- **Opslaan**: gewijzigde landmarks → `landmarks.npz` overschrijven; het origineel staat in `landmarks_ruw.npz` (aangemaakt bij de eerste edit) zodat er een knop **"herstel origineel"** kan zijn. `analyse.bewerkt = 1` in de DB en de events-cache verversen.
+
+**Klaar wanneer:** een zichtbaar fout kniepunt in één sleepbeweging corrigeren, de hoektabel direct zien bijwerken, opslaan, heropenen — correctie staat er nog; "herstel origineel" zet alles terug.
+
+---
+
+## Fase 4 — Delen met meerdere trainers (gedeelde cloudmap)
+
+**Doel:** het hele team kijkt in dezelfde bibliotheek.
+
+### Aanpak
+
+- **Instellingenscherm**: bibliotheekpad kiezen. Elke trainer wijst dezelfde OneDrive-/Dropbox-/netwerkmap aan. Plus een veld "jouw naam" → gaat in `analyse.aangemaakt_door`. Beide onthouden in een lokaal configbestandje (`%APPDATA%\SchaatsAnalyse\config.json` — niet in de gedeelde map, want per gebruiker).
+- Omdat fase 1 alles al relatief t.o.v. de bibliotheekmap opslaat, is delen daarna vooral *configuratie*, geen herbouw. Dit is de reden om die padden-discipline vanaf fase 1 strikt te houden.
+
+### SQLite op een gesynchroniseerde map — de valkuilen en maatregelen
+
+SQLite is niet ontworpen voor gelijktijdig schrijven via cloudsync. Op teamschaal is dit prima beheersbaar, mits:
+
+1. **Geen WAL-mode** (`journal_mode=DELETE`): WAL maakt `-wal`/`-shm`-nevenbestanden die cloudsyncers half kunnen syncen → corruptiegevaar. DELETE-mode houdt het bij één bestand (plus een kortstondige journal).
+2. **Kort verbinden**: verbinding openen → transactie → direct sluiten, nooit een connectie open laten staan tijdens het browsen. Dan is het DB-bestand vrijwel altijd "in rust" voor de syncer.
+3. `busy_timeout` van een paar seconden voor het zeldzame geval dat twee trainers op hetzelfde moment schrijven via een echte netwerkschijf.
+4. **Conflictdetectie i.p.v. -preventie**: als OneDrive tóch een conflictkopie maakt (`schaats-<pc-naam>.db`), detecteer dat bij het opstarten en waarschuw. Omdat analyses UUID-mappen zijn en trainers zelden binnen dezelfde minuut schrijven, is de praktische kans klein; mediabestanden (video/npz) worden alleen aangemaakt, nooit door twee mensen tegelijk beschreven.
+5. **Vernieuwen-knop** in de bibliotheekweergave (DB opnieuw uitlezen) zodat je nieuwe analyses van een collega ziet zonder herstart. Automatisch pollen hoeft niet.
+
+### Bewust geaccepteerde beperkingen (bij deze schaal oké)
+
+- Geen accounts/rechten: iedereen met de map kan alles zien én verwijderen.
+- "Laatste schrijver wint" bij het tegelijk bewerken van precies dezelfde analyse (bv. beiden in de skelet-editor) — zeldzaam; desgewenst mitigeren met een simpel lock-bestandje (`media/<id>/.lock` met trainersnaam) dat een waarschuwing toont.
+- Grote video's syncen traag; wie net een analyse van een collega opent terwijl de video nog bin­nenkomt, krijgt een nette melding "video nog niet gesynchroniseerd" (bestaat het bestand + klopt de bestandsgrootte).
+
+**Upgradepad**: mocht het later tóch clubbreed worden (accounts, rechten, tegelijk schrijven), dan is de stap naar een gehoste Postgres (bv. Supabase) beperkt tot het vervangen van `schaats_db.py` + uploaden van de media — de rest van de app merkt daar niets van. Dáárom alle SQL in één module houden.
+
+---
+
+## Fase 5 — Betere stabilisatie: horizon via twee getrackte punten
+
+> **Nice-to-have (niet nu).** Sinds juli 2026 is de aanname dat de camera **altijd precies horizontaal** staat — dan is er geen camerakanteling om te corrigeren en is deze fase overbodig. Bewaard voor een eventuele latere opstelling met een schuine/schommelende camera; pas oppakken als die situatie zich echt voordoet.
+
+**Doel:** de auto-horizon betrouwbaarder maken. De huidige `bepaal_horizon_reeks()` doet per frame een Hough-lijndetectie op het onderste beeld — die pakt soms de verkeerde lijn (boarding-reclame, schaduwrand). Nieuw idee: de gebruiker wijst in het eerste frame **twee punten aan die in werkelijkheid horizontaal van elkaar staan** (bv. twee markeringen op de boarding); die twee punten worden door de hele video getrackt en de hoek van hun verbindingslijn ís per frame de camerakanteling.
+
+### Interactie
+
+- Derde horizon-modus naast "vast" en "automatisch per frame": **"track twee punten"**. De bestaande `HorizonKiezer`-dialoog wordt uitgebreid: de gebruiker klikt twee punten (zoals nu al een lijn getekend wordt), maar kiest nu "volg deze punten door de video".
+- Kies-tips in de dialoog: punten op **stilstaande, contrastrijke** details (boardingrand, lijnovergang, pilaar) die de hele video in beeld blijven — niet op ijs (spiegelend) of op personen.
+
+### Techniek
+
+1. **Tracking**: sparse Lucas–Kanade optical flow (`cv2.calcOpticalFlowPyrLK`) per punt, met een **forward-backward-check** (punt terug-tracken; wijkt de terugreis > 1–2 px af → frame als onbetrouwbaar markeren). LK is subpixel-nauwkeurig en goedkoop (verwaarloosbaar naast de pose-detectie).
+2. **Fallback per punt**: faalt LK (occlusie — bv. de schaatser schuift vóór het punt langs), dan template-matching (`cv2.matchTemplate`) in een zoekvenster rond de voorspelde positie; lukt ook dat niet → frame overslaan en later interpoleren.
+3. **Hoekreeks**: per frame `atan2(dy, dx)` van de twee getrackte punten, minus de hoek in het referentieframe (de aangeklikte stand = per definitie 0°... nee: = de wáre horizontaal, dus de gemeten hoek is direct de kanteling). Daarna dezelfde opschoning die er al is: Hampel-uitschieters + Savitzky–Golay (`bepaal_horizon_reeks`-machinerie hergebruiken), resultaat per frame in `r.horizon_deg` — de rest van de pijplijn (aftrek in `bereken_hoek_tov_ijs`, meekantelende ijslijn in de overlay) werkt dan ongewijzigd.
+4. **Punt raakt uit beeld** (pannende camera): detecteren wanneer een punt de framerand nadert en dan **overdragen op verse ankerpunten** — `cv2.goodFeaturesToTrack` in dezelfde beeldband zoekt nieuwe contrastrijke punten, die de op dat moment geldende hoekcalibratie erven. Zo blijft de meting doorlopen zonder dat de gebruiker opnieuw hoeft te klikken. Dit is de lastigste stap; eerste versie mag hem weglaten en gewoon waarschuwen + de laatste hoek vasthouden.
+5. Als aparte, snelle video-pass geïntegreerd in `fase_voortgang()` (zoals de bestaande auto-horizon-pass), in beide backends.
+
+**Klaar wanneer:** op een testvideo met zichtbaar schommelende camera geeft de getrackte-puntenmodus een vloeiende, geloofwaardige `horizon_deg`-reeks (witte ijslijn in de overlay blijft op de echte ijsrand liggen), ook wanneer de schaatser één van de punten kort passeert.
+
+---
+
+## Fase 6 — Sneller analyseren (meer uit de CPU/iGPU halen)
+
+**Doel:** de YOLO-analyse (nu ~2 s/frame op CPU met yolo11x-pose op 1280) fors versnellen. Hardware hier: **Ryzen 7 7735U** (8 cores/16 threads) met **geïntegreerde Radeon 680M** — geen NVIDIA, dus geen CUDA; de realistische route is geoptimaliseerde CPU-inference en eventueel de iGPU via DirectML.
+
+In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste testvideo (zie meetprotocol hieronder):
+
+1. **Batch-inference in de verfijningspass** (`_verfijn_landmarks`): de crops worden nu één voor één door `model.predict()` gehaald; ultralytics accepteert een lijst beelden. Crops verzamelen en in batches van bv. 8–16 voorspellen → minder overhead per frame, betere corebenutting. Weinig code, geen kwaliteitsverlies.
+2. **Prefetch-thread voor het videolezen**: `cv2.VideoCapture.read()` + resize in een aparte thread met een kleine queue, zodat decoderen en inference elkaar overlappen i.p.v. afwisselen. Geldt voor alle passes (detectie, verfijning, auto-horizon).
+3. **Lichter model voor de detectiepass, x voor de verfijning**: pass 1 hoeft alleen bboxes/track-IDs en globale keypoints te leveren; de nauwkeurige hoeken komen uit de crop-pass. `yolo11m-pose` (of zelfs `s`) op 1280 voor pass 1 + `yolo11x-pose` voor de crops kan een flink deel van de looptijd schelen. **Wel valideren** dat pass 1 de verre/bewegingsonscherpe schaatser nog vindt (dat was de reden voor 1280 × x) — op de testvideo controleren dat de dekking 100% blijft en de events identiek.
+4. **Geëxporteerd model i.p.v. PyTorch**: `model.export(format=...)` van ultralytics en dan inferen met:
+   - **OpenVINO** (`format="openvino"`): geoptimaliseerde CPU-runtime, werkt ook op AMD-CPU's; typisch 1.5–3× sneller dan torch-CPU, zelfde gewichten dus zelfde output (kleine numerieke afwijkingen).
+   - **ONNX Runtime + DirectML** (`format="onnx"`, `onnxruntime-directml`): draait op de Radeon-iGPU. Potentieel de grootste sprong, maar iGPU-drivers/DirectML zijn de wisselvalligste van dit lijstje — als experiment plannen, met CPU-pad als terugval.
+   Beide passen in `schaats_yolo.py` achter een klein abstractielaagje rond `model.track`/`model.predict`; ByteTrack-tracking blijft via ultralytics werken met een geëxporteerd model.
+5. **GUI-keuze "snel / nauwkeurig"**: instelbaar profiel op de startpagina (snel = m-model + kleinere `DETECT_IMGSZ`; nauwkeurig = huidige instellingen). De gebruiker kiest per video of het om een snelle indruk of een precieze meting gaat.
+6. **Quick wins checken** (kost bijna niets): `torch.set_num_threads(16)` expliciet zetten (torch pakt soms alleen de fysieke cores), OpenCV's threading niet laten concurreren tijdens inference (`cv2.setNumThreads(2)` tijdens de YOLO-pass), en laptop aan de lader + Windows-energiemodus "beste prestaties" (een U-chip throttlet fors op accu).
+
+**Meetprotocol**: één vaste testvideo ("Schaats frontaal.MOV"), per stap noteren: totale analysetijd, pose-dekking (%), en of de afzet-events (aantal, been-volgorde, hoeken ±1°) gelijk blijven aan de referentie-run. Versnelling die de meting verandert is geen versnelling.
+
+**Verwachting**: stappen 1+2+6 samen grofweg 1.5–2×; stap 3 nog eens ~2× op de detectiepass; stap 4 daar bovenop 1.5–3×. Ergens tussen "half uur per video" en "paar minuten per video" moet haalbaar zijn.
+
+**Klaar wanneer:** de totale analysetijd van de testvideo minstens gehalveerd is zónder verlies van dekking of meetkwaliteit, en de snelste acceptabele configuratie als default staat.
+
+---
+
+## Fase 7 — Perspectiefcorrectie via baanlijnen
+
+> **Nice-to-have (niet nu).** Sinds juli 2026 is de aanname dat er **altijd recht van voren** wordt gefilmd met een **horizontale** camera. Onder die opstelling kijkt de camera nagenoeg loodrecht op het bewegingsvlak en is de perspectiefvertekening klein, dus de dagelijkse workflow heeft deze correctie niet nodig. De bouwsteen (`schaats_perspectief.py` + zelftest) staat er al en blijft opt-in beschikbaar; volledige integratie is bewaard voor een eventuele latere opstelling met een schuin geplaatste camera. **Nu geen prioriteit.**
+
+**Probleem:** de afzet- en kniehoek worden nu gemeten in het **beeldvlak** — de 2D-projectie van het been. Dat klopt alleen als de camera loodrecht op het bewegingsvlak van het been kijkt. Staat de camera niet midden in de baan (of komt de schaatser niet recht op de camera af), dan kijk je onder een schuine hoek en verkort het perspectief het been in één richting: de gemeten hoek wijkt structureel af van de echte, en — verraderlijker — de afwijking **verandert met de positie van de schaatser in beeld**. Dezelfde afzet lijkt dan aan het begin van de passage een andere hoek te hebben dan aan het eind. De bestaande horizoncorrectie repareert alleen camerarotatie om de kijkas (roll), niet deze vertekening.
+
+**Kernidee:** de lijnen in het ijs zijn rechte, evenwijdige lijnen met bekende onderlinge afstand (standaard baanbreedte ± 4 m). Daaruit is de camerastand t.o.v. het ijsvlak te kalibreren, en met die kalibratie kunnen de hoeken per frame worden teruggerekend naar het echte, onvertekende vlak.
+
+### Stappen
+
+1. **Lijnen aanwijzen (interactie).** Uitbreiding van de bestaande `HorizonKiezer`-dialoog: de gebruiker trekt op één frame twee (of meer) baanlijnen na die in werkelijkheid evenwijdig lopen in de rijrichting, plus liefst één dwarslijn (start-/finishlijn, bochtmarkering). Optioneel geassisteerd met Hough-detectie (die machinerie bestaat al in `detecteer_ijslijn()`), maar handmatig natrekken is de betrouwbare basis — lijnen op het ijs zijn contrastarm en deels bekrast.
+2. **Kalibratie uit de lijnen.** Evenwijdige lijnen snijden in beeld in een verdwijnpunt; de rijrichting-lijnen geven verdwijnpunt V1, de dwarslijn(en) V2. De lijn V1–V2 is de **verdwijnlijn van het ijsvlak = de ware horizon** (bijvangst: dit vervangt de Hough-horizonhack door iets principiëlers). Met de gebruikelijke aannames (principal point in het beeldmidden, vierkante pixels) volgt uit twee orthogonale verdwijnpunten een schatting van de brandpuntsafstand, en daarmee de volledige **homografie ijsvlak ↔ wereldvlak**. De bekende baanbreedte zet er schaal (meters) op.
+3. **Hoekcorrectie.** De enkel staat (vrijwel) op het ijs → via de homografie is zijn wereldpositie bekend. De knie is een kijkstraal vanuit de camera; om die in 3D te prikken is één extra aanname nodig. Twee kandidaten, te kiezen na experiment:
+   - **(a) Constante onderbeenlengte**: de afstand enkel–knie is per schaatser vast. Kalibreer die lengte op frames waar het been vrijwel loodrecht op de kijkrichting staat (daar is de projectie onvertekend), en snijd daarna per frame de knie-kijkstraal met de bol rond de enkel met die straal. Geometrisch het zuiverst.
+   - **(b) Beenvlak-aanname**: neem aan dat het onderbeen in een verticaal vlak ligt met bekende oriëntatie (bv. de rijrichting uit het getrackte traject, of dwars daarop tijdens de zijwaartse afzet). Eenvoudiger, maar de aanname is bij een schaatsafzet (schuin zijwaarts-achterwaarts) discutabel — daarom eerst op testmateriaal verifiëren welke variant stabieler is.
+   Uit de gereconstrueerde 3D-punten volgt de echte hoek t.o.v. het ijsvlak; die vervangt de beeldvlak-hoek in `bereken_hoek_tov_ijs()`-verband (zelfde plek in de pijplijn als de huidige horizonaftrek, dus stap 2/3 van de kern blijven ongewijzigd).
+4. **Kwaliteitsindicator.** De correctie is groot en gevoelig wanneer de schaatser ver van de camera-as zit; toon per frame (HUD) en per afzet-event (tabel) hoe groot de toegepaste correctie was, en markeer metingen waar de geometrie onbetrouwbaar wordt (been bijna in de kijkrichting — dan is géén enkele correctie nog te redden).
+5. **Bijvangst (gratis erbij):** met een metrische ijsvlak-homografie is de positie van de schaatser op de baan per frame bekend → echte **snelheid (m/s)** en **slaglengte per afzet** in de tabel.
+6. **Camerabeweging.** Eerste versie: alleen **vaste camera (statief)** — één kalibratie voor de hele video. Voor een pannende/schommelende camera moet de homografie per frame meebewegen: de aangewezen lijnen tracken met dezelfde LK-optical-flow-machinerie als fase 5. Dat is een logisch vervolg, geen onderdeel van de eerste versie.
+
+**Klaar wanneer:** dezelfde schaatser die op verschillende plekken in beeld passeert (dichtbij/veraf, links/rechts) krijgt ná correctie een stabiele afzethoek (± 2°), waar de ongecorrigeerde meting zichtbaar met de beeldpositie verloopt. Testopname: één schaatser, meerdere rondjes langs dezelfde vaste camera, hoeken per passage vergelijken.
+
+---
+
+## Volgorde & omvang (grove inschatting)
+
+| Fase | Wat | Omvang |
+|---|---|---|
+| 0 | Serialisatie (`npz` + plain landmarks) | klein, 1 sessie |
+| 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | groot, 2–3 sessies |
+| 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
+| 3 | Skelet-editor met uitvloeien + undo | middelgroot, 1–2 sessies |
+| 4 | Instellingen, gedeelde map, conflictafhandeling | middelgroot, 1–2 sessies |
+| 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
+| 6 | Sneller analyseren | gefaseerd: stappen 1+2+6 in 1 sessie; export/DirectML apart experiment |
+| 7 | Perspectiefcorrectie via baanlijnen | *nice-to-have (niet nu — frontale, horizontale camera)*; groot, 2–3 sessies (stap 3, de 3D-reconstructie, is onderzoekswerk — eerst valideren op testmateriaal) |
+
+## Openstaande vragen (beslissen wanneer de fase begint)
+
+- **Fase 1**: video altijd kopiëren, of bij zeer grote bestanden vragen (kopiëren vs. verplaatsen vs. alleen verwijzen)? Voorstel: altijd kopiëren, origineel laten staan.
+- **Fase 1**: moeten oude "losse" analyses (van vóór de database) importeerbaar zijn? Vermoedelijk niet nodig — er is nog weinig historie.
+- **Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)? Eerste versie: nee, alleen bestaande punten verslepen.
+- **Fase 4**: welke cloudprovider gebruikt het team feitelijk? (OneDrive/Dropbox/netwerkschijf — maakt voor de bouw weinig uit, wel voor het testen.)
+- **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?
+- **Fase 6**: hoeveel meetafwijking is acceptabel voor het "snel"-profiel? (Voorstel: events moeten identiek blijven, hoeken mogen ±1° verschillen.)
+- **Fase 7** *(nice-to-have, niet nu)*: onder de huidige aanname (frontaal, horizontaal) is de perspectiefvertekening klein en deze fase geen prioriteit. Wordt pas relevant bij een schuin geplaatste camera; dán ook: welke baanlijnen zijn scherp genoeg om na te trekken en is hun onderlinge afstand bekend (schaal in meters — zonder schaal werkt de hoekcorrectie ook, alleen snelheid/slaglengte niet)? En staat de camera dan op statief, of moet het lijn-tracken uit fase 5 mee?

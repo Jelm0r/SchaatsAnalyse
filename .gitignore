@@ -1,0 +1,28 @@
+# Virtuele omgevingen
+.venv-yolo/
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Modelgewichten (herdownloadbaar, te groot voor GitHub)
+*.pt
+*.task
+
+# Logs
+*.log
+
+# Video's / testmateriaal
+*.mp4
+*.mov
+*.MOV
+*.avi
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
