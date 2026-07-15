@@ -110,6 +110,7 @@ WIT      = (255, 255, 255)
 GEEL     = (0, 210, 230)
 DONKER   = (20, 20, 20)
 PAARS    = (200, 100, 220)
+SKELET   = (255, 200, 0)   # helder cyaan-blauw; goed zichtbaar en botst niet met groen/rood afzetbeen
 
 
 @dataclass
@@ -454,10 +455,10 @@ def teken_alle_landmarks(frame, landmarks, w, h, min_vis=0.2):
     zichtbaar = [getattr(l, 'visibility', 1.0) >= min_vis for l in landmarks]
     for a, b in POSE_CONNECTIONS:
         if zichtbaar[a] and zichtbaar[b]:
-            cv2.line(frame, pts[a], pts[b], (60, 60, 60), 1)
+            cv2.line(frame, pts[a], pts[b], SKELET, 2, cv2.LINE_AA)
     for p, zb in zip(pts, zichtbaar):
         if zb:
-            cv2.circle(frame, p, 2, (60, 60, 60), -1)
+            cv2.circle(frame, p, 3, SKELET, -1, cv2.LINE_AA)
 
 
 def teken_overlay_op_frame(frame, resultaat, fps, toon_skelet=True, toon_afzetbeen=True,
