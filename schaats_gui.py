@@ -538,11 +538,17 @@ class KalibratieKiezer(QDialog):
         self.accept()
 
 
+class Geannuleerd(Exception):
+    """Interne markering: de gebruiker heeft de analyse afgebroken."""
+    pass
+
+
 class AnalyseWorker(QThread):
     """Draait de analyse op de achtergrond, zodat de GUI niet blokkeert."""
     voortgang = Signal(int, int)
     klaar = Signal(object, object, object)   # info, resultaten, events
     fout = Signal(str)
+    geannuleerd = Signal()
 
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
@@ -558,10 +564,18 @@ class AnalyseWorker(QThread):
         self.auto_horizon = auto_horizon
         self.smooth_landmarks = smooth_landmarks
         self.perspectief = perspectief
+        self._annuleren = False
+
+    def annuleer(self):
+        """Vraag de analyse coöperatief te stoppen (afgehandeld bij de volgende frame)."""
+        self._annuleren = True
 
     def run(self):
         try:
             def toon_voortgang(frame_nr, totaal):
+                # De backends roepen dit per frame aan — het natuurlijke afbreekpunt.
+                if self._annuleren:
+                    raise Geannuleerd()
                 self.voortgang.emit(frame_nr, totaal)
 
             info, resultaten = analyseer_backend(
@@ -570,10 +584,18 @@ class AnalyseWorker(QThread):
                 horizon_deg=self.horizon_deg, auto_horizon=self.auto_horizon,
                 smooth_landmarks=self.smooth_landmarks, perspectief=self.perspectief,
             )
+            if self._annuleren:
+                raise Geannuleerd()
             events = segmenteer_afzetten(resultaten)
             self.klaar.emit(info, resultaten, events)
+        except Geannuleerd:
+            self.geannuleerd.emit()
         except Exception as e:
-            self.fout.emit(str(e))
+            # Een fout die ontstond doordat we halverwege afbraken telt als annulering.
+            if self._annuleren:
+                self.geannuleerd.emit()
+            else:
+                self.fout.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -930,11 +952,14 @@ class MainWindow(QMainWindow):
         self._zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
 
-        self.progress = QProgressDialog("Video analyseren...", None, 0, 100, self)
+        self.progress = QProgressDialog("Video analyseren...", "Annuleren", 0, 100, self)
         self.progress.setWindowModality(Qt.WindowModal)
-        self.progress.setCancelButton(None)
         self.progress.setMinimumDuration(0)
+        self.progress.setAutoClose(False)   # wij sluiten hem zelf (ook bij annuleren)
+        self.progress.setAutoReset(False)
         self.progress.setValue(0)
+        # De annuleerknop én het venster-kruisje sturen allebei `canceled`.
+        self.progress.canceled.connect(self._annuleer_analyse)
 
         self.worker = AnalyseWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
                                     doel_punt=self.doel_punt, horizon_deg=self.horizon_deg,
@@ -944,6 +969,7 @@ class MainWindow(QMainWindow):
         self.worker.voortgang.connect(self._analyse_voortgang)
         self.worker.klaar.connect(self._analyse_klaar)
         self.worker.fout.connect(self._analyse_fout)
+        self.worker.geannuleerd.connect(self._analyse_geannuleerd)
         self.worker.start()
 
     def _analyse_voortgang(self, frame_nr, totaal):
@@ -955,6 +981,30 @@ class MainWindow(QMainWindow):
         self.progress.close()
         QMessageBox.critical(self, "Fout bij analyseren", bericht)
         self._zet_besturing_actief(False)
+
+    def _annuleer_analyse(self):
+        """Annuleerknop / kruisje van de voortgangsdialoog: stop de worker echt."""
+        if self.worker is None or not self.worker.isRunning():
+            return
+        self.worker.annuleer()
+        # Geen verdere voortgang-updates meer op de dialoog; hij blijft staan tot de
+        # worker daadwerkelijk stopt (kan tot één frame duren, bij YOLO ~2 s).
+        try:
+            self.worker.voortgang.disconnect(self._analyse_voortgang)
+        except (TypeError, RuntimeError):
+            pass
+        if self.progress is not None:
+            self.progress.setLabelText("Analyse annuleren…")
+            self.progress.setCancelButton(None)   # niet nogmaals kunnen klikken
+            self.progress.show()
+
+    def _analyse_geannuleerd(self):
+        if self.progress is not None:
+            self.progress.close()
+            self.progress = None
+        self.worker = None
+        self._terug_naar_start()
+        self.statusBar().showMessage("Analyse geannuleerd", 4000)
 
     def _analyse_klaar(self, info, resultaten, events):
         self.progress.close()
@@ -1210,6 +1260,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.speeltimer.stop()
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.annuleer()
+            self.worker.wait(5000)   # wacht tot de analyse-thread echt gestopt is
         if self.cap_weergave is not None:
             self.cap_weergave.release()
         super().closeEvent(event)
