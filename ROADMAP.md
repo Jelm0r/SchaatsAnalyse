@@ -45,7 +45,18 @@ Alles hierna staat of valt met het kunnen **opslaan en terugladen** van een anal
 
 ---
 
-## Fase 1 — Profielen + database
+## Fase 1 — Profielen + database ✅
+
+> **Af (18 juli 2026)** — zelftest (`python schaats_db.py`) + headless GUI-rooktest groen in beide venvs; volledige cyclus (schaatser aanmaken → analyseren → heropenen) werkt.
+>
+> **Wat er staat:** `schaats_db.py` (config, schema `user_version=1`, CRUD, `sla_analyse_op` met video+npz eerst en DB-insert als laatste stap, zelftest); GUI-startpagina = bibliotheek (schaatsers links, analyses rechts uit de events-cache, dubbelklik = openen, hernoemen/verwijderen met bevestiging); `NieuweAnalyseDialog`; `AnalyseWorker` slaat na de analyse automatisch op (in de workerthread, met "Opslaan in bibliotheek..."-fase); heropenen via de fase 0-naad met de **opgeslagen** `smooth_n`/`threshold` uit `instellingen_json`. De fase 0-steigerknoppen (npz opslaan/laden) zijn weg.
+>
+> **Afwijkingen van het plan hieronder:**
+> - De instellingen-groupbox verhuisde naar de `NieuweAnalyseDialog` (geen derde stackpagina — de flow was al een keten van modale dialogen).
+> - Uit fase 4 naar voren gehaald (licht): bibliotheekpad-config in `%APPDATA%\SchaatsAnalyse\config.json` + knop "Bibliotheekmap...", én de cloud-veilige SQLite-discipline (journal DELETE, korte verbindingen per aanroep, busy_timeout, relatieve paden met forward slashes). De bibliotheek kan dus nu al in een gedeelde cloudmap (Google Drive/OneDrive/Dropbox) staan; fase 4 voegt alleen nog trainersnaam + conflictdetectie toe.
+> - Faalt alléén het opslaan, dan blijft de (lange) analyse zichtbaar met een waarschuwing — hij is dan alleen niet bewaard.
+> - De perspectiefkalibratie wordt (net als in fase 0) niet geserialiseerd; bij heropenen van zo'n analyse volgt een eenmalige melding dat de hoeken zonder correctie herberekend zijn.
+> - Besloten open vragen: video wordt altijd gekopieerd (origineel blijft staan, bestandsnaam behouden in de uuid-map); geen import van oude losse analyses.
 
 **Doel:** elke schaatser een profiel; elke analyse hoort bij een profiel.
 
@@ -240,7 +251,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | Fase | Wat | Omvang |
 |---|---|---|
 | 0 | Serialisatie (`npz` + plain landmarks) | ✅ **af** (16 jul 2026) |
-| 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | groot, 2–3 sessies |
+| 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | ✅ **af** (18 jul 2026) |
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
 | 3 | Skelet-editor met uitvloeien + undo | middelgroot, 1–2 sessies |
 | 4 | Instellingen, gedeelde map, conflictafhandeling | middelgroot, 1–2 sessies |
@@ -250,8 +261,8 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 
 ## Openstaande vragen (beslissen wanneer de fase begint)
 
-- **Fase 1**: video altijd kopiëren, of bij zeer grote bestanden vragen (kopiëren vs. verplaatsen vs. alleen verwijzen)? Voorstel: altijd kopiëren, origineel laten staan.
-- **Fase 1**: moeten oude "losse" analyses (van vóór de database) importeerbaar zijn? Vermoedelijk niet nodig — er is nog weinig historie.
+- ~~**Fase 1**: video altijd kopiëren?~~ **Besloten (jul 2026): altijd kopiëren, origineel laten staan.**
+- ~~**Fase 1**: oude "losse" analyses importeerbaar?~~ **Besloten (jul 2026): niet nodig.**
 - **Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)? Eerste versie: nee, alleen bestaande punten verslepen.
 - **Fase 4**: welke cloudprovider gebruikt het team feitelijk? (OneDrive/Dropbox/netwerkschijf — maakt voor de bouw weinig uit, wel voor het testen.)
 - **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?

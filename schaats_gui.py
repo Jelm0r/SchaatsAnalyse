@@ -26,14 +26,16 @@ from PySide6.QtWidgets import (
     QGroupBox, QCheckBox, QFileDialog, QMessageBox, QProgressDialog,
     QHeaderView, QAbstractItemView, QToolBar, QStackedWidget, QSpinBox,
     QDoubleSpinBox, QDialog, QRadioButton, QComboBox, QFormLayout,
+    QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QInputDialog,
+    QDialogButtonBox,
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
+import schaats_db
 import schaats_perspectief
 from schaats_analyse import (
-    video_info, segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
+    segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden,
-    sla_landmarks_op, laad_landmarks,
 )
 
 # Backend-selectie: gebruik YOLO-pose + ByteTrack als torch/ultralytics beschikbaar is
@@ -540,14 +542,19 @@ class KalibratieKiezer(QDialog):
 
 
 class AnalyseWorker(QThread):
-    """Draait de analyse op de achtergrond, zodat de GUI niet blokkeert."""
+    """Draait de analyse op de achtergrond, zodat de GUI niet blokkeert, en slaat het
+    resultaat daarna automatisch op in de bibliotheek (fase 1). Het opslaan gebeurt
+    bewust ook in deze thread: de videokopie naar de mediamap kan lang duren."""
     voortgang = Signal(int, int)
-    klaar = Signal(object, object, object)   # info, resultaten, events
-    fout = Signal(str)
+    status = Signal(str)                     # tekst voor de voortgangsdialoog (busy-fase)
+    klaar = Signal(object, object, object, object)   # info, resultaten, events, analyse_id
+    fout = Signal(str)                       # analyse zelf mislukt
+    opslag_fout = Signal(str)                # alléén het opslaan mislukt (analyse is er wel)
 
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
-                 perspectief=None):
+                 perspectief=None, bieb=None, schaatser_id=None, titel=None,
+                 instellingen=None, backend=None):
         super().__init__()
         self.input_pad = input_pad
         self.model_pad = model_pad
@@ -559,6 +566,11 @@ class AnalyseWorker(QThread):
         self.auto_horizon = auto_horizon
         self.smooth_landmarks = smooth_landmarks
         self.perspectief = perspectief
+        self.bieb = bieb
+        self.schaatser_id = schaatser_id
+        self.titel = titel
+        self.instellingen = instellingen
+        self.backend = backend
 
     def run(self):
         try:
@@ -572,95 +584,110 @@ class AnalyseWorker(QThread):
                 smooth_landmarks=self.smooth_landmarks, perspectief=self.perspectief,
             )
             events = segmenteer_afzetten(resultaten)
-            self.klaar.emit(info, resultaten, events)
         except Exception as e:
             self.fout.emit(str(e))
+            return
+
+        # Opslaan in de bibliotheek; faalt dit, dan gaat de (lange) analyse niet
+        # verloren — de resultaten worden alsnog getoond, alleen niet bewaard.
+        analyse_id = None
+        if self.bieb is not None and self.schaatser_id is not None:
+            self.status.emit("Opslaan in bibliotheek...")
+            try:
+                analyse_id = schaats_db.sla_analyse_op(
+                    self.bieb, self.schaatser_id, self.titel, self.input_pad,
+                    info, resultaten, events,
+                    backend=self.backend, instellingen=self.instellingen)
+            except Exception as e:
+                self.opslag_fout.emit(str(e))
+        self.klaar.emit(info, resultaten, events, analyse_id)
 
 
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Schaats Analyse")
-        self.resize(1400, 820)
+class SchaatserDialog(QDialog):
+    """Schaatser-profiel aanmaken of bewerken: naam, geboortejaar, notities."""
 
-        self.input_pad = None
-        self.model_pad = STANDAARD_MODEL
-        self.smooth_n = 5
-        self.threshold = 0.015
-        self.doel_punt = None
-        self.horizon_deg = 0.0
-        self.auto_horizon = False
-        self.perspectief = None
-        self.video_info = None
-        self.resultaten = []
-        self.events = []
-        self.huidige_idx = -1
-        self.cap_weergave = None
-        self._weergave_pos = 0      # frames al gelezen door cap_weergave (sequentiële cursor)
-        self._laatste_frame = None  # ruwe kopie van het huidige frame (voor laag-toggles)
-        self.worker = None
+    def __init__(self, parent=None, naam="", geboortejaar=None, notities=""):
+        super().__init__(parent)
+        self.setWindowTitle("Schaatser")
+        form = QFormLayout(self)
 
-        self._bouw_ui()
-        self.speeltimer = QTimer(self)
-        self.speeltimer.timeout.connect(self._speel_tick)
+        self.veld_naam = QLineEdit(naam)
+        form.addRow("Naam:", self.veld_naam)
 
-    # ── UI opbouw ────────────────────────────────────────────────────────
-    def _bouw_ui(self):
-        toolbar = QToolBar("Hoofd")
-        self.addToolBar(toolbar)
-        self.actie_nieuwe_video = QAction("Nieuwe video...", self)
-        self.actie_nieuwe_video.triggered.connect(self._terug_naar_start)
-        toolbar.addAction(self.actie_nieuwe_video)
+        self.veld_jaar = QSpinBox()
+        self.veld_jaar.setRange(0, 2100)
+        self.veld_jaar.setSpecialValueText("—")   # 0 = niet ingevuld
+        self.veld_jaar.setValue(geboortejaar or 0)
+        form.addRow("Geboortejaar:", self.veld_jaar)
 
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        self.veld_notities = QPlainTextEdit(notities or "")
+        self.veld_notities.setFixedHeight(70)
+        form.addRow("Notities:", self.veld_notities)
 
-        self.pagina_start = self._bouw_startpagina()
-        self.pagina_analyse = self._bouw_analysepagina()
-        self.stack.addWidget(self.pagina_start)
-        self.stack.addWidget(self.pagina_analyse)
-        self.stack.setCurrentWidget(self.pagina_start)
+        knoppen = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        knoppen.accepted.connect(self.accept)
+        knoppen.rejected.connect(self.reject)
+        form.addRow(knoppen)
 
-        self.lbl_live = QLabel("")
-        self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
-        self.statusBar().addPermanentWidget(self.lbl_live)
-        self.statusBar().showMessage(f"Kies een video om te beginnen.  ·  backend: {BACKEND_NAAM}")
+        self._ok = knoppen.button(QDialogButtonBox.Ok)
+        self._ok.setEnabled(bool(naam.strip()))
+        self.veld_naam.textChanged.connect(lambda t: self._ok.setEnabled(bool(t.strip())))
 
-    def _bouw_startpagina(self):
-        paneel = QWidget()
-        v = QVBoxLayout(paneel)
-        v.addStretch(2)
+    @property
+    def naam(self):
+        return self.veld_naam.text().strip()
 
-        titel = QLabel("Schaatser Analyse")
-        titel.setAlignment(Qt.AlignCenter)
-        titel.setStyleSheet("font-size: 28px; font-weight: bold;")
-        v.addWidget(titel)
+    @property
+    def geboortejaar(self):
+        return self.veld_jaar.value() or None
 
-        subtitel = QLabel("Kies een video om de afzethoek-analyse te starten.")
-        subtitel.setAlignment(Qt.AlignCenter)
-        subtitel.setStyleSheet("color: #888; padding-bottom: 16px;")
-        v.addWidget(subtitel)
+    @property
+    def notities(self):
+        return self.veld_notities.toPlainText().strip()
 
-        self.lbl_gekozen_video = QLabel("Geen video gekozen")
-        self.lbl_gekozen_video.setAlignment(Qt.AlignCenter)
-        v.addWidget(self.lbl_gekozen_video)
 
-        knop_kies = QPushButton("Video kiezen...")
-        knop_kies.setFixedWidth(220)
-        knop_kies.clicked.connect(self._kies_video)
-        v.addWidget(knop_kies, alignment=Qt.AlignHCenter)
+class NieuweAnalyseDialog(QDialog):
+    """Verzamelt alles voor één nieuwe analyse: schaatser, video, titel en de
+    analyse-instellingen (verhuisd van de oude startpagina, fase 1)."""
 
-        v.addSpacing(16)
+    def __init__(self, schaatsers, voorkeur_id=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nieuwe analyse")
+        self.video_pad = None
+        v = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.combo_schaatser = QComboBox()
+        for s in schaatsers:
+            tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
+            self.combo_schaatser.addItem(tekst, s["id"])
+        if voorkeur_id is not None:
+            idx = self.combo_schaatser.findData(voorkeur_id)
+            if idx >= 0:
+                self.combo_schaatser.setCurrentIndex(idx)
+        form.addRow("Schaatser:", self.combo_schaatser)
+
+        rij_video = QHBoxLayout()
+        knop_video = QPushButton("Video kiezen...")
+        knop_video.clicked.connect(self._kies_video)
+        self.lbl_video = QLabel("Geen video gekozen")
+        rij_video.addWidget(knop_video)
+        rij_video.addWidget(self.lbl_video, stretch=1)
+        form.addRow("Video:", rij_video)
+
+        self.veld_titel = QLineEdit()
+        self.veld_titel.setPlaceholderText("standaard: naam van het videobestand")
+        form.addRow("Titel:", self.veld_titel)
+        v.addLayout(form)
 
         instellingen = QGroupBox("Instellingen")
-        instellingen.setFixedWidth(320)
         fv = QVBoxLayout(instellingen)
 
         rij_smooth = QHBoxLayout()
         rij_smooth.addWidget(QLabel("Smoothing (frames):"))
         self.spin_smooth = QSpinBox()
         self.spin_smooth.setRange(1, 30)
-        self.spin_smooth.setValue(self.smooth_n)
+        self.spin_smooth.setValue(5)
         rij_smooth.addStretch(1)
         rij_smooth.addWidget(self.spin_smooth)
         fv.addLayout(rij_smooth)
@@ -671,7 +698,7 @@ class MainWindow(QMainWindow):
         self.spin_threshold.setRange(0.001, 0.2)
         self.spin_threshold.setSingleStep(0.001)
         self.spin_threshold.setDecimals(3)
-        self.spin_threshold.setValue(self.threshold)
+        self.spin_threshold.setValue(0.015)
         rij_threshold.addStretch(1)
         rij_threshold.addWidget(self.spin_threshold)
         fv.addLayout(rij_threshold)
@@ -700,29 +727,172 @@ class MainWindow(QMainWindow):
             "skelet uit de smoothing komt of uit de detectie zelf.")
         fv.addWidget(self.chk_geen_smoothing)
 
-        v.addWidget(instellingen, alignment=Qt.AlignHCenter)
+        v.addWidget(instellingen)
 
-        v.addSpacing(16)
+        knoppen = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        knoppen.accepted.connect(self.accept)
+        knoppen.rejected.connect(self.reject)
+        v.addWidget(knoppen)
+        self._ok = knoppen.button(QDialogButtonBox.Ok)
+        self._ok.setText("Start analyse")
+        self._ok.setEnabled(False)               # pas actief mét gekozen video
 
-        self.btn_start_analyse = QPushButton("Start analyse")
-        self.btn_start_analyse.setFixedWidth(220)
-        self.btn_start_analyse.setEnabled(False)
-        self.btn_start_analyse.clicked.connect(self._start_analyse_vanaf_start)
-        v.addWidget(self.btn_start_analyse, alignment=Qt.AlignHCenter)
+    def _kies_video(self):
+        pad, _ = QFileDialog.getOpenFileName(
+            self, "Kies video", "", "Video's (*.mp4 *.mov *.avi *.mkv);;Alle bestanden (*)")
+        if not pad:
+            return
+        self.video_pad = pad
+        self.lbl_video.setText(os.path.basename(pad))
+        if not self.veld_titel.text().strip():
+            self.veld_titel.setText(os.path.splitext(os.path.basename(pad))[0])
+        self._ok.setEnabled(True)
 
-        v.addSpacing(8)
+    @property
+    def schaatser_id(self):
+        return self.combo_schaatser.currentData()
 
-        self.btn_laad_landmarks = QPushButton("Landmarks laden (.npz)...")
-        self.btn_laad_landmarks.setFixedWidth(220)
-        self.btn_laad_landmarks.setEnabled(False)
-        self.btn_laad_landmarks.setToolTip(
-            "Laadt een eerder opgeslagen analyse (.npz) bij de gekozen video: de\n"
-            "afzethoeken worden direct herberekend uit de opgeslagen landmarks,\n"
-            "zonder de video opnieuw te detecteren (seconden i.p.v. minuten).")
-        self.btn_laad_landmarks.clicked.connect(self._laad_landmarks_vanaf_start)
-        v.addWidget(self.btn_laad_landmarks, alignment=Qt.AlignHCenter)
+    @property
+    def titel(self):
+        tekst = self.veld_titel.text().strip()
+        if tekst:
+            return tekst
+        return os.path.splitext(os.path.basename(self.video_pad or "analyse"))[0]
 
-        v.addStretch(3)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Schaats Analyse")
+        self.resize(1400, 820)
+
+        self.input_pad = None
+        self.model_pad = STANDAARD_MODEL
+        self.smooth_n = 5
+        self.threshold = 0.015
+        self.doel_punt = None
+        self.horizon_deg = 0.0
+        self.auto_horizon = False
+        self.perspectief = None
+        self.geen_smoothing = False
+        self.video_info = None
+        self.resultaten = []
+        self.events = []
+        self.huidige_idx = -1
+        self.cap_weergave = None
+        self._weergave_pos = 0      # frames al gelezen door cap_weergave (sequentiële cursor)
+        self._laatste_frame = None  # ruwe kopie van het huidige frame (voor laag-toggles)
+        self.worker = None
+        self.bieb = None            # bibliotheekpad (gezet door _zet_bibliotheek)
+        self.analyse_id = None      # id van de geopende analyse in de bibliotheek
+        self._pending_opslag = None # {schaatser_id, titel, instellingen} voor de worker
+
+        self._bouw_ui()
+        self.speeltimer = QTimer(self)
+        self.speeltimer.timeout.connect(self._speel_tick)
+        self._zet_bibliotheek(schaats_db.bibliotheek_pad())
+
+    # ── UI opbouw ────────────────────────────────────────────────────────
+    def _bouw_ui(self):
+        toolbar = QToolBar("Hoofd")
+        self.addToolBar(toolbar)
+        self.actie_bibliotheek = QAction("Bibliotheek", self)
+        self.actie_bibliotheek.triggered.connect(self._terug_naar_start)
+        toolbar.addAction(self.actie_bibliotheek)
+
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.pagina_start = self._bouw_startpagina()
+        self.pagina_analyse = self._bouw_analysepagina()
+        self.stack.addWidget(self.pagina_start)
+        self.stack.addWidget(self.pagina_analyse)
+        self.stack.setCurrentWidget(self.pagina_start)
+
+        self.lbl_live = QLabel("")
+        self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
+        self.statusBar().addPermanentWidget(self.lbl_live)
+        self.statusBar().showMessage(
+            f"Kies een schaatser en start of open een analyse.  ·  backend: {BACKEND_NAAM}")
+
+    def _bouw_startpagina(self):
+        """De bibliotheek (fase 1): links de schaatsers, rechts hun analyses."""
+        paneel = QWidget()
+        v = QVBoxLayout(paneel)
+
+        titel = QLabel("Schaatser Analyse — bibliotheek")
+        titel.setStyleSheet("font-size: 22px; font-weight: bold; padding: 4px;")
+        v.addWidget(titel)
+
+        splitter = QSplitter(Qt.Horizontal)
+        v.addWidget(splitter, stretch=1)
+
+        # Links: schaatsers.
+        links = QWidget()
+        lv = QVBoxLayout(links)
+        lv.addWidget(QLabel("Schaatsers"))
+        self.lijst_schaatsers = QListWidget()
+        self.lijst_schaatsers.currentItemChanged.connect(lambda *_: self._vernieuw_analyses())
+        lv.addWidget(self.lijst_schaatsers, stretch=1)
+        rij_s = QHBoxLayout()
+        self.btn_nieuwe_schaatser = QPushButton("Nieuwe schaatser...")
+        self.btn_nieuwe_schaatser.clicked.connect(self._nieuwe_schaatser)
+        self.btn_bewerk_schaatser = QPushButton("Bewerken...")
+        self.btn_bewerk_schaatser.clicked.connect(self._bewerk_schaatser)
+        self.btn_verwijder_schaatser = QPushButton("Verwijderen")
+        self.btn_verwijder_schaatser.clicked.connect(self._verwijder_schaatser)
+        for b in (self.btn_nieuwe_schaatser, self.btn_bewerk_schaatser,
+                  self.btn_verwijder_schaatser):
+            rij_s.addWidget(b)
+        lv.addLayout(rij_s)
+        splitter.addWidget(links)
+
+        # Rechts: analyses van de geselecteerde schaatser (uit de events-cache).
+        rechts = QWidget()
+        rv = QVBoxLayout(rechts)
+        rv.addWidget(QLabel("Analyses  (dubbelklik om te openen)"))
+        self.tabel_analyses = QTableWidget(0, 4)
+        self.tabel_analyses.setHorizontalHeaderLabels(
+            ["Datum", "Titel", "Afzetten", "Gem. hoek (°)"])
+        self.tabel_analyses.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tabel_analyses.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabel_analyses.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tabel_analyses.cellDoubleClicked.connect(
+            lambda *_: self._open_analyse_uit_bibliotheek())
+        rv.addWidget(self.tabel_analyses, stretch=1)
+        rij_a = QHBoxLayout()
+        self.btn_nieuwe_analyse = QPushButton("Nieuwe analyse...")
+        self.btn_nieuwe_analyse.clicked.connect(self._nieuwe_analyse)
+        self.btn_open_analyse = QPushButton("Openen")
+        self.btn_open_analyse.clicked.connect(lambda: self._open_analyse_uit_bibliotheek())
+        self.btn_hernoem_analyse = QPushButton("Hernoemen...")
+        self.btn_hernoem_analyse.clicked.connect(self._hernoem_analyse)
+        self.btn_verwijder_analyse = QPushButton("Verwijderen")
+        self.btn_verwijder_analyse.clicked.connect(self._verwijder_analyse)
+        for b in (self.btn_nieuwe_analyse, self.btn_open_analyse,
+                  self.btn_hernoem_analyse, self.btn_verwijder_analyse):
+            rij_a.addWidget(b)
+        rij_a.addStretch(1)
+        rv.addLayout(rij_a)
+        splitter.addWidget(rechts)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        # Onderin: de bibliotheekmap (deelbaar via een cloudmap, zie ROADMAP fase 4).
+        rij_b = QHBoxLayout()
+        knop_bieb = QPushButton("Bibliotheekmap...")
+        knop_bieb.setToolTip(
+            "De map met de database en alle video's/landmarks. Zet deze map in een\n"
+            "gesynchroniseerde cloudmap (Google Drive/OneDrive/Dropbox) om de\n"
+            "bibliotheek met andere trainers te delen; elke trainer wijst dezelfde\n"
+            "map aan.")
+        knop_bieb.clicked.connect(self._kies_bibliotheekmap)
+        rij_b.addWidget(knop_bieb)
+        self.lbl_bieb = QLabel("")
+        self.lbl_bieb.setStyleSheet("color: #888;")
+        rij_b.addWidget(self.lbl_bieb, stretch=1)
+        v.addLayout(rij_b)
+
         return paneel
 
     def _bouw_analysepagina(self):
@@ -808,14 +978,6 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self._exporteer_csv)
         self.btn_export.setEnabled(False)
         knoppen.addWidget(self.btn_export)
-
-        self.btn_sla_landmarks = QPushButton("Landmarks opslaan (.npz)")
-        self.btn_sla_landmarks.setToolTip(
-            "Slaat de gedetecteerde landmarks van deze analyse op. Je kunt ze later\n"
-            "bij dezelfde video terugladen zonder opnieuw te hoeven analyseren.")
-        self.btn_sla_landmarks.clicked.connect(self._sla_landmarks_op)
-        self.btn_sla_landmarks.setEnabled(False)
-        knoppen.addWidget(self.btn_sla_landmarks)
         tv.addLayout(knoppen)
 
         paneel.addWidget(tabel_groep)
@@ -851,24 +1013,213 @@ class MainWindow(QMainWindow):
                   self.btn_frame_verder, self.btn_eind, self.slider):
             w.setEnabled(actief)
 
-    # ── Video laden + analyseren ─────────────────────────────────────────
-    def _kies_video(self):
-        pad, _ = QFileDialog.getOpenFileName(
-            self, "Kies video", "", "Video's (*.mp4 *.mov *.avi *.mkv);;Alle bestanden (*)")
+    # ── Bibliotheek (fase 1) ─────────────────────────────────────────────
+    def _zet_bibliotheek(self, pad):
+        """Opent (of maakt) de bibliotheek op `pad` en vult de lijsten. Faalt het pad
+        (bv. verdwenen netwerkmap), dan valt de app terug op de standaardmap."""
+        try:
+            schaats_db.open_db(pad)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Bibliotheek",
+                f"Kan de bibliotheek niet openen in:\n{pad}\n\n{e}")
+            standaard = schaats_db.standaard_bibliotheek()
+            if pad != standaard:
+                return self._zet_bibliotheek(standaard)
+            raise
+        self.bieb = pad
+        self.lbl_bieb.setText(pad)
+        self._vernieuw_schaatsers()
+
+    def _kies_bibliotheekmap(self):
+        pad = QFileDialog.getExistingDirectory(self, "Kies bibliotheekmap", self.bieb or "")
         if not pad:
             return
-        self.input_pad = pad
-        self.lbl_gekozen_video.setText(os.path.basename(pad))
-        self.btn_start_analyse.setEnabled(True)
-        self.btn_laad_landmarks.setEnabled(True)
+        cfg = schaats_db.laad_config()
+        cfg["bibliotheek_pad"] = pad
+        schaats_db.bewaar_config(cfg)
+        self._zet_bibliotheek(pad)
 
-    def _start_analyse_vanaf_start(self):
+    def _geselecteerde_schaatser_id(self):
+        item = self.lijst_schaatsers.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _geselecteerde_analyse_id(self):
+        rij = self.tabel_analyses.currentRow()
+        if rij < 0:
+            return None
+        item = self.tabel_analyses.item(rij, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _vernieuw_schaatsers(self, selecteer_id=None):
+        """Herlaadt de schaatserslijst uit de database (en daarmee de analysetabel)."""
+        if selecteer_id is None:
+            selecteer_id = self._geselecteerde_schaatser_id()
+        self.lijst_schaatsers.blockSignals(True)
+        self.lijst_schaatsers.clear()
+        selecteer_rij = None
+        for rij, s in enumerate(schaats_db.lijst_schaatsers(self.bieb)):
+            tekst = s["naam"]
+            if s["geboortejaar"]:
+                tekst += f" ({s['geboortejaar']})"
+            n = s["aantal_analyses"]
+            tekst += f"  ·  {n} analyse{'s' if n != 1 else ''}"
+            item = QListWidgetItem(tekst)
+            item.setData(Qt.UserRole, s["id"])
+            item.setData(Qt.UserRole + 1, s["naam"])
+            if s["notities"]:
+                item.setToolTip(s["notities"])
+            self.lijst_schaatsers.addItem(item)
+            if s["id"] == selecteer_id:
+                selecteer_rij = rij
+        self.lijst_schaatsers.blockSignals(False)
+        if selecteer_rij is None and self.lijst_schaatsers.count():
+            selecteer_rij = 0
+        if selecteer_rij is not None:
+            self.lijst_schaatsers.setCurrentRow(selecteer_rij)  # triggert _vernieuw_analyses
+        else:
+            self._vernieuw_analyses()
+
+    def _vernieuw_analyses(self):
+        """Vult de analysetabel voor de geselecteerde schaatser uit de events-cache
+        (geen npz/video nodig — daarom is de bibliotheek direct snel)."""
+        sid = self._geselecteerde_schaatser_id()
+        self.tabel_analyses.setRowCount(0)
+        if sid is not None:
+            analyses = schaats_db.lijst_analyses(self.bieb, sid)
+            self.tabel_analyses.setRowCount(len(analyses))
+            for rij, a in enumerate(analyses):
+                gem = f"{a['gem_hoek']:.1f}" if a["gem_hoek"] is not None else "—"
+                for kolom, tekst in enumerate(
+                        [a["datum"], a["titel"], str(a["aantal_afzetten"]), gem]):
+                    item = QTableWidgetItem(tekst)
+                    if kolom == 0:
+                        item.setData(Qt.UserRole, a["id"])
+                    self.tabel_analyses.setItem(rij, kolom, item)
+        heeft_analyses = self.tabel_analyses.rowCount() > 0
+        for b in (self.btn_open_analyse, self.btn_hernoem_analyse,
+                  self.btn_verwijder_analyse):
+            b.setEnabled(heeft_analyses)
+        self.btn_bewerk_schaatser.setEnabled(sid is not None)
+        self.btn_verwijder_schaatser.setEnabled(sid is not None)
+
+    def _nieuwe_schaatser(self):
+        dlg = SchaatserDialog(self)
+        if dlg.exec() != QDialog.Accepted or not dlg.naam:
+            return
+        sid = schaats_db.maak_schaatser(self.bieb, dlg.naam, dlg.geboortejaar, dlg.notities)
+        self._vernieuw_schaatsers(selecteer_id=sid)
+
+    def _bewerk_schaatser(self):
+        sid = self._geselecteerde_schaatser_id()
+        if sid is None:
+            return
+        s = next((x for x in schaats_db.lijst_schaatsers(self.bieb) if x["id"] == sid), None)
+        if s is None:
+            return
+        dlg = SchaatserDialog(self, naam=s["naam"], geboortejaar=s["geboortejaar"],
+                              notities=s["notities"])
+        if dlg.exec() != QDialog.Accepted or not dlg.naam:
+            return
+        schaats_db.wijzig_schaatser(self.bieb, sid, dlg.naam, dlg.geboortejaar, dlg.notities)
+        self._vernieuw_schaatsers(selecteer_id=sid)
+
+    def _verwijder_schaatser(self):
+        sid = self._geselecteerde_schaatser_id()
+        if sid is None:
+            return
+        naam = self.lijst_schaatsers.currentItem().data(Qt.UserRole + 1)
+        analyses = schaats_db.lijst_analyses(self.bieb, sid)
+        tekst = f"Schaatser '{naam}' verwijderen?"
+        if analyses:
+            tekst += (f"\n\nDe {len(analyses)} bijbehorende analyse"
+                      f"{'s' if len(analyses) != 1 else ''} (inclusief video's en "
+                      "landmarks) worden dan ook verwijderd.")
+        tekst += "\n\nDit kan niet ongedaan worden gemaakt."
+        if QMessageBox.question(self, "Schaatser verwijderen", tekst) != QMessageBox.Yes:
+            return
+        if self.analyse_id is not None and any(a["id"] == self.analyse_id for a in analyses):
+            self._sluit_weergave()   # laat de geopende video los vóór het wissen
+        schaats_db.verwijder_schaatser(self.bieb, sid)
+        self._vernieuw_schaatsers()
+
+    def _hernoem_analyse(self):
+        aid = self._geselecteerde_analyse_id()
+        if aid is None:
+            return
+        huidig = self.tabel_analyses.item(self.tabel_analyses.currentRow(), 1).text()
+        titel, ok = QInputDialog.getText(self, "Analyse hernoemen", "Nieuwe titel:",
+                                         text=huidig)
+        if not ok or not titel.strip():
+            return
+        schaats_db.hernoem_analyse(self.bieb, aid, titel.strip())
+        self._vernieuw_analyses()
+
+    def _verwijder_analyse(self):
+        aid = self._geselecteerde_analyse_id()
+        if aid is None:
+            return
+        titel = self.tabel_analyses.item(self.tabel_analyses.currentRow(), 1).text()
+        if QMessageBox.question(
+                self, "Analyse verwijderen",
+                f"Analyse '{titel}' verwijderen, inclusief de gekopieerde video en "
+                "landmarks?\n\nDit kan niet ongedaan worden gemaakt.") != QMessageBox.Yes:
+            return
+        if aid == self.analyse_id:
+            self._sluit_weergave()   # Windows weigert een nog geopende video te wissen
+        schaats_db.verwijder_analyse(self.bieb, aid)
+        self._vernieuw_schaatsers()
+
+    def _sluit_weergave(self):
+        """Maakt de weergavepagina leeg en laat het videobestand los (nodig voordat de
+        mediamap van de geopende analyse verwijderd kan worden)."""
+        if self.speeltimer.isActive():
+            self.speeltimer.stop()
+            self.btn_play.setText("▶")
+        if self.cap_weergave is not None:
+            self.cap_weergave.release()
+            self.cap_weergave = None
+        self._laatste_frame = None
+        self._weergave_pos = 0
+        self.video_info = None
+        self.resultaten = []
+        self.events = []
+        self.huidige_idx = -1
+        self.analyse_id = None
+        self.input_pad = None
+        self.video_label.setText("Geen video geladen")
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, 0)
+        self.slider.blockSignals(False)
+        self.tabel.setRowCount(0)
+        self.serie_hoek.clear()
+        self.serie_marker.clear()
+        self.lbl_stats.setText("gem — | min — | max —")
+        self._zet_besturing_actief(False)
+        self.btn_export.setEnabled(False)
+
+    # ── Nieuwe analyse + openen ──────────────────────────────────────────
+    def _nieuwe_analyse(self):
+        schaatsers = schaats_db.lijst_schaatsers(self.bieb)
+        if not schaatsers:
+            QMessageBox.information(
+                self, "Nieuwe analyse",
+                "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
+            return
+        dlg = NieuweAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
+                                  parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.input_pad = dlg.video_pad
+
         # Modelkeuze is alleen relevant voor de MediaPipe-backend; YOLO gebruikt zijn
         # eigen model (yolo11x-pose.pt) en negeert model_pad.
+        heavy = False
         if not IS_YOLO:
-            if self.chk_heavy.isChecked():
+            if dlg.chk_heavy.isChecked():
                 if os.path.isfile(HEAVY_MODEL):
                     self.model_pad = HEAVY_MODEL
+                    heavy = True
                 else:
                     QMessageBox.warning(
                         self, "Heavy-model ontbreekt",
@@ -899,11 +1250,11 @@ class MainWindow(QMainWindow):
 
         # Perspectiefkalibratie (baanlijnen) óf de klassieke horizon-stap.
         self.perspectief = None
-        if self.chk_perspectief.isChecked():
-            dlg = KalibratieKiezer(frame0, self)
-            if dlg.exec() != QDialog.Accepted:
+        if dlg.chk_perspectief.isChecked():
+            kdlg = KalibratieKiezer(frame0, self)
+            if kdlg.exec() != QDialog.Accepted:
                 return
-            self.perspectief = dlg.perspectief
+            self.perspectief = kdlg.perspectief
             self.horizon_deg, self.auto_horizon = 0.0, False   # kalibratie vervangt de horizon
         else:
             horizon = self._kies_horizon(frame0)
@@ -911,11 +1262,71 @@ class MainWindow(QMainWindow):
                 return
             self.horizon_deg, self.auto_horizon = horizon
 
-        self.smooth_n = self.spin_smooth.value()
-        self.threshold = self.spin_threshold.value()
+        self.smooth_n = dlg.spin_smooth.value()
+        self.threshold = dlg.spin_threshold.value()
+        self.geen_smoothing = dlg.chk_geen_smoothing.isChecked()
+
+        # Wat het .npz níet bevat maar heropenen wél nodig heeft/wil documenteren.
+        instellingen = {
+            "smooth_n": self.smooth_n,
+            "threshold": self.threshold,
+            "smooth_landmarks": not self.geen_smoothing,
+            "doel_punt": list(self.doel_punt) if self.doel_punt else None,
+            "horizon_deg": self.horizon_deg,
+            "auto_horizon": self.auto_horizon,
+            "heavy": heavy,
+            "backend_naam": BACKEND_NAAM,
+            "perspectief_gebruikt": self.perspectief is not None,
+        }
+        self._pending_opslag = {"schaatser_id": dlg.schaatser_id, "titel": dlg.titel,
+                                "instellingen": instellingen}
 
         self.stack.setCurrentWidget(self.pagina_analyse)
         self._start_analyse()
+
+    def _open_analyse_uit_bibliotheek(self, analyse_id=None):
+        """Opent een opgeslagen analyse: landmarks uit het .npz, afgeleiden vers
+        herberekend met de opgeslagen instellingen (de fase 0-naad)."""
+        if analyse_id is None:
+            analyse_id = self._geselecteerde_analyse_id()
+        if analyse_id is None:
+            return
+        try:
+            data = schaats_db.laad_analyse(self.bieb, analyse_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Fout bij openen",
+                                 f"Kan de analyse niet laden:\n\n{e}")
+            return
+
+        if not os.path.isfile(data["video_pad"]):
+            QMessageBox.warning(
+                self, "Video ontbreekt",
+                "Het videobestand van deze analyse staat (nog) niet op schijf — "
+                "mogelijk is de cloudmap nog aan het synchroniseren.\n\n"
+                "Probeer het later opnieuw.")
+            return
+
+        info, resultaten = data["info"], data["resultaten"]
+        inst = data["meta"]["instellingen"]
+        self.smooth_n = int(inst.get("smooth_n", 5))
+        self.threshold = float(inst.get("threshold", 0.015))
+        self.perspectief = None      # kalibratie wordt niet meegeserialiseerd (fase 0/1)
+        if inst.get("perspectief_gebruikt"):
+            QMessageBox.information(
+                self, "Zonder perspectiefcorrectie",
+                "Deze analyse is destijds met perspectiefcorrectie gedraaid, maar de "
+                "kalibratie wordt (nog) niet opgeslagen. De hoeken zijn nu zonder "
+                "correctie herberekend en kunnen dus afwijken.")
+
+        # De horizon zit al per frame in het .npz; alleen de afgeleiden herberekenen.
+        verwerk_afgeleiden(resultaten, info.w, info.h, info.fps,
+                           self.smooth_n, self.threshold)
+        events = segmenteer_afzetten(resultaten)
+
+        self.input_pad = data["video_pad"]
+        self.analyse_id = analyse_id
+        self.stack.setCurrentWidget(self.pagina_analyse)
+        self._toon_resultaten(info, resultaten, events, bron=data["meta"]["titel"])
 
     def _lees_eerste_frame(self):
         """Leest het eerste frame van de gekozen video, of None bij een fout."""
@@ -948,12 +1359,13 @@ class MainWindow(QMainWindow):
         if self.speeltimer.isActive():
             self.speeltimer.stop()
             self.btn_play.setText("▶")
+        self._vernieuw_schaatsers()   # nieuwe/gewijzigde analyses direct zichtbaar
         self.stack.setCurrentWidget(self.pagina_start)
 
     def _start_analyse(self):
         self._zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
-        self.btn_sla_landmarks.setEnabled(False)
+        self.btn_nieuwe_analyse.setEnabled(False)   # geen tweede worker eroverheen
 
         self.progress = QProgressDialog("Video analyseren...", None, 0, 100, self)
         self.progress.setWindowModality(Qt.WindowModal)
@@ -961,12 +1373,20 @@ class MainWindow(QMainWindow):
         self.progress.setMinimumDuration(0)
         self.progress.setValue(0)
 
+        opslag = self._pending_opslag or {}
         self.worker = AnalyseWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
                                     doel_punt=self.doel_punt, horizon_deg=self.horizon_deg,
                                     auto_horizon=self.auto_horizon,
-                                    smooth_landmarks=not self.chk_geen_smoothing.isChecked(),
-                                    perspectief=self.perspectief)
+                                    smooth_landmarks=not self.geen_smoothing,
+                                    perspectief=self.perspectief,
+                                    bieb=self.bieb,
+                                    schaatser_id=opslag.get("schaatser_id"),
+                                    titel=opslag.get("titel"),
+                                    instellingen=opslag.get("instellingen"),
+                                    backend=BACKEND_NAAM)
         self.worker.voortgang.connect(self._analyse_voortgang)
+        self.worker.status.connect(self._analyse_status)
+        self.worker.opslag_fout.connect(self._opslag_fout)
         self.worker.klaar.connect(self._analyse_klaar)
         self.worker.fout.connect(self._analyse_fout)
         self.worker.start()
@@ -976,13 +1396,35 @@ class MainWindow(QMainWindow):
             self.progress.setValue(int(frame_nr / totaal * 100))
         self.progress.setLabelText(f"Video analyseren... ({frame_nr}/{totaal})")
 
+    def _analyse_status(self, tekst):
+        # Busy-fase zonder bekende duur (videokopie naar de bibliotheek).
+        self.progress.setRange(0, 0)
+        self.progress.setLabelText(tekst)
+
+    def _opslag_fout(self, bericht):
+        QMessageBox.warning(
+            self, "Niet opgeslagen in bibliotheek",
+            "De analyse is gelukt, maar kon niet in de bibliotheek worden opgeslagen:\n\n"
+            f"{bericht}\n\nDe resultaten zijn nu wel zichtbaar, maar niet bewaard.")
+
     def _analyse_fout(self, bericht):
         self.progress.close()
+        self.btn_nieuwe_analyse.setEnabled(True)
+        self._pending_opslag = None
         QMessageBox.critical(self, "Fout bij analyseren", bericht)
         self._zet_besturing_actief(False)
 
-    def _analyse_klaar(self, info, resultaten, events):
+    def _analyse_klaar(self, info, resultaten, events, analyse_id):
         self.progress.close()
+        self.btn_nieuwe_analyse.setEnabled(True)
+        self._pending_opslag = None
+        self.analyse_id = analyse_id
+        if analyse_id is not None:
+            # Weergave leest voortaan de bibliotheekkopie; het origineel mag weg.
+            try:
+                self.input_pad = schaats_db.analyse_video_pad(self.bieb, analyse_id)
+            except Exception:
+                pass   # terugvallen op de bronvideo (alleen weergave)
         self._toon_resultaten(info, resultaten, events)
 
     def _toon_resultaten(self, info, resultaten, events, bron=None):
@@ -1006,7 +1448,6 @@ class MainWindow(QMainWindow):
         self._vul_grafiek()
         self._zet_besturing_actief(True)
         self.btn_export.setEnabled(bool(events))
-        self.btn_sla_landmarks.setEnabled(bool(resultaten))
 
         herkomst = f"  ·  geladen uit {bron}" if bron else ""
         self.statusBar().showMessage(
@@ -1220,74 +1661,6 @@ class MainWindow(QMainWindow):
         self._toon_frame(volgende)
 
     # ── Export ───────────────────────────────────────────────────────────
-    # ── Landmarks opslaan / laden (.npz) ─────────────────────────────────
-    def _sla_landmarks_op(self):
-        """Schrijft de landmarks van de huidige analyse weg; de afgeleiden niet (die
-        zijn herberekenbaar en worden bij het laden opnieuw bepaald)."""
-        if not self.resultaten or self.video_info is None:
-            return
-        standaard = os.path.splitext(os.path.basename(self.input_pad or "analyse"))[0] + ".npz"
-        pad, _ = QFileDialog.getSaveFileName(
-            self, "Landmarks opslaan", standaard, "Landmarks (*.npz)")
-        if not pad:
-            return
-        if not pad.lower().endswith(".npz"):
-            pad += ".npz"          # np.savez_compressed plakt 'm er anders zelf achter
-        try:
-            sla_landmarks_op(pad, self.resultaten, self.video_info)
-        except Exception as e:
-            QMessageBox.critical(self, "Fout bij opslaan", f"Kan niet opslaan:\n\n{e}")
-            return
-        kb = os.path.getsize(pad) / 1024
-        self.statusBar().showMessage(
-            f"Landmarks opgeslagen: {os.path.basename(pad)} ({kb:.0f} KB)", 5000)
-
-    def _laad_landmarks_vanaf_start(self):
-        """Laadt landmarks uit een .npz bij de gekozen video en berekent alleen de
-        afgeleiden opnieuw — geen detectie, dus klaar in seconden."""
-        pad, _ = QFileDialog.getOpenFileName(
-            self, "Landmarks laden", "", "Landmarks (*.npz);;Alle bestanden (*)")
-        if not pad:
-            return
-        try:
-            info, resultaten = laad_landmarks(pad)
-        except Exception as e:
-            QMessageBox.critical(self, "Fout bij laden",
-                                 f"Kan {os.path.basename(pad)} niet laden:\n\n{e}")
-            return
-
-        # Hoort dit .npz wel bij de gekozen video? Zo niet, dan zou het skelet op een
-        # heel ander beeld belanden — liever nu een nette melding.
-        try:
-            vinfo = video_info(self.input_pad)
-        except Exception as e:
-            QMessageBox.critical(self, "Fout", f"Kan de video niet lezen:\n\n{e}")
-            return
-        if (info.w, info.h) != (vinfo.w, vinfo.h):
-            QMessageBox.warning(
-                self, "Landmarks passen niet bij deze video",
-                f"De landmarks zijn opgeslagen voor {info.w}×{info.h}, maar de gekozen "
-                f"video is {vinfo.w}×{vinfo.h}.\n\nKies de video die bij dit bestand hoort.")
-            return
-        if len(resultaten) > vinfo.totaal + 1:
-            QMessageBox.warning(
-                self, "Landmarks passen niet bij deze video",
-                f"Het bestand bevat {len(resultaten)} frames, maar de video heeft er "
-                f"{vinfo.totaal}.\n\nKies de video die bij dit bestand hoort.")
-            return
-
-        self.smooth_n = self.spin_smooth.value()
-        self.threshold = self.spin_threshold.value()
-        self.perspectief = None      # kalibratie wordt niet meegeserialiseerd (fase 0)
-
-        # De horizon zit al per frame in het .npz; alleen de afgeleiden herberekenen.
-        verwerk_afgeleiden(resultaten, info.w, info.h, info.fps,
-                           self.smooth_n, self.threshold)
-        events = segmenteer_afzetten(resultaten)
-
-        self.stack.setCurrentWidget(self.pagina_analyse)
-        self._toon_resultaten(info, resultaten, events, bron=os.path.basename(pad))
-
     def _exporteer_csv(self):
         pad, _ = QFileDialog.getSaveFileName(self, "Exporteer afzethoeken", "afzethoeken.csv", "CSV (*.csv)")
         if not pad:
