@@ -83,6 +83,18 @@ BLUR_FRAME_FRAC = 0.5     # is minder dan deze fractie van de data-dragende gewr
                           # (bewegingsonscherpte) — vertrouw dan de hele ruwe detectie i.p.v.
                           # het complete skelet weg te interpoleren
 
+# ── Voorspelbaarheids-checks (schaatsen is een voorspelbare beweging) ───────────
+# 1. L/R-verwisseling: bij kruisende/overlappende benen hangt het pose-model links
+#    en rechts geregeld verkeerd om. Dat vangt Hampel alleen kortstondig — een
+#    aanhoudende verwisseling vergiftigt de afzetbeen-cyclus (l−r-enkelsignaal).
+#    We volgen daarom per gewrichtspaar de continuïteit van de twee trajecten en
+#    kiezen per frame de toewijzing met de kleinste sprong.
+LR_SWAP_FACTOR = 0.8      # wissel alleen als de gewisselde toewijzing dúidelijk beter
+                          # past (kostenratio); voorkomt geflikker als de benen kruisen
+# 2. Botlengte: onder- en bovenbeen zijn star — hun pixellengte hoort alleen traag
+#    te veranderen (afstand tot de camera). Een plotse lengtesprong is een
+#    detectiefout, óók als x en y elk binnen hun eigen Hampel-band blijven.
+
 # ── Cyclus-bewuste afzetbeen-bepaling ───────────────────────────────────────────
 # Het enkel-hoogteverschil (links vs rechts) oscilleert met de schaatsslag. We
 # smoothen dat signaal en passen het met hysterese toe, zodat het standbeen alleen
@@ -137,6 +149,11 @@ class FrameResultaat:
     signalen: list = field(default_factory=list)
     pose_gevonden: bool = False
     horizon_deg: float = 0.0    # camerakanteling t.o.v. het ijs bij dit frame (per-frame bij auto)
+    # Kwaliteitsvlag uit de verfijningspass (alleen YOLO+RTMPose-backend): horizontale
+    # afwijking (px) van het kniepunt t.o.v. de middellijn van het been in het pak-
+    # kleurmasker. Frontaal gefilmd hoort het gewricht in het midden van het been te
+    # liggen; een grote afwijking markeert frames waar de meting wankel is.
+    middellijn_dev: dict = None     # {'l_knie': px, 'r_knie': px} (None = niet gemeten)
     # Perspectiefcorrectie (alleen gevuld mét kalibratie; None/True = geen correctie actief):
     hoek_correctie: float = None    # gecorrigeerde − oude beeldvlak-hoek (kwaliteitsindicator)
     hoek_betrouwbaar: bool = True   # False: been bijna in de kijkrichting / geometrie sloot niet
@@ -763,6 +780,72 @@ def _begrens_interpolatie(betrouwbaar, max_run):
     return b
 
 
+def _fix_lr_swaps(X, Y, V, w, h):
+    """
+    Herstel links/rechts-verwisselingen van de beengewrichten binnen één segment.
+    Werkt in-place op de segment-arrays X/Y/V (T×33). Per gewrichtspaar (knieën,
+    enkels) worden de twee trajecten op continuïteit gevolgd: past op frame t de
+    gewisselde toewijzing dúidelijk beter bij de vorige posities (kosten <
+    LR_SWAP_FACTOR × ongewisseld), dan worden L en R daar omgedraaid. Hiel en teen
+    volgen de enkel-beslissing (die zitten aan hetzelfde lichaamsdeel vast).
+
+    Omdat het kettinkje op het eerste frame is verankerd, kan een verkeerd eerste
+    frame de hele reeks omgekeerd labelen; daarom achteraf een meerderheidsstem
+    tegen de ruwe detectorlabels — de detector heeft het meestal goed, wij
+    repareren alleen de minderheids-stukken.
+    """
+    paren = ((L_KNEE, R_KNEE, ()),
+             (L_ANKLE, R_ANKLE, ((L_HEEL, R_HEEL), (L_TOE, R_TOE))))
+    T = len(X)
+    for l, r, volgers in paren:
+        gewisseld = np.zeros(T, dtype=bool)
+        prev_l = prev_r = None
+        for t in range(T):
+            if V[t, l] < VIS_MIN or V[t, r] < VIS_MIN:
+                continue                     # onbetrouwbaar frame: niet beslissen
+            pl = np.array([X[t, l] * w, Y[t, l] * h])
+            pr = np.array([X[t, r] * w, Y[t, r] * h])
+            if prev_l is not None:
+                kost_id = (np.linalg.norm(pl - prev_l) + np.linalg.norm(pr - prev_r))
+                kost_sw = (np.linalg.norm(pl - prev_r) + np.linalg.norm(pr - prev_l))
+                if kost_sw < LR_SWAP_FACTOR * kost_id:
+                    gewisseld[t] = True
+                    pl, pr = pr, pl
+            prev_l, prev_r = pl, pr
+        if not gewisseld.any():
+            continue
+        if gewisseld.mean() > 0.5:           # ketting verkeerd verankerd: labels omdraaien
+            gewisseld = ~gewisseld
+        wissel_idx = [(l, r)] + list(volgers)
+        for t in np.flatnonzero(gewisseld):
+            for a, b in wissel_idx:
+                for A in (X, Y, V):
+                    A[t, a], A[t, b] = A[t, b], A[t, a]
+
+
+def _botlengte_uitschieters(X, Y, V, w, h):
+    """
+    Booleaans masker (T×33): gewrichten waarvan een aangrenzend bot (femur/tibia)
+    in dat frame een lengte-uitschieter heeft. Botten zijn star; hun beeldlengte
+    verandert alleen traag met de afstand tot de camera. Een sprong betekent dat
+    (minstens) één eindpunt fout gedetecteerd is — welke weten we niet, dus beide
+    eindpunten gelden daar als onbetrouwbaar.
+    """
+    T = len(X)
+    mask = np.zeros((T, X.shape[1]), dtype=bool)
+    botten = ((L_HIP, L_KNEE), (R_HIP, R_KNEE), (L_KNEE, L_ANKLE), (R_KNEE, R_ANKLE))
+    for a, b in botten:
+        geldig = (V[:, a] >= VIS_MIN) & (V[:, b] >= VIS_MIN)
+        idx = np.flatnonzero(geldig)
+        if len(idx) < HAMPEL_WINDOW:
+            continue
+        lengte = np.hypot((X[idx, a] - X[idx, b]) * w, (Y[idx, a] - Y[idx, b]) * h)
+        fout = _hampel_uitschieters(lengte)
+        for t in idx[fout]:
+            mask[t, a] = mask[t, b] = True
+    return mask
+
+
 def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
                              poly=SMOOTH_POLY, fps=30.0):
     """
@@ -797,6 +880,9 @@ def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
         X = np.array([[resultaten[i].lm[j].x for j in range(n_lm)] for i in seg])
         Y = np.array([[resultaten[i].lm[j].y for j in range(n_lm)] for i in seg])
         V = np.array([[resultaten[i].lm[j].visibility for j in range(n_lm)] for i in seg])
+        # Eerst links/rechts-verwisselingen herstellen: die zien er voor de per-
+        # gewricht-filters uit als (dubbele) sprongen, maar zijn exact herstelbaar.
+        _fix_lr_swaps(X, Y, V, w, h)
         # Onbetrouwbaar = slecht zichtbaar óf een positie-uitschieter (occlusie).
         Bet = np.empty((len(seg), n_lm), dtype=bool)
         for j in range(n_lm):
@@ -804,6 +890,8 @@ def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
             b &= ~_hampel_uitschieters(X[:, j])
             b &= ~_hampel_uitschieters(Y[:, j])
             Bet[:, j] = b
+        # Botlengte-check: een femur/tibia-lengtesprong markeert beide eindpunten.
+        Bet &= ~_botlengte_uitschieters(X, Y, V, w, h)
         # Blurframe-vangnet: als het merendeel van de data-dragende gewrichten in een
         # frame tegelijk onbetrouwbaar heet, is dat een gecorreleerde confidence-dip
         # (bewegingsonscherpte), geen occlusie van één gewricht. De ruwe detectie zit
@@ -820,9 +908,10 @@ def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
             Y[:, j] = _savgol(ys, window, poly)
         for t, i in enumerate(seg):
             oud = resultaten[i].lm
+            # Visibility uit V (niet uit oud): bij een L/R-wissel is die meegewisseld.
             resultaten[i].lm = [
                 Landmark(float(X[t, j]), float(Y[t, j]),
-                         getattr(oud[j], 'z', 0.0), oud[j].visibility)
+                         getattr(oud[j], 'z', 0.0), float(V[t, j]))
                 for j in range(n_lm)
             ]
 
@@ -1224,9 +1313,14 @@ def resultaten_naar_arrays(resultaten, info):
     landmarks     = np.zeros((n, 33, 3), dtype=np.float32)   # x, y, visibility
     pose_gevonden = np.zeros(n, dtype=bool)
     horizon       = np.zeros(n, dtype=np.float32)
+    middellijn    = np.full((n, 2), np.nan, dtype=np.float32)  # dev l_knie, r_knie (px)
     for i, r in enumerate(resultaten):
         pose_gevonden[i] = r.pose_gevonden
         horizon[i]       = r.horizon_deg
+        if r.middellijn_dev:
+            for k, naam in enumerate(('l_knie', 'r_knie')):
+                if r.middellijn_dev.get(naam) is not None:
+                    middellijn[i, k] = r.middellijn_dev[naam]
         if r.pose_gevonden and r.lm is not None:
             for j, p in enumerate(r.lm):
                 landmarks[i, j, 0] = p.x
@@ -1236,6 +1330,7 @@ def resultaten_naar_arrays(resultaten, info):
         'landmarks':     landmarks,
         'pose_gevonden': pose_gevonden,
         'horizon_deg':   horizon,
+        'middellijn_dev': middellijn,
         'w':      np.int32(info.w),
         'h':      np.int32(info.h),
         'fps':    np.float32(info.fps),
@@ -1253,6 +1348,7 @@ def arrays_naar_resultaten(arrays):
     landmarks     = arrays['landmarks']
     pose_gevonden = arrays['pose_gevonden']
     horizon       = arrays['horizon_deg']
+    middellijn    = arrays['middellijn_dev'] if 'middellijn_dev' in arrays else None
     info = VideoInfo(int(arrays['w']), int(arrays['h']),
                      float(arrays['fps']), int(arrays['totaal']))
     fps = info.fps
@@ -1261,6 +1357,10 @@ def arrays_naar_resultaten(arrays):
         r = FrameResultaat(frame_nr=i, tijd=i / fps if fps > 0 else 0.0)
         r.pose_gevonden = bool(pose_gevonden[i])
         r.horizon_deg   = float(horizon[i])
+        if middellijn is not None and not np.all(np.isnan(middellijn[i])):
+            r.middellijn_dev = {
+                naam: (float(middellijn[i, k]) if not np.isnan(middellijn[i, k]) else None)
+                for k, naam in enumerate(('l_knie', 'r_knie'))}
         if r.pose_gevonden:
             r.lm = [Landmark(float(x), float(y), 0.0, float(v))
                     for x, y, v in landmarks[i]]

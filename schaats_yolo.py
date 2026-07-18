@@ -17,17 +17,20 @@ elk frame de doelschaatser is. Dat is veel robuuster dan per frame streaming kie
    als de pakkleur bij de referentie past én zijn startpositie strookt met de
    voorspelde positie (constante snelheid over het gat — de rijrichting van een
    schaatser is voorspelbaar).
-4. **Crop-verfijningspass** (`verfijn`): per frame wordt een vierkante uitsnede rond
-   de doelschaatser opnieuw door het pose-model gehaald. De schaatser vult dan het
-   inferentiebeeld, wat aanzienlijk nauwkeurigere keypoints (en dus hoeken) geeft;
-   detectiegaten worden via geïnterpoleerde crops alsnog gevuld. De pakkleur blijft
-   de poortwachter, zodat de verfijning nooit stiekem de andere schaatser pakt.
+4. **Verfijningspass** (`verfijn`): per doel-frame wordt de pose opnieuw geschat met
+   een **top-down model op de bekende bounding box** — bij voorkeur **RTMPose-26**
+   (Halpe26, via rtmlib/ONNXRuntime): wezenlijk nauwkeuriger dan yolo11x-pose
+   (~76 vs ~69,5 COCO-AP, subpixel SimCC-decodering) én met échte hiel/teen-
+   keypoints, en bovendien veel sneller op CPU. Detectiegaten worden via
+   geïnterpoleerde bboxes alsnog gevuld. De pakkleur blijft de poortwachter, zodat
+   de verfijning nooit stiekem de andere schaatser pakt. Is rtmlib niet
+   geïnstalleerd, dan valt de pass terug op de oude vierkante-crop + yolo11x-route.
 
 De rest van de pijplijn (offline smoothing, afgeleiden, tekenen, GUI) uit
 `schaats_analyse.py` wordt ongewijzigd hergebruikt. Vereist torch/ultralytics
 (zie .venv-yolo). YOLO levert COCO-17 keypoints; die mappen we in de MediaPipe-33-
-indeling. Hiel/teen bestaan niet in COCO en worden op de enkel gelegd met
-visibility 0 (niet getekend, niet gebruikt in de metingen).
+indeling. Hiel/teen bestaan niet in COCO en worden daar op de enkel gelegd met
+visibility 0; RTMPose-26 levert ze wél echt (Halpe26 → MediaPipe 29–32).
 """
 import os
 from collections import deque
@@ -38,13 +41,20 @@ import numpy as np
 from ultralytics import YOLO   # op moduleniveau: zo faalt de import meteen als torch/
                                # ultralytics ontbreekt, en kiest de GUI netjes MediaPipe.
 
+try:                           # optioneel: RTMPose-verfijning (pip install rtmlib onnxruntime)
+    from rtmlib.tools.pose_estimation import RTMPose as _RTMPose
+    IS_RTMPOSE = True
+except ImportError:
+    IS_RTMPOSE = False
+
 from schaats_analyse import (
     FrameResultaat, Landmark, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
     NUM_POSES_DEFAULT,
 )
 
-BACKEND_NAAM = "YOLO-pose + ByteTrack"
+BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
+                else "YOLO-pose + ByteTrack")
 
 # yolo11x-pose = meest nauwkeurig (traagst op CPU). Alternatief: "yolo11m-pose.pt"
 # (sneller, iets minder nauwkeurig). Ultralytics downloadt het model bij eerste gebruik.
@@ -68,11 +78,19 @@ SNELHEID_VENSTER  = 5        # aantal detecties waarover de snelheid wordt gesch
 MIN_VERPLAATSING  = 0.06     # tracklet-padlengte hieronder = statische omstander
 KLIK_ZOEK_FRAMES  = 60       # zolang zoeken we (in frames) naar de aangeklikte schaatser
 
-# ── Crop-verfijning ─────────────────────────────────────────────────────────────
+# ── Verfijning ──────────────────────────────────────────────────────────────────
+GAP_VUL_S       = 1.0        # max. detectiegat dat via geïnterpoleerde bboxes wordt gevuld
+# RTMPose-26 (Halpe26 = COCO-17 + hoofd/nek/heupcentrum + voeten), top-down op de
+# doel-bbox. 'body7'-gewichten = getraind op 7 datasets, robuust op sportbeelden.
+RTMPOSE_MODEL = ('https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/'
+                 'onnx_sdk/rtmpose-x_simcc-body7_pt-body7-halpe26_700e-384x288'
+                 '-7fb6e239_20230606.zip')
+RTMPOSE_INPUT = (288, 384)   # (breedte, hoogte) van de modelinvoer
+RTMPOSE_MIN_SCORE = 0.3      # min. gemiddelde been-keypointscore om de schatting te vertrouwen
+# Terugvalroute zonder rtmlib (vierkante crop door yolo11x):
 VERFIJN_IMGSZ   = 640        # inferentiegrootte op de uitsnede
 VERFIJN_MARGE   = 1.9        # cropzijde = marge × grootste bbox-zijde
 VERFIJN_MIN_PX  = 256        # ondergrens cropzijde (pixels)
-GAP_VUL_S       = 1.0        # max. detectiegat dat via geïnterpoleerde crops wordt gevuld
 
 # COCO-17 keypoint-index → MediaPipe 33-landmark-index.
 COCO_NAAR_MP = {
@@ -85,7 +103,13 @@ COCO_NAAR_MP = {
     15: 27, 16: 28,   # enkels
 }
 # COCO-indices van torso-hoekpunten in polygonvolgorde (voor het kleur-masker).
+# Halpe26 heeft dezelfde eerste 17 indices als COCO, dus dit geldt voor beide.
 TORSO_COCO = (5, 6, 12, 11)
+
+# Halpe26-extra's (na de 17 COCO-punten) → MediaPipe-index. Kleine tenen (22/23)
+# hebben geen MediaPipe-equivalent en blijven ongebruikt.
+HALPE_NAAR_MP = {20: 31, 21: 32,   # grote tenen (L, R) → foot_index
+                 24: 29, 25: 30}   # hielen (L, R)
 
 
 def _coco_naar_landmarks(kp_xy, kp_conf, w, h):
@@ -98,6 +122,16 @@ def _coco_naar_landmarks(kp_xy, kp_conf, w, h):
     for m_foot, m_ankle in ((29, 27), (31, 27), (30, 28), (32, 28)):
         a = lm[m_ankle]
         lm[m_foot] = Landmark(a.x, a.y, 0.0, 0.0)
+    return lm
+
+
+def _halpe26_naar_landmarks(kp_xy, kp_conf, w, h):
+    """Halpe26 keypoints (pixels + conf) → 33 genormaliseerde Landmarks, mét voeten."""
+    lm = [Landmark(0.0, 0.0, 0.0, 0.0) for _ in range(33)]
+    for c, m in list(COCO_NAAR_MP.items()) + list(HALPE_NAAR_MP.items()):
+        x, y = kp_xy[c]
+        vis = float(np.clip(kp_conf[c], 0.0, 1.0))
+        lm[m] = Landmark(float(x) / w, float(y) / h, 0.0, vis)
     return lm
 
 
@@ -383,47 +417,50 @@ def _stik_keten(seed, tracklets, fps):
     return [per_frame[f] for f in sorted(per_frame)], ref
 
 
-# ── Crop-verfijning ─────────────────────────────────────────────────────────────
+# ── Verfijningspass ─────────────────────────────────────────────────────────────
 def _interpoleer_doel(doel_per_frame, n_frames, fps):
     """
-    Vul detectiegaten ≤ GAP_VUL_S met lineair geïnterpoleerde centroid/bbox-groottes,
-    zodat de verfijningspass daar tóch een crop kan proberen. Retourneert
-    {frame: (centroid, zijde_norm, echt)} — `echt` False voor geïnterpoleerde plekken.
+    Vul detectiegaten ≤ GAP_VUL_S met lineair geïnterpoleerde bboxes, zodat de
+    verfijningspass daar tóch een schatting kan proberen. Retourneert
+    {frame: (bbox_norm_xyxy, echt)} — `echt` False voor geïnterpoleerde plekken.
     """
     plan = {}
     frames = sorted(doel_per_frame)
     for f in frames:
-        d = doel_per_frame[f]
-        zijde = max(d.bbox[2] - d.bbox[0], d.bbox[3] - d.bbox[1])
-        plan[f] = (d.centroid, zijde, True)
+        plan[f] = (doel_per_frame[f].bbox, True)
     max_gap = int(round(GAP_VUL_S * fps))
     for a, b in zip(frames, frames[1:]):
         g = b - a
         if 1 < g <= max_gap:
-            da, db = doel_per_frame[a], doel_per_frame[b]
-            za = max(da.bbox[2] - da.bbox[0], da.bbox[3] - da.bbox[1])
-            zb = max(db.bbox[2] - db.bbox[0], db.bbox[3] - db.bbox[1])
+            ba = np.array(doel_per_frame[a].bbox)
+            bb = np.array(doel_per_frame[b].bbox)
             for f in range(a + 1, b):
                 t = (f - a) / g
-                c = (da.centroid[0] + t * (db.centroid[0] - da.centroid[0]),
-                     da.centroid[1] + t * (db.centroid[1] - da.centroid[1]))
-                plan[f] = (c, za + t * (zb - za), False)
+                plan[f] = (tuple(ba + t * (bb - ba)), False)
     return plan
 
 
+def _maak_rtmpose():
+    """RTMPose-26-model voor de verfijningspass, of None zonder rtmlib."""
+    if not IS_RTMPOSE:
+        return None
+    return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT)
+
+
 def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                       progress_callback=None):
+                       progress_callback=None, rtmpose=None):
     """
-    Pass 2: lees de video opnieuw en haal per doel-frame een vierkante uitsnede rond
-    de schaatser door het pose-model. De schaatser vult dan het inferentiebeeld →
-    aanzienlijk nauwkeurigere keypoints dan in de volledige-frame-pass. De pakkleur
-    (referentie `ref`) bepaalt wélke persoon in de crop het doel is, zodat een tweede
-    schaatser in de uitsnede nooit stilletjes wordt overgenomen.
+    Pass 2: lees de video opnieuw en schat per doel-frame de pose opnieuw, nu met de
+    schaatser beeldvullend in het inferentiebeeld → aanzienlijk nauwkeurigere
+    keypoints dan in de volledige-frame-pass. Met `rtmpose` gaat dat top-down op de
+    doel-bbox (RTMPose-26: subpixel-decodering + echte hiel/teen); anders via een
+    vierkante crop door het YOLO-model. De pakkleur (referentie `ref`) bewaakt in
+    beide routes dat nooit stilletjes een andere persoon wordt overgenomen.
     Retourneert {frame: lm} met verfijnde (of herstelde) landmarks.
     """
     plan = _interpoleer_doel(doel_per_frame, info.totaal, info.fps)
     w, h = info.w, info.h
-    uit = {}
+    uit, devs = {}, {}
     cap = cv2.VideoCapture(input_pad)
     f = 0
     while True:
@@ -431,23 +468,156 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
         if not ret:
             break
         if f in plan:
-            (cx, cy), zijde, echt = plan[f]
-            kant = int(max(VERFIJN_MIN_PX, VERFIJN_MARGE * zijde * max(w, h)))
-            kant = min(kant, min(w, h))
-            x0 = int(np.clip(cx * w - kant / 2, 0, w - kant))
-            y0 = int(np.clip(cy * h - kant / 2, 0, h - kant))
-            crop = frame[y0:y0 + kant, x0:x0 + kant]
-            res = model.predict(crop, imgsz=VERFIJN_IMGSZ, classes=[0], verbose=False)[0]
-            keuze = _kies_in_crop(res, crop, (cx * w - x0, cy * h - y0), kant, ref)
-            if keuze is not None:
-                kp_xy, kp_conf = keuze
-                kp_full = kp_xy + [x0, y0]
-                uit[f] = _coco_naar_landmarks(kp_full, kp_conf, w, h)
+            bbox, echt = plan[f]
+            if rtmpose is not None:
+                lm, dev = _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h)
+                if dev is not None:
+                    devs[f] = dev
+            else:
+                lm = _verfijn_yolo_crop(model, frame, bbox, ref, w, h)
+            if lm is not None:
+                uit[f] = lm
         f += 1
         if progress_callback is not None:
             progress_callback(f, info.totaal)
     cap.release()
-    return uit
+    return uit, devs
+
+
+# Halpe26-indices van de been-keypoints (heupen t/m enkels) voor de kwaliteitscheck.
+_HALPE_BENEN = (11, 12, 13, 14, 15, 16)
+
+# ── Middellijn-kwaliteitsvlag ───────────────────────────────────────────────────
+# Frontaal gefilmd hoort een gewricht horizontaal in het midden van het been te
+# liggen. We meten per knie de afwijking t.o.v. de middellijn van het been in een
+# kleurmasker. De kleur komt uit een **dij-zelfsample van hetzelfde been in
+# hetzelfde frame** (niet uit de torso-referentie: een pak is geregeld tweekleurig
+# — witte torso, zwarte broek — maar dij en knie zijn altijd dezelfde stof, met
+# dezelfde belichting). Puur een kwaliteitsvlag: grote afwijking = wankel frame.
+# Bewust géén automatische correctie zolang niet gemeten is dat die de hoeken
+# verbetert.
+MIDDELLIJN_ROIJEN     = 5      # aantal beeldrijen rond de knie-y waarover gemiddeld wordt
+MIDDELLIJN_BP_DREMPEL = 0.2    # maskerdrempel als fractie van het back-projection-maximum
+MIDDELLIJN_RUN_MIN    = 0.08   # min. runbreedte als fractie van de tibialengte (ruis)
+MIDDELLIJN_RUN_MAX    = 0.8    # max. runbreedte — breder = benen/arm samengesmolten: overslaan
+MIDDELLIJN_MIN_RIJEN  = 0.6    # min. fractie bruikbare rijen voor een geldige meting
+
+
+def _been_hist(frame, heup_xy, knie_xy, tibia_len):
+    """HSV-histogram (0–255-genormaliseerd, voor back-projection) van een blokje
+    midden op het bovenbeen — de kleur van de broekspijp van dít been."""
+    mid_x = (float(heup_xy[0]) + float(knie_xy[0])) / 2
+    mid_y = (float(heup_xy[1]) + float(knie_xy[1])) / 2
+    half = int(np.clip(0.12 * tibia_len, 4, 30))
+    x0, y0, x1, y1 = int(mid_x - half), int(mid_y - half), int(mid_x + half), int(mid_y + half)
+    if x0 < 0 or y0 < 0 or x1 > frame.shape[1] or y1 > frame.shape[0] or x1 - x0 < 4:
+        return None
+    hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1, 2], None, list(KLEUR_BINS),
+                        [0, 180, 0, 256, 0, 256])
+    # 0–255 i.p.v. L1: calcBackProject geeft uint8 terug — met een L1-histogram
+    # (waarden ≪ 1) trunceert álles naar 0 en is het masker altijd leeg.
+    return cv2.normalize(hist, None, 0, 255, cv2.NORM_MINMAX)
+
+
+def _middellijn_afwijking(frame, been_hist, knie_xy, tibia_len):
+    """
+    Horizontale afwijking (px, getekend: middellijn − keypoint) van één kniepunt
+    t.o.v. het midden van het been in het kleurmasker, of None als de meting
+    niet lukt (been niet vrijstaand, kleur onduidelijk, beeldrand).
+    """
+    if been_hist is None or tibia_len < 12:
+        return None
+    h, w = frame.shape[:2]
+    kx, ky = float(knie_xy[0]), float(knie_xy[1])
+    half_b = int(np.clip(0.7 * tibia_len, 12, 90))
+    half_r = MIDDELLIJN_ROIJEN // 2
+    x0, x1 = int(kx - half_b), int(kx + half_b + 1)
+    y0, y1 = int(ky - half_r), int(ky + half_r + 1)
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        return None
+    hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+    bp = cv2.calcBackProject([hsv], [0, 1, 2], been_hist,
+                             [0, 180, 0, 256, 0, 256], scale=1)
+    piek = float(bp.max())
+    if piek <= 0:
+        return None
+    masker = bp >= MIDDELLIJN_BP_DREMPEL * piek
+
+    centra = []
+    kx_lokaal = kx - x0
+    for rij in masker:
+        # De aaneengesloten run van pak-pixels die het kniepunt bevat.
+        idx = np.flatnonzero(rij)
+        if len(idx) == 0:
+            continue
+        # runs = groepen opeenvolgende indices
+        splitsingen = np.flatnonzero(np.diff(idx) > 1)
+        runs = np.split(idx, splitsingen + 1)
+        run = next((rn for rn in runs if rn[0] - 2 <= kx_lokaal <= rn[-1] + 2), None)
+        if run is None:
+            continue
+        breedte = run[-1] - run[0] + 1
+        if not (MIDDELLIJN_RUN_MIN * tibia_len <= breedte <= MIDDELLIJN_RUN_MAX * tibia_len):
+            continue
+        centra.append((run[0] + run[-1]) / 2.0)
+    if len(centra) < MIDDELLIJN_MIN_RIJEN * masker.shape[0]:
+        return None
+    return round(float(np.median(centra) - kx_lokaal), 1)
+
+
+def _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h):
+    """
+    Top-down verfijning van één frame: RTMPose-26 op de doel-bbox (pixels).
+    De kleurpoort houdt de andere schaatser buiten: matcht de torso-kleur van de
+    schatting niet met de referentie, dan vervalt de verfijning (bij een echte
+    detectie blijven de pass-1-landmarks staan; een geïnterpoleerd gat-frame eist
+    juist een positieve kleurmatch, want daar is geen pass-1-vangnet).
+    Retourneert (lm | None, middellijn-dev-dict | None).
+    """
+    bbox_px = (bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h)
+    kps, scores = rtmpose(frame, [list(bbox_px)])
+    kp, sc = kps[0], scores[0]
+
+    if float(sc[list(_HALPE_BENEN)].mean()) < RTMPOSE_MIN_SCORE:
+        return None, None                  # benen niet gezien (occlusie): niet vertrouwen
+    sim = ref.sim(_torso_hist(frame, kp, sc, bbox_px))
+    if echt:
+        if sim is not None and sim < KLEUR_SPLIT_MIN:
+            return None, None              # duidelijk een ander pak in de bbox
+    else:
+        if sim is None or sim < KLEUR_MATCH_MIN:
+            return None, None              # gat-frame: alleen vullen bij zékere match
+
+    # Kwaliteitsvlag: knie t.o.v. de middellijn van het been (Halpe: 11/13/15 =
+    # L heup/knie/enkel, 12/14/16 = R). Alleen meten, niet corrigeren.
+    dev = {}
+    for naam, h_i, k_i, e_i in (('l_knie', 11, 13, 15), ('r_knie', 12, 14, 16)):
+        dev[naam] = None
+        if min(sc[h_i], sc[k_i], sc[e_i]) >= RTMPOSE_MIN_SCORE:
+            tibia = float(np.hypot(*(kp[k_i] - kp[e_i])))
+            been_hist = _been_hist(frame, kp[h_i], kp[k_i], tibia)
+            dev[naam] = _middellijn_afwijking(frame, been_hist, kp[k_i], tibia)
+    if dev['l_knie'] is None and dev['r_knie'] is None:
+        dev = None
+    return _halpe26_naar_landmarks(kp, sc, w, h), dev
+
+
+def _verfijn_yolo_crop(model, frame, bbox, ref, w, h):
+    """Terugvalroute zonder rtmlib: vierkante crop rond de bbox door het YOLO-model."""
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    zijde = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+    kant = int(max(VERFIJN_MIN_PX, VERFIJN_MARGE * zijde * max(w, h)))
+    kant = min(kant, min(w, h))
+    x0 = int(np.clip(cx * w - kant / 2, 0, w - kant))
+    y0 = int(np.clip(cy * h - kant / 2, 0, h - kant))
+    crop = frame[y0:y0 + kant, x0:x0 + kant]
+    res = model.predict(crop, imgsz=VERFIJN_IMGSZ, classes=[0], verbose=False)[0]
+    keuze = _kies_in_crop(res, crop, (cx * w - x0, cy * h - y0), kant, ref)
+    if keuze is None:
+        return None
+    kp_xy, kp_conf = keuze
+    return _coco_naar_landmarks(kp_xy + [x0, y0], kp_conf, w, h)
 
 
 def _kies_in_crop(res, crop, verwacht_xy, kant, ref):
@@ -528,12 +698,13 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
         keten, ref = _stik_keten(seed, tracklets, info.fps)
         doel_per_frame = {d.frame: d for d in keten}
 
-    # Pass 2: crop-verfijning (nauwkeurigere keypoints + gaten vullen).
+    # Pass 2: verfijning (nauwkeurigere keypoints + gaten vullen), top-down met
+    # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route.
     if verfijn and doel_per_frame:
-        verfijnd = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                                      progress_callback=ver_cb)
+        verfijnd, devs = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
+                                            progress_callback=ver_cb, rtmpose=_maak_rtmpose())
     else:
-        verfijnd = {}
+        verfijnd, devs = {}, {}
 
     resultaten = []
     for f in range(n_frames):
@@ -544,6 +715,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
         if lm is not None:
             r.lm = lm
             r.pose_gevonden = True
+            r.middellijn_dev = devs.get(f)
         resultaten.append(r)
 
     if smooth_landmarks:
