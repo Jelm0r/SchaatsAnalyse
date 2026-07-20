@@ -26,7 +26,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
-    QGroupBox, QCheckBox, QFileDialog, QMessageBox, QProgressDialog,
+    QGroupBox, QCheckBox, QFileDialog, QMessageBox, QProgressBar,
     QHeaderView, QAbstractItemView, QToolBar, QStackedWidget, QSpinBox,
     QDoubleSpinBox, QDialog, QRadioButton, QComboBox, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QInputDialog,
@@ -1037,6 +1037,8 @@ class MainWindow(QMainWindow):
         self.bieb = None            # bibliotheekpad (gezet door _zet_bibliotheek)
         self.analyse_id = None      # id van de geopende analyse in de bibliotheek
         self._pending_opslag = None # {schaatser_id, titel, instellingen} voor de worker
+        self._bezig = False         # draait er een (batch-)analyse op de achtergrond?
+        self._auto_toon_klaar = True  # mag de verse analyse bij afronden vanzelf getoond?
 
         # Skelet-editor (fase 3)
         self._editor_actief = False
@@ -1068,13 +1070,24 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.actie_bibliotheek)
 
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
-
         self.pagina_start = self._bouw_startpagina()
         self.pagina_analyse = self._bouw_analysepagina()
         self.stack.addWidget(self.pagina_start)
         self.stack.addWidget(self.pagina_analyse)
         self.stack.setCurrentWidget(self.pagina_start)
+
+        # Centraal = de stack + een blijvende voortgangsbalk onderin (verborgen tenzij
+        # er een analyse/batch draait). Doordat de balk buiten de stack staat, blijft ze
+        # over paginawissels heen zichtbaar en blokkeert ze het venster niet — zo kan er
+        # gebrowst worden terwijl een analyse op de achtergrond rekent.
+        self.voortgang_balk = self._bouw_voortgangsbalk()
+        centraal = QWidget()
+        cv = QVBoxLayout(centraal)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
+        cv.addWidget(self.stack, stretch=1)
+        cv.addWidget(self.voortgang_balk)
+        self.setCentralWidget(centraal)
 
         self.lbl_live = QLabel("")
         self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
@@ -1372,6 +1385,50 @@ class MainWindow(QMainWindow):
                   self.chk_volg, self.slider_zoom, self.btn_zoom_reset):
             w.setEnabled(actief)
 
+    # ── Voortgangsbalk (niet-blokkerend, blijft over paginawissels heen staan) ──
+    def _bouw_voortgangsbalk(self):
+        """Een dunne balk onderin met label + voortgang en (voor batch) een stopknop.
+        Vervangt de vroegere modale voortgangsdialoog die het hele venster blokkeerde."""
+        balk = QWidget()
+        h = QHBoxLayout(balk)
+        h.setContentsMargins(10, 4, 10, 4)
+        self.lbl_voortgang = QLabel("")
+        self.bar_voortgang = QProgressBar()
+        self.bar_voortgang.setRange(0, 100)
+        self.bar_voortgang.setFixedWidth(260)
+        self.btn_voortgang_stop = QPushButton("Stop na deze video")
+        self.btn_voortgang_stop.clicked.connect(self._batch_stop_gevraagd)
+        self.btn_voortgang_stop.hide()
+        h.addWidget(self.lbl_voortgang, stretch=1)
+        h.addWidget(self.bar_voortgang)
+        h.addWidget(self.btn_voortgang_stop)
+        balk.hide()
+        return balk
+
+    def _toon_voortgangsbalk(self, tekst, met_stop=False):
+        self.lbl_voortgang.setText(tekst)
+        self.bar_voortgang.setRange(0, 100)
+        self.bar_voortgang.setValue(0)
+        self.btn_voortgang_stop.setEnabled(True)
+        self.btn_voortgang_stop.setVisible(met_stop)
+        self.voortgang_balk.show()
+
+    def _verberg_voortgangsbalk(self):
+        self.voortgang_balk.hide()
+
+    def _zet_bezig(self, bezig):
+        """Schakelt tijdens een lopende (batch-)analyse de knoppen uit die met de worker
+        kunnen botsen (een tweede analyse/batch starten, of de schaatser weggooien onder
+        wie straks wordt opgeslagen). Openen/afspelen blijft bewust bruikbaar, zodat er
+        gebrowst kan worden terwijl de analyse draait."""
+        self._bezig = bezig
+        self.btn_nieuwe_analyse.setEnabled(not bezig)
+        self.btn_batch_analyse.setEnabled(not bezig)
+        if bezig:
+            self.btn_verwijder_schaatser.setEnabled(False)
+        else:
+            self._vernieuw_analyses()   # selectie-afhankelijke knoppen terug in hun stand
+
     # ── Bibliotheek (fase 1) ─────────────────────────────────────────────
     def _zet_bibliotheek(self, pad):
         """Opent (of maakt) de bibliotheek op `pad` en vult de lijsten. Faalt het pad
@@ -1640,7 +1697,8 @@ class MainWindow(QMainWindow):
         self._pending_opslag = {"schaatser_id": dlg.schaatser_id, "titel": dlg.titel,
                                 "instellingen": instellingen}
 
-        self.stack.setCurrentWidget(self.pagina_analyse)
+        # Op de bibliotheek blijven; de voortgangsbalk loopt onderin en bij afronden
+        # springt de weergave vanzelf naar het resultaat (zolang er niets anders geopend is).
         self._start_analyse()
 
     def _open_analyse_uit_bibliotheek(self, analyse_id=None):
@@ -1684,6 +1742,9 @@ class MainWindow(QMainWindow):
 
         self.input_pad = data["video_pad"]
         self.analyse_id = analyse_id
+        # De gebruiker bekijkt nu bewust deze analyse; een op de achtergrond lopende
+        # analyse mag hem hier straks niet uit wegrukken.
+        self._auto_toon_klaar = False
         self.stack.setCurrentWidget(self.pagina_analyse)
         self._toon_resultaten(info, resultaten, events, bron=data["meta"]["titel"])
 
@@ -1726,13 +1787,9 @@ class MainWindow(QMainWindow):
     def _start_analyse(self):
         self._zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
-        self.btn_nieuwe_analyse.setEnabled(False)   # geen tweede worker eroverheen
-
-        self.progress = QProgressDialog("Video analyseren...", None, 0, 100, self)
-        self.progress.setWindowModality(Qt.WindowModal)
-        self.progress.setCancelButton(None)
-        self.progress.setMinimumDuration(0)
-        self.progress.setValue(0)
+        self._auto_toon_klaar = True          # nog niets anders geopend → resultaat straks tonen
+        self._zet_bezig(True)                 # geen tweede worker/botsende bewerking eroverheen
+        self._toon_voortgangsbalk("Video analyseren...")
 
         opslag = self._pending_opslag or {}
         self.worker = AnalyseWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
@@ -1754,13 +1811,14 @@ class MainWindow(QMainWindow):
 
     def _analyse_voortgang(self, frame_nr, totaal):
         if totaal > 0:
-            self.progress.setValue(int(frame_nr / totaal * 100))
-        self.progress.setLabelText(f"Video analyseren... ({frame_nr}/{totaal})")
+            self.bar_voortgang.setRange(0, 100)
+            self.bar_voortgang.setValue(int(frame_nr / totaal * 100))
+        self.lbl_voortgang.setText(f"Video analyseren... ({frame_nr}/{totaal})")
 
     def _analyse_status(self, tekst):
         # Busy-fase zonder bekende duur (videokopie naar de bibliotheek).
-        self.progress.setRange(0, 0)
-        self.progress.setLabelText(tekst)
+        self.bar_voortgang.setRange(0, 0)
+        self.lbl_voortgang.setText(tekst)
 
     def _opslag_fout(self, bericht):
         QMessageBox.warning(
@@ -1769,16 +1827,27 @@ class MainWindow(QMainWindow):
             f"{bericht}\n\nDe resultaten zijn nu wel zichtbaar, maar niet bewaard.")
 
     def _analyse_fout(self, bericht):
-        self.progress.close()
-        self.btn_nieuwe_analyse.setEnabled(True)
+        self._verberg_voortgangsbalk()
+        self._zet_bezig(False)
         self._pending_opslag = None
         QMessageBox.critical(self, "Fout bij analyseren", bericht)
         self._zet_besturing_actief(False)
 
     def _analyse_klaar(self, info, resultaten, events, analyse_id):
-        self.progress.close()
-        self.btn_nieuwe_analyse.setEnabled(True)
+        self._verberg_voortgangsbalk()
+        self._zet_bezig(False)
+        opslag = self._pending_opslag or {}
         self._pending_opslag = None
+
+        if not self._auto_toon_klaar:
+            # De gebruiker is intussen met een andere analyse bezig → niet uit z'n
+            # weergave rukken; alleen de lijst verversen en het melden.
+            self._vernieuw_schaatsers()
+            titel = opslag.get("titel") or "analyse"
+            self.statusBar().showMessage(
+                f"Analyse '{titel}' klaar en opgeslagen in de bibliotheek.", 10000)
+            return
+
         self.analyse_id = analyse_id
         if analyse_id is not None:
             # Weergave leest voortaan de bibliotheekkopie; het origineel mag weg.
@@ -1786,6 +1855,7 @@ class MainWindow(QMainWindow):
                 self.input_pad = schaats_db.analyse_video_pad(self.bieb, analyse_id)
             except Exception:
                 pass   # terugvallen op de bronvideo (alleen weergave)
+        self.stack.setCurrentWidget(self.pagina_analyse)
         self._toon_resultaten(info, resultaten, events)
 
     # ---- Batch-analyse (meerdere video's achter elkaar) --------------------------
@@ -1864,7 +1934,7 @@ class MainWindow(QMainWindow):
 
         if not taken:
             return
-        self.stack.setCurrentWidget(self.pagina_analyse)
+        # Op de bibliotheek blijven terwijl de batch draait, zodat er gebrowst kan worden.
         self._start_batch(taken)
 
     def _overslaan_of_afbreken(self, titel):
@@ -1881,53 +1951,52 @@ class MainWindow(QMainWindow):
     def _start_batch(self, taken):
         self._zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
-        self.btn_nieuwe_analyse.setEnabled(False)
-        self.btn_batch_analyse.setEnabled(False)
+        self._auto_toon_klaar = False        # batch toont zelf geen resultaten
+        self._zet_bezig(True)
 
         self._batch_index, self._batch_totaal, self._batch_huidig = 0, len(taken), ""
 
-        # Voortgangsdialoog mét cancel-knop 'Stop na deze video'.
-        self.progress = QProgressDialog("Batch starten...", "Stop na deze video", 0, 100, self)
-        self.progress.setWindowModality(Qt.WindowModal)
-        self.progress.setMinimumDuration(0)
-        self.progress.setAutoClose(False)
-        self.progress.setAutoReset(False)
-        self.progress.setValue(0)
-        self.progress.canceled.connect(self._batch_stop_gevraagd)
+        # Voortgangsbalk mét knop 'Stop na deze video' — niet-blokkerend, dus de
+        # bibliotheek blijft ondertussen bruikbaar.
+        self._toon_voortgangsbalk("Batch starten...", met_stop=True)
 
         self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAAM)
         self.batch_worker.taak_start.connect(self._batch_taak_start)
         self.batch_worker.voortgang.connect(self._batch_voortgang)
         self.batch_worker.status.connect(self._analyse_status)   # busy-fase hergebruiken
+        self.batch_worker.taak_klaar.connect(self._batch_taak_klaar)  # nieuwe analyse live tonen
         self.batch_worker.alles_klaar.connect(self._batch_klaar)
         self.batch_worker.start()
 
     def _batch_stop_gevraagd(self):
         if hasattr(self, "batch_worker"):
             self.batch_worker.requestInterruption()
-        # De dialoog verbergt zichzelf bij cancel; opnieuw tonen tot de lopende video klaar is.
-        self.progress.setLabelText("Stopt na de huidige video...")
-        self.progress.show()
+        self.lbl_voortgang.setText("Stopt na de huidige video...")
+        self.btn_voortgang_stop.setEnabled(False)
 
     def _batch_taak_start(self, index, totaal, titel):
         self._batch_index, self._batch_totaal, self._batch_huidig = index, totaal, titel
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setLabelText(f"Video {index + 1}/{totaal} — {titel}")
+        self.bar_voortgang.setRange(0, 100)
+        self.bar_voortgang.setValue(0)
+        self.lbl_voortgang.setText(f"Video {index + 1}/{totaal} — {titel}")
 
     def _batch_voortgang(self, frame_nr, totaal):
         if totaal > 0:
-            self.progress.setValue(int(frame_nr / totaal * 100))
-        self.progress.setLabelText(
+            self.bar_voortgang.setRange(0, 100)
+            self.bar_voortgang.setValue(int(frame_nr / totaal * 100))
+        self.lbl_voortgang.setText(
             f"Video {self._batch_index + 1}/{self._batch_totaal} — {self._batch_huidig} "
             f"({frame_nr}/{totaal})")
 
+    def _batch_taak_klaar(self, index, analyse_id):
+        # Elke afgeronde video meteen in de bibliotheek laten opduiken (raakt de
+        # eventueel geopende weergave niet — dat zijn andere widgets).
+        self._vernieuw_schaatsers()
+
     def _batch_klaar(self, geslaagd, fouten):
-        self.progress.close()
-        self.btn_nieuwe_analyse.setEnabled(True)
-        self.btn_batch_analyse.setEnabled(True)
+        self._verberg_voortgangsbalk()
+        self._zet_bezig(False)
         self._vernieuw_schaatsers()              # nieuwe analyses direct zichtbaar
-        self.stack.setCurrentWidget(self.pagina_start)
 
         n_ok = len(geslaagd)
         n_tot = n_ok + len(fouten)
