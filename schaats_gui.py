@@ -646,6 +646,55 @@ class AnalyseWorker(QThread):
         self.klaar.emit(info, resultaten, events, analyse_id)
 
 
+class BatchWorker(QThread):
+    """Draait een reeks analyses achter elkaar op de achtergrond en slaat elke video
+    automatisch op in de bibliotheek. Eén slechte clip stopt de batch niet — die wordt als
+    mislukt gemeld en de rest loopt door. 'Stop na deze video' vraagt via requestInterruption()
+    een nette stop aan die tussen de video's wordt afgehandeld (de lopende video wordt eerst
+    afgemaakt en opgeslagen)."""
+    taak_start  = Signal(int, int, str)          # index (0-based), totaal, titel
+    voortgang   = Signal(int, int)               # frame_nr, totaal van de huidige video
+    status      = Signal(str)                     # busy-tekst (videokopie naar de bibliotheek)
+    taak_klaar  = Signal(int, object)            # index, analyse_id (of None)
+    taak_fout   = Signal(int, str)               # index, foutmelding — batch gaat door
+    alles_klaar = Signal(list, list)             # geslaagde titels, [(titel, melding)] mislukt
+
+    def __init__(self, taken, bieb, backend):
+        super().__init__()
+        self.taken = taken
+        self.bieb = bieb
+        self.backend = backend
+
+    def run(self):
+        n = len(self.taken)
+        geslaagd, fouten = [], []
+        for i, taak in enumerate(self.taken):
+            if self.isInterruptionRequested():
+                break                            # 'Stop na deze video' — rest overslaan
+            self.taak_start.emit(i, n, taak["titel"])
+            try:
+                info, resultaten = analyseer_backend(
+                    taak["input_pad"], taak["model_pad"], taak["smooth_n"], taak["threshold"],
+                    doel_punt=taak["doel_punt"],
+                    progress_callback=lambda f, t: self.voortgang.emit(f, t),
+                    horizon_deg=taak["horizon_deg"], auto_horizon=taak["auto_horizon"],
+                    smooth_landmarks=taak["smooth_landmarks"], perspectief=None,
+                )
+                events = segmenteer_afzetten(resultaten)
+                self.status.emit("Opslaan in bibliotheek...")
+                analyse_id = schaats_db.sla_analyse_op(
+                    self.bieb, taak["schaatser_id"], taak["titel"], taak["input_pad"],
+                    info, resultaten, events,
+                    backend=self.backend, instellingen=taak["instellingen"])
+                geslaagd.append(taak["titel"])
+                self.taak_klaar.emit(i, analyse_id)
+            except Exception as e:
+                # sla_analyse_op ruimt zijn eigen halve mediamap op; hier alleen registreren.
+                fouten.append((taak["titel"], str(e)))
+                self.taak_fout.emit(i, str(e))
+        self.alles_klaar.emit(geslaagd, fouten)
+
+
 class SchaatserDialog(QDialog):
     """Schaatser-profiel aanmaken of bewerken: naam, geboortejaar, notities."""
 
@@ -803,6 +852,165 @@ class NieuweAnalyseDialog(QDialog):
         return os.path.splitext(os.path.basename(self.video_pad or "analyse"))[0]
 
 
+class BatchAnalyseDialog(QDialog):
+    """Verzamelt een hele batch in één dialoog: meerdere video's tegelijk, elk met een
+    eigen schaatser en titel, plus gedeelde analyse-instellingen. De doel- en horizon-keuze
+    gebeurt daarna per video in de verzamellus (MainWindow._nieuwe_batch_analyse)."""
+
+    def __init__(self, schaatsers, voorkeur_id=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch-analyse")
+        self.resize(760, 500)
+        self._schaatsers = schaatsers
+        v = QVBoxLayout(self)
+
+        # Video's kiezen + standaard-schaatser die je in één keer op alle rijen zet.
+        rij_top = QHBoxLayout()
+        knop_videos = QPushButton("Video's kiezen...")
+        knop_videos.clicked.connect(self._kies_videos)
+        rij_top.addWidget(knop_videos)
+        rij_top.addWidget(QLabel("Standaard schaatser:"))
+        self.combo_standaard = QComboBox()
+        for s in schaatsers:
+            tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
+            self.combo_standaard.addItem(tekst, s["id"])
+        if voorkeur_id is not None:
+            idx = self.combo_standaard.findData(voorkeur_id)
+            if idx >= 0:
+                self.combo_standaard.setCurrentIndex(idx)
+        rij_top.addWidget(self.combo_standaard, stretch=1)
+        knop_toepassen = QPushButton("Toepassen op alle rijen")
+        knop_toepassen.clicked.connect(self._pas_standaard_toe)
+        rij_top.addWidget(knop_toepassen)
+        v.addLayout(rij_top)
+
+        # Video's + per rij een schaatser (combobox) en een bewerkbare titel.
+        self.tabel = QTableWidget(0, 3)
+        self.tabel.setHorizontalHeaderLabels(["Video", "Schaatser", "Titel"])
+        self.tabel.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tabel.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tabel.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
+        v.addWidget(self.tabel, stretch=1)
+
+        knop_verwijder = QPushButton("Geselecteerde rij verwijderen")
+        knop_verwijder.clicked.connect(self._verwijder_rij)
+        v.addWidget(knop_verwijder)
+
+        # Gedeelde instellingen (dezelfde widgets/waarden als NieuweAnalyseDialog).
+        instellingen = QGroupBox("Instellingen (gelden voor de hele batch)")
+        fv = QVBoxLayout(instellingen)
+
+        rij_smooth = QHBoxLayout()
+        rij_smooth.addWidget(QLabel("Smoothing (frames):"))
+        self.spin_smooth = QSpinBox()
+        self.spin_smooth.setRange(1, 30)
+        self.spin_smooth.setValue(5)
+        rij_smooth.addStretch(1)
+        rij_smooth.addWidget(self.spin_smooth)
+        fv.addLayout(rij_smooth)
+
+        rij_threshold = QHBoxLayout()
+        rij_threshold.addWidget(QLabel("Gewicht-drempel:"))
+        self.spin_threshold = QDoubleSpinBox()
+        self.spin_threshold.setRange(0.001, 0.2)
+        self.spin_threshold.setSingleStep(0.001)
+        self.spin_threshold.setDecimals(3)
+        self.spin_threshold.setValue(0.015)
+        rij_threshold.addStretch(1)
+        rij_threshold.addWidget(self.spin_threshold)
+        fv.addLayout(rij_threshold)
+
+        self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
+        self.chk_heavy.setVisible(not IS_YOLO)   # alleen relevant voor de MediaPipe-backend
+        fv.addWidget(self.chk_heavy)
+
+        self.chk_geen_smoothing = QCheckBox("Geen landmark-smoothing (ruwe detecties)")
+        fv.addWidget(self.chk_geen_smoothing)
+        v.addWidget(instellingen)
+
+        knoppen = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        knoppen.accepted.connect(self.accept)
+        knoppen.rejected.connect(self.reject)
+        v.addWidget(knoppen)
+        self._ok = knoppen.button(QDialogButtonBox.Ok)
+        self._ok.setText("Start batch")
+        self._ok.setEnabled(False)               # pas actief met minstens één video
+
+    def _maak_schaatser_combo(self):
+        """Een per-rij schaatser-keuze, voorgeselecteerd op de huidige standaard."""
+        combo = QComboBox()
+        for s in self._schaatsers:
+            tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
+            combo.addItem(tekst, s["id"])
+        idx = combo.findData(self.combo_standaard.currentData())
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        return combo
+
+    def _kies_videos(self):
+        paden, _ = QFileDialog.getOpenFileNames(
+            self, "Kies video's", "", "Video's (*.mp4 *.mov *.avi *.mkv);;Alle bestanden (*)")
+        for pad in paden:
+            r = self.tabel.rowCount()
+            self.tabel.insertRow(r)
+            item_pad = QTableWidgetItem(os.path.basename(pad))
+            item_pad.setData(Qt.UserRole, pad)                 # volledige pad achter de rij
+            item_pad.setFlags(item_pad.flags() & ~Qt.ItemIsEditable)
+            self.tabel.setItem(r, 0, item_pad)
+            self.tabel.setCellWidget(r, 1, self._maak_schaatser_combo())
+            self.tabel.setItem(
+                r, 2, QTableWidgetItem(os.path.splitext(os.path.basename(pad))[0]))
+        self._ok.setEnabled(self.tabel.rowCount() > 0)
+
+    def _pas_standaard_toe(self):
+        sid = self.combo_standaard.currentData()
+        for r in range(self.tabel.rowCount()):
+            combo = self.tabel.cellWidget(r, 1)
+            if combo is not None:
+                idx = combo.findData(sid)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+
+    def _verwijder_rij(self):
+        r = self.tabel.currentRow()
+        if r >= 0:
+            self.tabel.removeRow(r)
+        self._ok.setEnabled(self.tabel.rowCount() > 0)
+
+    @property
+    def taken(self):
+        """Lijst van {input_pad, schaatser_id, titel} — één per video-rij."""
+        rijen = []
+        for r in range(self.tabel.rowCount()):
+            item_pad = self.tabel.item(r, 0)
+            pad = item_pad.data(Qt.UserRole)
+            combo = self.tabel.cellWidget(r, 1)
+            schaatser_id = combo.currentData() if combo is not None else None
+            titel_item = self.tabel.item(r, 2)
+            titel = titel_item.text().strip() if titel_item is not None else ""
+            if not titel:
+                titel = os.path.splitext(os.path.basename(pad))[0]
+            rijen.append({"input_pad": pad, "schaatser_id": schaatser_id, "titel": titel})
+        return rijen
+
+    @property
+    def smooth_n(self):
+        return self.spin_smooth.value()
+
+    @property
+    def threshold(self):
+        return self.spin_threshold.value()
+
+    @property
+    def heavy_gevraagd(self):
+        return self.chk_heavy.isChecked()
+
+    @property
+    def geen_smoothing(self):
+        return self.chk_geen_smoothing.isChecked()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -922,13 +1130,18 @@ class MainWindow(QMainWindow):
         rij_a = QHBoxLayout()
         self.btn_nieuwe_analyse = QPushButton("Nieuwe analyse...")
         self.btn_nieuwe_analyse.clicked.connect(self._nieuwe_analyse)
+        self.btn_batch_analyse = QPushButton("Batch-analyse...")
+        self.btn_batch_analyse.setToolTip(
+            "Meerdere video's tegelijk kiezen en achter elkaar analyseren. Je stelt vooraf "
+            "per video de doelschaatser en horizon in; daarna draait de hele rij onbewaakt.")
+        self.btn_batch_analyse.clicked.connect(self._nieuwe_batch_analyse)
         self.btn_open_analyse = QPushButton("Openen")
         self.btn_open_analyse.clicked.connect(lambda: self._open_analyse_uit_bibliotheek())
         self.btn_hernoem_analyse = QPushButton("Hernoemen...")
         self.btn_hernoem_analyse.clicked.connect(self._hernoem_analyse)
         self.btn_verwijder_analyse = QPushButton("Verwijderen")
         self.btn_verwijder_analyse.clicked.connect(self._verwijder_analyse)
-        for b in (self.btn_nieuwe_analyse, self.btn_open_analyse,
+        for b in (self.btn_nieuwe_analyse, self.btn_batch_analyse, self.btn_open_analyse,
                   self.btn_hernoem_analyse, self.btn_verwijder_analyse):
             rij_a.addWidget(b)
         rij_a.addStretch(1)
@@ -1474,9 +1687,11 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.pagina_analyse)
         self._toon_resultaten(info, resultaten, events, bron=data["meta"]["titel"])
 
-    def _lees_eerste_frame(self):
-        """Leest het eerste frame van de gekozen video, of None bij een fout."""
-        cap = cv2.VideoCapture(self.input_pad)
+    def _lees_eerste_frame(self, pad=None):
+        """Leest het eerste frame van de gekozen video, of None bij een fout.
+        Zonder `pad` de huidige `self.input_pad`; met `pad` een willekeurige video
+        (gebruikt door de batch-verzamellus voor elke clip apart)."""
+        cap = cv2.VideoCapture(pad or self.input_pad)
         ret, frame0 = cap.read()
         cap.release()
         if not ret:
@@ -1572,6 +1787,159 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass   # terugvallen op de bronvideo (alleen weergave)
         self._toon_resultaten(info, resultaten, events)
+
+    # ---- Batch-analyse (meerdere video's achter elkaar) --------------------------
+
+    def _nieuwe_batch_analyse(self):
+        schaatsers = schaats_db.lijst_schaatsers(self.bieb)
+        if not schaatsers:
+            QMessageBox.information(
+                self, "Batch-analyse",
+                "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
+            return
+        dlg = BatchAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
+                                 parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # Model resolven — gedeeld voor de hele batch, alleen relevant voor MediaPipe.
+        model_pad, heavy = STANDAARD_MODEL, False
+        if not IS_YOLO:
+            if dlg.heavy_gevraagd:
+                if os.path.isfile(HEAVY_MODEL):
+                    model_pad, heavy = HEAVY_MODEL, True
+                else:
+                    QMessageBox.warning(
+                        self, "Heavy-model ontbreekt",
+                        "pose_landmarker_heavy.task staat niet naast het script.\n\n"
+                        "Er wordt nu met het full-model gewerkt.")
+                    model_pad = STANDAARD_MODEL
+            if not os.path.isfile(model_pad):
+                gekozen, _ = QFileDialog.getOpenFileName(
+                    self, "Kies pose_landmarker .task model", "", "Model (*.task)")
+                if not gekozen:
+                    return
+                model_pad = gekozen
+
+        smooth_n, threshold = dlg.smooth_n, dlg.threshold
+        geen_smoothing = dlg.geen_smoothing
+
+        # Verzamel-lus: per video het eerste frame + doelschaatser + horizon uitvragen.
+        taken = []
+        for taak in dlg.taken:
+            pad, schaatser_id, titel = taak["input_pad"], taak["schaatser_id"], taak["titel"]
+            frame0 = self._lees_eerste_frame(pad)
+            if frame0 is None:
+                continue                         # _lees_eerste_frame heeft al gemeld
+
+            doel = self._kies_doelschaatser(frame0)
+            if doel is False:                    # dialoog afgebroken
+                if self._overslaan_of_afbreken(titel):
+                    continue
+                return
+            horizon = self._kies_horizon(frame0)
+            if horizon is False:                 # dialoog afgebroken
+                if self._overslaan_of_afbreken(titel):
+                    continue
+                return
+            horizon_deg, auto_horizon = horizon
+
+            instellingen = {
+                "smooth_n": smooth_n,
+                "threshold": threshold,
+                "smooth_landmarks": not geen_smoothing,
+                "doel_punt": list(doel) if doel else None,
+                "horizon_deg": horizon_deg,
+                "auto_horizon": auto_horizon,
+                "heavy": heavy,
+                "backend_naam": BACKEND_NAAM,
+                "perspectief_gebruikt": False,
+            }
+            taken.append({
+                "input_pad": pad, "schaatser_id": schaatser_id, "titel": titel,
+                "doel_punt": doel, "horizon_deg": horizon_deg, "auto_horizon": auto_horizon,
+                "smooth_landmarks": not geen_smoothing, "smooth_n": smooth_n,
+                "threshold": threshold, "model_pad": model_pad, "instellingen": instellingen,
+            })
+
+        if not taken:
+            return
+        self.stack.setCurrentWidget(self.pagina_analyse)
+        self._start_batch(taken)
+
+    def _overslaan_of_afbreken(self, titel):
+        """Bij een afgebroken doel-/horizon-kiezer: alleen deze video overslaan (True) of
+        de hele batch afbreken (False)."""
+        antwoord = QMessageBox.question(
+            self, "Video overslaan?",
+            f"De instelling voor '{titel}' is afgebroken.\n\n"
+            "Wil je alleen deze video overslaan en met de rest doorgaan?\n"
+            "(Nee = de hele batch afbreken.)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        return antwoord == QMessageBox.Yes
+
+    def _start_batch(self, taken):
+        self._zet_besturing_actief(False)
+        self.btn_export.setEnabled(False)
+        self.btn_nieuwe_analyse.setEnabled(False)
+        self.btn_batch_analyse.setEnabled(False)
+
+        self._batch_index, self._batch_totaal, self._batch_huidig = 0, len(taken), ""
+
+        # Voortgangsdialoog mét cancel-knop 'Stop na deze video'.
+        self.progress = QProgressDialog("Batch starten...", "Stop na deze video", 0, 100, self)
+        self.progress.setWindowModality(Qt.WindowModal)
+        self.progress.setMinimumDuration(0)
+        self.progress.setAutoClose(False)
+        self.progress.setAutoReset(False)
+        self.progress.setValue(0)
+        self.progress.canceled.connect(self._batch_stop_gevraagd)
+
+        self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAAM)
+        self.batch_worker.taak_start.connect(self._batch_taak_start)
+        self.batch_worker.voortgang.connect(self._batch_voortgang)
+        self.batch_worker.status.connect(self._analyse_status)   # busy-fase hergebruiken
+        self.batch_worker.alles_klaar.connect(self._batch_klaar)
+        self.batch_worker.start()
+
+    def _batch_stop_gevraagd(self):
+        if hasattr(self, "batch_worker"):
+            self.batch_worker.requestInterruption()
+        # De dialoog verbergt zichzelf bij cancel; opnieuw tonen tot de lopende video klaar is.
+        self.progress.setLabelText("Stopt na de huidige video...")
+        self.progress.show()
+
+    def _batch_taak_start(self, index, totaal, titel):
+        self._batch_index, self._batch_totaal, self._batch_huidig = index, totaal, titel
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setLabelText(f"Video {index + 1}/{totaal} — {titel}")
+
+    def _batch_voortgang(self, frame_nr, totaal):
+        if totaal > 0:
+            self.progress.setValue(int(frame_nr / totaal * 100))
+        self.progress.setLabelText(
+            f"Video {self._batch_index + 1}/{self._batch_totaal} — {self._batch_huidig} "
+            f"({frame_nr}/{totaal})")
+
+    def _batch_klaar(self, geslaagd, fouten):
+        self.progress.close()
+        self.btn_nieuwe_analyse.setEnabled(True)
+        self.btn_batch_analyse.setEnabled(True)
+        self._vernieuw_schaatsers()              # nieuwe analyses direct zichtbaar
+        self.stack.setCurrentWidget(self.pagina_start)
+
+        n_ok = len(geslaagd)
+        n_tot = n_ok + len(fouten)
+        if fouten:
+            regels = "\n".join(f"• {t}: {m}" for t, m in fouten)
+            QMessageBox.warning(
+                self, "Batch klaar",
+                f"{n_ok} van {n_tot} video's geslaagd en opgeslagen.\n\nMislukt:\n{regels}")
+        else:
+            QMessageBox.information(
+                self, "Batch klaar",
+                f"Alle {n_ok} video's zijn geanalyseerd en opgeslagen in de bibliotheek.")
 
     def _toon_resultaten(self, info, resultaten, events, bron=None):
         """

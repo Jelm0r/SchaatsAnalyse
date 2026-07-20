@@ -119,6 +119,14 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
+## Extra — Batch-analyse ✅
+
+> **Af (20 juli 2026)** — buiten de fasering, bovenop de fase 1-flow. Meerdere video's in één keer analyseren.
+>
+> **Wat er staat:** `BatchAnalyseDialog` (video's + per rij schaatser/titel + gedeelde instellingen) en `BatchWorker` (`QThread`) in `schaats_gui.py`. De doel-/horizon-keuze gebeurt vooraf per video in `_nieuwe_batch_analyse`; daarna draait de hele rij onbewaakt en slaat elke analyse zelf op via `sla_analyse_op`. Eén mislukte clip stopt de batch niet (gemeld, rest loopt door); "Stop na deze video" = nette stop tussen clips. Geen roadmap-fase, wel logisch vervolg op de bibliotheek — vandaar hier genoteerd.
+
+---
+
 ## Fase 3 — Skelet-editor (punten verslepen) ✅
 
 > **Af (20 juli 2026)** — zelftest (`python schaats_db.py`) dekt de opslag-round-trip (bewerken → `landmarks_ruw.npz`-backup + `bewerkt=1` + verse events-cache; herstel origineel → npz terug + `bewerkt=0`); GUI handmatig getest.
@@ -262,6 +270,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | 0 | Serialisatie (`npz` + plain landmarks) | ✅ **af** (16 jul 2026) |
 | 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | ✅ **af** (18 jul 2026) |
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
+| — | Batch-analyse (extra, buiten de fasering) | ✅ **af** (20 jul 2026) |
 | 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026) |
 | 4 | Instellingen, gedeelde map, conflictafhandeling | middelgroot, 1–2 sessies |
 | 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
