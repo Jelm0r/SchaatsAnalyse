@@ -14,12 +14,15 @@ Vereisten (naast schaats_analyse.py z'n dependencies):
 import os
 import sys
 import csv
+import math
 
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QImage, QPixmap, QAction, QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPointF
+from PySide6.QtGui import (
+    QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence,
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
@@ -27,7 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QToolBar, QStackedWidget, QSpinBox,
     QDoubleSpinBox, QDialog, QRadioButton, QComboBox, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QInputDialog,
-    QDialogButtonBox,
+    QDialogButtonBox, QToolTip,
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
@@ -35,8 +38,48 @@ import schaats_db
 import schaats_perspectief
 from schaats_analyse import (
     segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
-    detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden,
+    detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
+    _torso_centroid,
 )
+
+# Skelet-editor (fase 3)
+# De handle-/grijpradius schaalt mee met de schaatser: een vaste fractie van de torso-lengte
+# op het scherm, geklemd op [GRIJP_MIN_PX, GRIJP_MAX_PX]. Zo lijken de bolletjes bij elke
+# schaatsergrootte én zoomstand even groot en overlappen ze niet meer als de schaatser klein
+# in beeld staat. Tuning-knoppen:
+GRIJP_FRAC     = 0.06   # handle-radius als fractie van de torso-lengte (torso ~200 px → ~12 px)
+GRIJP_MIN_PX   = 4      # ondergrens in schermpixels (kleine schaatser houdt een aanklikbare handle)
+GRIJP_MAX_PX   = 14     # bovengrens in schermpixels (close-up geen enorme bollen)
+HANDLE_MIN_VIS = 0.2    # onder deze zichtbaarheid geen sleepbare handle (zoals teken_alle_landmarks)
+
+# MediaPipe-33 landmark-index → naam van het lichaamsdeel (voor de hover-tekst in de editor).
+# "links"/"rechts" is anatomisch (de eigen linker-/rechterkant van de schaatser), net als in
+# de detectie/ L-R-fixer. Indices die niet voorkomen krijgen een generieke terugval.
+LANDMARK_NAMEN = {
+    0: "neus",
+    1: "linkeroog (binnen)", 2: "linkeroog", 3: "linkeroog (buiten)",
+    4: "rechteroog (binnen)", 5: "rechteroog", 6: "rechteroog (buiten)",
+    7: "linkeroor", 8: "rechteroor", 9: "mond links", 10: "mond rechts",
+    11: "linkerschouder", 12: "rechterschouder",
+    13: "linkerelleboog", 14: "rechterelleboog",
+    15: "linkerpols", 16: "rechterpols",
+    17: "linkerpink", 18: "rechterpink",
+    19: "linkerwijsvinger", 20: "rechterwijsvinger",
+    21: "linkerduim", 22: "rechterduim",
+    23: "linkerheup", 24: "rechterheup",
+    25: "linkerknie", 26: "rechterknie",
+    27: "linkerenkel", 28: "rechterenkel",
+    29: "linkerhiel", 30: "rechterhiel",
+    31: "linkerteen", 32: "rechterteen",
+}
+
+# Inzoomen op de schaatser in de weergave
+ZOOM_MAX  = 5.0        # maximale zoomfactor van de weergave-uitsnede
+ZOOM_STAP = 1.25       # muiswiel-factor per notch
+
+# Afspeelsnelheden (slow motion): (label, factor op de fps). 1.0 = echte snelheid.
+SNELHEDEN = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25), ("⅛×", 0.125), ("1/16×", 0.0625)]
+SNELHEID_DEFAULT_IDX = 0
 
 # Backend-selectie: gebruik YOLO-pose + ByteTrack als torch/ultralytics beschikbaar is
 # (draai de app dan onder de .venv-yolo), val anders terug op de MediaPipe-backend.
@@ -787,6 +830,22 @@ class MainWindow(QMainWindow):
         self.analyse_id = None      # id van de geopende analyse in de bibliotheek
         self._pending_opslag = None # {schaatser_id, titel, instellingen} voor de worker
 
+        # Skelet-editor (fase 3)
+        self._editor_actief = False
+        self._sleep = None          # {'idx', 'j', 'start': (nx, ny)} tijdens een sleep
+        self._weergave_scaled = None  # QSize van de getoonde (geschaalde) pixmap, voor omrekening
+        self._undo = []             # elk item: {'j', 'oud': {frame: Landmark}, 'nieuw': {...}}
+        self._redo = []
+        self._handmatig = {}        # {frame_idx: set(landmark_idx)} — alleen voor de overlay-markering
+
+        # Inzoomen op de schaatser in de weergave
+        self._zoom = 1.0            # 1.0 = passend (geen crop); tot ZOOM_MAX
+        self._pan_cx = 0.5          # genormaliseerd middelpunt van de uitsnede (volledig frame)
+        self._pan_cy = 0.5
+        self._zoom_volg = True      # auto-centreren op de schaatser (spiegel van chk_volg)
+        self._crop_norm = (0.0, 0.0, 1.0, 1.0)  # (x0n, y0n, breedten, hoogten): feitelijk getoonde crop
+        self._pan_sleep = None      # laatste muispositie tijdens een handmatige pan-sleep
+
         self._bouw_ui()
         self.speeltimer = QTimer(self)
         self.speeltimer.timeout.connect(self._speel_tick)
@@ -935,6 +994,17 @@ class MainWindow(QMainWindow):
         for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
                   self.btn_frame_verder, self.btn_eind):
             knoppen.addWidget(w)
+
+        # Afspeelsnelheid (slow motion): factor waarmee de fps vermenigvuldigd wordt.
+        knoppen.addWidget(QLabel("Snelheid"))
+        self.combo_snelheid = QComboBox()
+        self.combo_snelheid.setToolTip("Afspeelsnelheid — kies een lagere factor voor slow motion.")
+        for label, factor in SNELHEDEN:
+            self.combo_snelheid.addItem(label, factor)
+        self.combo_snelheid.setCurrentIndex(SNELHEID_DEFAULT_IDX)
+        self.combo_snelheid.currentIndexChanged.connect(self._zet_snelheid)
+        knoppen.addWidget(self.combo_snelheid)
+
         knoppen.addWidget(self.lbl_tijd, stretch=1)
         v.addLayout(knoppen)
 
@@ -951,8 +1021,83 @@ class MainWindow(QMainWindow):
             chk.setChecked(True)
             chk.stateChanged.connect(lambda _=None: self._toon_huidig_frame())
             toggles.addWidget(chk)
+
+        # Inzoomen op de schaatser (muiswiel boven de video werkt ook — zie onder).
+        self.chk_volg = QCheckBox("Volg schaatser")
+        self.chk_volg.setChecked(True)
+        self.chk_volg.setToolTip("Houd de schaatser gecentreerd in beeld tijdens het inzoomen.")
+        self.chk_volg.toggled.connect(self._zet_zoom_volg)
+        toggles.addWidget(self.chk_volg)
+        toggles.addWidget(QLabel("Zoom"))
+        self.slider_zoom = QSlider(Qt.Horizontal)
+        self.slider_zoom.setRange(100, int(ZOOM_MAX * 100))   # 100 = 1.0×
+        self.slider_zoom.setValue(100)
+        self.slider_zoom.setFixedWidth(120)
+        self.slider_zoom.setToolTip("Zoomniveau. Muiswiel boven de video werkt ook.")
+        self.slider_zoom.valueChanged.connect(lambda v: self._zet_zoom(v / 100.0))
+        toggles.addWidget(self.slider_zoom)
+        self.lbl_zoom = QLabel("1.0×")
+        self.lbl_zoom.setFixedWidth(38)
+        toggles.addWidget(self.lbl_zoom)
+        self.btn_zoom_reset = QPushButton("Passend")
+        self.btn_zoom_reset.setToolTip("Zoom herstellen naar passend beeld.")
+        self.btn_zoom_reset.clicked.connect(self._zoom_reset)
+        toggles.addWidget(self.btn_zoom_reset)
+
         toggles.addStretch(1)
+        self.btn_bewerken = QPushButton("✏ Bewerken")
+        self.btn_bewerken.setCheckable(True)
+        self.btn_bewerken.setToolTip(
+            "Skelet-editor: sleep foute landmarkpunten naar de juiste plek.\n"
+            "De correctie vloeit uit naar de buurframes (instelbaar) en wordt\n"
+            "direct opgeslagen.")
+        self.btn_bewerken.toggled.connect(self._toggle_bewerken)
+        toggles.addWidget(self.btn_bewerken)
         v.addLayout(toggles)
+
+        # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus.
+        self.editor_balk = QWidget()
+        eb = QHBoxLayout(self.editor_balk)
+        eb.setContentsMargins(0, 0, 0, 0)
+        eb.addWidget(QLabel("Uitvloeien ±"))
+        self.spin_uitvloei = QSpinBox()
+        self.spin_uitvloei.setRange(0, 60)
+        self.spin_uitvloei.setValue(8)
+        self.spin_uitvloei.setSuffix(" frames")
+        self.spin_uitvloei.setToolTip(
+            "Hoe ver de correctie naar de buurframes uitvloeit (cosinus-afbouw).\n"
+            "0 = alleen dit frame. Stopt bij een detectiegat.")
+        eb.addWidget(self.spin_uitvloei)
+        self.btn_undo = QPushButton("↶ Ongedaan")
+        self.btn_undo.clicked.connect(self._undo_edit)
+        eb.addWidget(self.btn_undo)
+        self.btn_redo = QPushButton("↷ Opnieuw")
+        self.btn_redo.clicked.connect(self._redo_edit)
+        eb.addWidget(self.btn_redo)
+        self.btn_herstel = QPushButton("Herstel origineel")
+        self.btn_herstel.setToolTip("Zet alle landmarks terug naar de oorspronkelijke detectie.")
+        self.btn_herstel.clicked.connect(self._herstel_origineel)
+        eb.addWidget(self.btn_herstel)
+        self.lbl_editor_hint = QLabel("")
+        self.lbl_editor_hint.setStyleSheet("color: #888;")
+        eb.addWidget(self.lbl_editor_hint, stretch=1)
+        self.editor_balk.setVisible(False)
+        v.addWidget(self.editor_balk)
+
+        # Sneltoetsen voor undo/redo (alleen actief in bewerk-modus, zie de handlers).
+        QShortcut(QKeySequence.Undo, self).activated.connect(self._undo_edit)
+        QShortcut(QKeySequence.Redo, self).activated.connect(self._redo_edit)
+        QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo_edit)
+
+        # Muis-events op het videolabel gaan naar de editor-handlers (die niets doen
+        # buiten bewerk-modus).
+        self.video_label.mousePressEvent = self._editor_muis_druk
+        self.video_label.mouseMoveEvent = self._editor_muis_beweeg
+        self.video_label.mouseReleaseEvent = self._editor_muis_los
+        self.video_label.wheelEvent = self._zoom_wiel   # muiswiel = in-/uitzoomen
+        # tracking aan: mouseMoveEvent vuurt ook zónder ingedrukte knop, nodig voor de
+        # hover-tekst die het lichaamsdeel onder de cursor benoemt in de bewerk-modus.
+        self.video_label.setMouseTracking(True)
 
         self._zet_besturing_actief(False)
         return paneel
@@ -1010,7 +1155,8 @@ class MainWindow(QMainWindow):
 
     def _zet_besturing_actief(self, actief):
         for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
-                  self.btn_frame_verder, self.btn_eind, self.slider):
+                  self.btn_frame_verder, self.btn_eind, self.slider,
+                  self.chk_volg, self.slider_zoom, self.btn_zoom_reset):
             w.setEnabled(actief)
 
     # ── Bibliotheek (fase 1) ─────────────────────────────────────────────
@@ -1436,6 +1582,32 @@ class MainWindow(QMainWindow):
         self.resultaten = resultaten
         self.events = events
 
+        # Editor-status resetten (geen edit-lekkage tussen analyses); niet via de
+        # toggle-handler, want de weergave wordt hieronder toch opnieuw opgebouwd.
+        self._editor_actief = False
+        self._sleep = None
+        self._undo.clear()
+        self._redo.clear()
+        self._handmatig.clear()
+        self.btn_bewerken.blockSignals(True)
+        self.btn_bewerken.setChecked(False)
+        self.btn_bewerken.blockSignals(False)
+        self.editor_balk.setVisible(False)
+
+        # Zoom resetten (geen zoom-lekkage tussen analyses).
+        self._zoom = 1.0
+        self._pan_cx = self._pan_cy = 0.5
+        self._zoom_volg = True
+        self._pan_sleep = None
+        self._crop_norm = (0.0, 0.0, 1.0, 1.0)
+        self.slider_zoom.blockSignals(True)
+        self.slider_zoom.setValue(100)
+        self.slider_zoom.blockSignals(False)
+        self.lbl_zoom.setText("1.0×")
+        self.chk_volg.blockSignals(True)
+        self.chk_volg.setChecked(True)
+        self.chk_volg.blockSignals(False)
+
         if self.cap_weergave is not None:
             self.cap_weergave.release()
         self.cap_weergave = cv2.VideoCapture(self.input_pad)
@@ -1570,15 +1742,24 @@ class MainWindow(QMainWindow):
     def _toon_frame(self, idx):
         if idx == self.huidige_idx and self._laatste_frame is not None:
             frame = self._laatste_frame.copy()      # alleen overlay opnieuw tekenen
+            nieuw_frame = False
         else:
             frame = self._lees_frame_exact(idx)
             if frame is None:
                 return
             self._laatste_frame = frame
             frame = frame.copy()
+            nieuw_frame = True
         self.huidige_idx = idx
 
         resultaat = self.resultaten[idx]
+        # Auto-volgen: centreer de zoom-uitsnede op de schaatser, maar alleen bij een echte
+        # framewissel en niet tijdens een handle-sleep — anders verspringt de uitsnede onder
+        # de cursor bij het verslepen of het togglen van een laag.
+        if nieuw_frame and self._zoom > 1.0 and self._zoom_volg and self._sleep is None:
+            c = _torso_centroid(resultaat.lm) if resultaat.pose_gevonden else None
+            if c is not None:
+                self._pan_cx, self._pan_cy = c   # klemmen gebeurt in _toon_pixmap
         teken_overlay_op_frame(
             frame, resultaat, self.video_info.fps,
             toon_skelet=self.chk_skelet.isChecked(),
@@ -1622,10 +1803,390 @@ class MainWindow(QMainWindow):
 
     def _toon_pixmap(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
+        # Inzoomen = een uitsnede rond het pan-middelpunt opschalen. De uitsnede houdt
+        # dezelfde beeldverhouding als het frame, zodat de KeepAspectRatio-letterbox
+        # (en dus de coördinaat-omrekening van de editor) onveranderd blijft.
+        z = max(1.0, self._zoom)
+        if z > 1.0:
+            cw, ch = w / z, h / z
+            x0 = min(max(self._pan_cx * w - cw / 2, 0.0), w - cw)   # crop binnen het frame klemmen
+            y0 = min(max(self._pan_cy * h - ch / 2, 0.0), h - ch)
+            ix0, iy0 = int(round(x0)), int(round(y0))
+            icw = min(int(round(cw)), w - ix0)
+            ich = min(int(round(ch)), h - iy0)
+            # .copy() maakt de slice C-contigu (nodig voor de QImage-stride) en laat
+            # _laatste_frame gegarandeerd op volle resolutie staan.
+            frame_bgr = frame_bgr[iy0:iy0 + ich, ix0:ix0 + icw].copy()
+            self._crop_norm = (ix0 / w, iy0 / h, icw / w, ich / h)
+            h, w = frame_bgr.shape[:2]
+        else:
+            self._crop_norm = (0.0, 0.0, 1.0, 1.0)
         qimg = QImage(frame_bgr.data, w, h, frame_bgr.strides[0], QImage.Format_BGR888).copy()
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._weergave_scaled = pixmap.size()   # voor de coördinaat-omrekening (fase 3-editor)
+        if self._editor_actief:
+            self._teken_handles(pixmap)
         self.video_label.setPixmap(pixmap)
+
+    # ── Inzoomen op de schaatser ─────────────────────────────────────────────
+    def _zet_zoom(self, z):
+        """Centrale zoom-setter: klemt, werkt slider+label bij (zonder signaal-lus) en
+        hertekent het huidige frame goedkoop (geen herlezen van de video)."""
+        z = min(ZOOM_MAX, max(1.0, float(z)))
+        self._zoom = z
+        if z <= 1.0:
+            self._pan_cx = self._pan_cy = 0.5
+        self.lbl_zoom.setText(f"{z:.1f}×")
+        self.slider_zoom.blockSignals(True)
+        self.slider_zoom.setValue(int(round(z * 100)))
+        self.slider_zoom.blockSignals(False)
+        self._toon_huidig_frame()
+
+    def _zoom_wiel(self, event):
+        """Muiswiel boven de video: in-/uitzoomen. Auto-volgen blijft aan, dus de uitsnede
+        blijft op de schaatser (geen zoom-naar-cursor, dat zou met 'volg schaatser' vechten)."""
+        if not self.resultaten:
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = ZOOM_STAP if delta > 0 else 1.0 / ZOOM_STAP
+        self._zet_zoom(self._zoom * factor)
+        event.accept()
+
+    def _zet_zoom_volg(self, aan):
+        self._zoom_volg = bool(aan)
+        self._toon_huidig_frame()
+
+    def _zoom_reset(self):
+        """Terug naar passend beeld en auto-volgen weer aan."""
+        self._pan_cx = self._pan_cy = 0.5
+        self._zoom_volg = True
+        self.chk_volg.blockSignals(True)
+        self.chk_volg.setChecked(True)
+        self.chk_volg.blockSignals(False)
+        self._zet_zoom(1.0)
+
+    # ── Skelet-editor: coördinaat-omrekening (letterbox) ─────────────────────
+    def _widget_naar_norm(self, pos):
+        """Muispositie op het videolabel → genormaliseerde (x, y) in het frame (0–1).
+        Buiten het getekende beeld kan het resultaat buiten [0,1] liggen (caller checkt)."""
+        if self._weergave_scaled is None:
+            return None
+        sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+        if sw <= 0 or sh <= 0:
+            return None
+        offx = (self.video_label.width() - sw) / 2
+        offy = (self.video_label.height() - sh) / 2
+        fx = (pos.x() - offx) / sw          # fractie binnen de getoonde uitsnede
+        fy = (pos.y() - offy) / sh
+        x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 is dit (0,0,1,1) → oude formule
+        return (x0n + fx * wn, y0n + fy * hn)
+
+    def _norm_naar_widget(self, nx, ny):
+        """Inverse: genormaliseerde (x, y) → positie op het videolabel (voor hittesten)."""
+        sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+        offx = (self.video_label.width() - sw) / 2
+        offy = (self.video_label.height() - sh) / 2
+        x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 is dit (0,0,1,1) → oude formule
+        return QPointF(offx + (nx - x0n) / wn * sw, offy + (ny - y0n) / hn * sh)
+
+    def _handle_straal(self):
+        """Handle-/grijpradius in (geschaalde) schermpixels, evenredig met de schaatser:
+        GRIJP_FRAC × torso-lengte-op-het-scherm, geklemd op [GRIJP_MIN_PX, GRIJP_MAX_PX].
+        Via _norm_naar_widget zit de crop/zoom-schaal er al in (de letterbox-offset valt bij
+        een afstand weg), dus dit klopt op elke zoomstand en is exact consistent met het
+        hittesten. Val terug op GRIJP_MAX_PX als er geen bruikbare pose/torso is."""
+        if (not (0 <= self.huidige_idx < len(self.resultaten))
+                or self._weergave_scaled is None):
+            return float(GRIJP_MAX_PX)
+        r = self.resultaten[self.huidige_idx]
+        if not (r.pose_gevonden and isinstance(r.lm, list)):
+            return float(GRIJP_MAX_PX)
+        lm = r.lm
+
+        def _mid(a, b):
+            pts = [lm[i] for i in (a, b)
+                   if getattr(lm[i], 'visibility', 1.0) >= HANDLE_MIN_VIS]
+            if not pts:
+                return None
+            return (sum(p.x for p in pts) / len(pts), sum(p.y for p in pts) / len(pts))
+
+        schouder, heup = _mid(11, 12), _mid(23, 24)   # schouder-midden → heup-midden
+        if schouder is None or heup is None:
+            return float(GRIJP_MAX_PX)
+        p1 = self._norm_naar_widget(*schouder)
+        p2 = self._norm_naar_widget(*heup)
+        torso = math.hypot(p1.x() - p2.x(), p1.y() - p2.y())
+        return min(float(GRIJP_MAX_PX), max(float(GRIJP_MIN_PX), GRIJP_FRAC * torso))
+
+    def _teken_handles(self, pixmap):
+        """Tekent sleepbare ringen op elke zichtbare landmark van het huidige frame,
+        rechtstreeks op de geschaalde pixmap (dus vaste grootte in schermpixels)."""
+        if not (0 <= self.huidige_idx < len(self.resultaten)):
+            return
+        r = self.resultaten[self.huidige_idx]
+        if not (r.pose_gevonden and isinstance(r.lm, list)):
+            return
+        pw, ph = pixmap.width(), pixmap.height()
+        x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 (0,0,1,1) → lm.x*pw, lm.y*ph
+        straal = self._handle_straal()      # schaalt mee met de schaatser + zoom
+        gemarkeerd = self._handmatig.get(self.huidige_idx, set())
+        sleep_j = (self._sleep['j'] if self._sleep and self._sleep['idx'] == self.huidige_idx
+                   else None)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        try:
+            for j, lm in enumerate(r.lm):
+                if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS:
+                    continue
+                # buiten de uitsnede valt de ring buiten [0,pw]; de painter clipt hem
+                middel = QPointF((lm.x - x0n) / wn * pw, (lm.y - y0n) / hn * ph)
+                if j == sleep_j:
+                    painter.setPen(QPen(QColor(255, 255, 0), 3))     # actief gesleept
+                elif j in gemarkeerd:
+                    painter.setPen(QPen(QColor(0, 255, 120), 2))     # handmatig gezet
+                else:
+                    painter.setPen(QPen(QColor(255, 255, 255), 1))   # gewoon
+                painter.drawEllipse(middel, straal, straal)
+        finally:
+            painter.end()
+
+    # ── Skelet-editor: bewerk-modus + slepen (fase 3) ────────────────────────
+    def _toggle_bewerken(self, actief):
+        self._editor_actief = actief
+        self.editor_balk.setVisible(actief)
+        self._sleep = None
+        if actief:
+            if self.speeltimer.isActive():
+                self._toggle_afspelen()          # afspelen pauzeren
+            self.lbl_editor_hint.setText("Sleep een punt naar de juiste plek.")
+            self._update_editor_knoppen()
+        self._toon_huidig_frame()
+
+    def _update_editor_knoppen(self):
+        self.btn_undo.setEnabled(bool(self._undo))
+        self.btn_redo.setEnabled(bool(self._redo))
+        self.btn_herstel.setEnabled(self.analyse_id is not None)
+
+    def _frame_bewerkbaar(self, idx):
+        """Een frame is bewerkbaar als het een pose heeft die als lijst van (muteerbare)
+        Landmark-tuples in geheugen staat — geldt voor alle uit de bibliotheek geladen
+        analyses. Ruwe MediaPipe-objecten (diagnose-stand 'geen smoothing') niet."""
+        if not (0 <= idx < len(self.resultaten)):
+            return False
+        r = self.resultaten[idx]
+        return bool(r.pose_gevonden and isinstance(r.lm, list))
+
+    def _zet_landmark(self, idx, j, nx, ny, vis=None):
+        """Vervangt landmark j in frame idx (Landmark is immutable)."""
+        lm = self.resultaten[idx].lm[j]
+        self.resultaten[idx].lm[j] = Landmark(nx, ny, lm.z,
+                                              lm.visibility if vis is None else vis)
+
+    def _uitvloei_frames(self, idx, N):
+        """Frame-indices waarover de correctie uitvloeit: idx plus tot ±N buurframes,
+        stoppend bij een detectiegat (onbewerkbaar frame) in elke richting."""
+        frames = [idx]
+        for richting in (-1, 1):
+            for k in range(1, N + 1):
+                f = idx + richting * k
+                if not self._frame_bewerkbaar(f):
+                    break
+                frames.append(f)
+        return frames
+
+    def _zoek_landmark(self, pos):
+        """Index van de dichtstbijzijnde zichtbare landmark binnen de handle-radius
+        (_handle_straal) van de muispositie (schermruimte), of None."""
+        if not self._frame_bewerkbaar(self.huidige_idx) or self._weergave_scaled is None:
+            return None
+        straal = self._handle_straal()      # zelfde radius als de getekende ring
+        beste, beste_d2 = None, float(straal * straal)
+        for j, lm in enumerate(self.resultaten[self.huidige_idx].lm):
+            if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS:
+                continue
+            w = self._norm_naar_widget(lm.x, lm.y)
+            d2 = (w.x() - pos.x()) ** 2 + (w.y() - pos.y()) ** 2
+            if d2 <= beste_d2:
+                beste, beste_d2 = j, d2
+        return beste
+
+    def _toon_hover_naam(self, event):
+        """Toont in de bewerk-modus een tooltip met het lichaamsdeel van het punt onder de
+        cursor (zelfde trefradius als selecteren). Geen punt in de buurt → tooltip weg."""
+        j = self._zoek_landmark(event.position())
+        if j is None:
+            QToolTip.hideText()
+            return
+        naam = LANDMARK_NAMEN.get(j, f"punt {j}")
+        # iets naast de cursor zodat de tekst het punt zelf niet afdekt
+        pos = (event.globalPosition() + QPointF(14, 10)).toPoint()
+        QToolTip.showText(pos, naam, self.video_label)
+
+    def _editor_muis_druk(self, event):
+        # Buiten de bewerk-modus is links-slepen bedoeld om het ingezoomde beeld te
+        # verschuiven (pannen). In de bewerk-modus is links-slepen = punt verplaatsen.
+        if (not self._editor_actief and self._zoom > 1.0
+                and event.button() == Qt.LeftButton):
+            self._pan_sleep = event.position()
+            return
+        if not self._editor_actief:
+            return
+        if not self._frame_bewerkbaar(self.huidige_idx):
+            self.lbl_editor_hint.setText("Dit frame heeft geen bewerkbare pose.")
+            return
+        j = self._zoek_landmark(event.position())
+        if j is None:
+            return
+        self._sleep = {'idx': self.huidige_idx, 'j': j,
+                       'start_lm': self.resultaten[self.huidige_idx].lm[j]}
+
+    def _editor_muis_beweeg(self, event):
+        if self._pan_sleep is not None:
+            if self._weergave_scaled is None:
+                return
+            d = event.position() - self._pan_sleep
+            self._pan_sleep = event.position()
+            sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+            _, _, wn, hn = self._crop_norm
+            if sw > 0 and sh > 0:
+                half = 0.5 / self._zoom
+                # slepen naar rechts toont de linkerkant → uitsnede-midden schuift mee
+                self._pan_cx = min(1.0 - half, max(half, self._pan_cx - d.x() / sw * wn))
+                self._pan_cy = min(1.0 - half, max(half, self._pan_cy - d.y() / sh * hn))
+            self._zoom_volg = False
+            self.chk_volg.blockSignals(True)
+            self.chk_volg.setChecked(False)
+            self.chk_volg.blockSignals(False)
+            self._toon_huidig_frame()
+            return
+        if not self._editor_actief:
+            return
+        if not self._sleep:
+            # geen sleep bezig → toon bij hover het lichaamsdeel onder de cursor
+            self._toon_hover_naam(event)
+            return
+        norm = self._widget_naar_norm(event.position())
+        if norm is None:
+            return
+        nx = min(1.0, max(0.0, norm[0]))
+        ny = min(1.0, max(0.0, norm[1]))
+        idx, j = self._sleep['idx'], self._sleep['j']
+        self._zet_landmark(idx, j, nx, ny, vis=1.0)   # live feedback; nog geen herbereken
+        self._toon_frame(idx)
+
+    def _editor_muis_los(self, event):
+        if self._pan_sleep is not None:
+            self._pan_sleep = None
+            return
+        if not (self._editor_actief and self._sleep):
+            return
+        sleep, self._sleep = self._sleep, None
+        idx, j, start_lm = sleep['idx'], sleep['j'], sleep['start_lm']
+        eind = self.resultaten[idx].lm[j]
+        dx, dy = eind.x - start_lm.x, eind.y - start_lm.y
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            self._toon_frame(idx)                 # geen echte verplaatsing: alleen hertekenen
+            return
+        # Centrum terug op pre-edit zodat het hele venster gelijk begint.
+        self.resultaten[idx].lm[j] = start_lm
+        N = self.spin_uitvloei.value()
+        frames = self._uitvloei_frames(idx, N)
+        oud = {f: self.resultaten[f].lm[j] for f in frames}
+        for f in frames:
+            k = abs(f - idx)
+            gewicht = 1.0 if k == 0 else 0.5 * (1.0 + math.cos(math.pi * k / N))
+            lm = self.resultaten[f].lm[j]
+            vis = 1.0 if f == idx else lm.visibility     # alleen het gesleepte punt is zeker
+            self.resultaten[f].lm[j] = Landmark(lm.x + dx * gewicht, lm.y + dy * gewicht,
+                                                lm.z, vis)
+        nieuw = {f: self.resultaten[f].lm[j] for f in frames}
+        self._undo.append({'j': j, 'oud': oud, 'nieuw': nieuw})
+        self._redo.clear()
+        self._handmatig.setdefault(idx, set()).add(j)
+        self._na_edit()
+
+    def _na_edit(self):
+        """Na een edit/undo/redo: afgeleiden + events her-berekenen (géén smoothing),
+        weergave verversen en auto-opslaan naar de bibliotheek (per drop)."""
+        info = self.video_info
+        verwerk_afgeleiden(self.resultaten, info.w, info.h, info.fps,
+                           self.smooth_n, self.threshold)
+        self.events = segmenteer_afzetten(self.resultaten)
+        self._vul_tabel()
+        self._vul_grafiek()
+        self.btn_export.setEnabled(bool(self.events))
+        self._toon_frame(self.huidige_idx)
+        self._update_editor_knoppen()
+        if self.analyse_id is not None:
+            try:
+                schaats_db.bewaar_bewerkte_landmarks(
+                    self.bieb, self.analyse_id, self.resultaten, info, self.events)
+                self.lbl_editor_hint.setText("Correctie opgeslagen.")
+            except Exception as e:
+                self.lbl_editor_hint.setText(f"Opslaan mislukt: {e}")
+        else:
+            self.lbl_editor_hint.setText("Niet opgeslagen (geen bibliotheek-analyse).")
+
+    def _undo_edit(self):
+        if not (self._editor_actief and self._undo):
+            return
+        edit = self._undo.pop()
+        j = edit['j']
+        for f, lm in edit['oud'].items():
+            self.resultaten[f].lm[j] = lm
+        self._redo.append(edit)
+        self._na_edit()
+
+    def _redo_edit(self):
+        if not (self._editor_actief and self._redo):
+            return
+        edit = self._redo.pop()
+        j = edit['j']
+        for f, lm in edit['nieuw'].items():
+            self.resultaten[f].lm[j] = lm
+        self._undo.append(edit)
+        self._na_edit()
+
+    def _herstel_origineel(self):
+        if self.analyse_id is None:
+            return
+        if QMessageBox.question(
+                self, "Herstel origineel",
+                "Alle handmatige correcties van deze analyse ongedaan maken en terug naar "
+                "de oorspronkelijke detectie?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            hersteld = schaats_db.herstel_originele_landmarks(self.bieb, self.analyse_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Herstel origineel", f"Mislukt:\n\n{e}")
+            return
+        if not hersteld:
+            QMessageBox.information(
+                self, "Herstel origineel",
+                "Deze analyse is nog niet bewerkt — er is niets te herstellen.")
+            return
+        try:
+            data = schaats_db.laad_analyse(self.bieb, self.analyse_id)
+        except Exception as e:
+            QMessageBox.critical(self, "Herstel origineel", f"Herladen mislukt:\n\n{e}")
+            return
+        info, resultaten = data["info"], data["resultaten"]
+        verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, self.smooth_n, self.threshold)
+        events = segmenteer_afzetten(resultaten)
+        try:
+            schaats_db.ververs_events_cache(self.bieb, self.analyse_id, events)
+        except Exception:
+            pass
+        self._undo.clear()
+        self._redo.clear()
+        self._handmatig.clear()
+        self._toon_resultaten(info, resultaten, events, bron=data["meta"]["titel"])
+        self._update_editor_knoppen()
+        self.lbl_editor_hint.setText("Origineel hersteld.")
 
     def _markeer_actieve_rij(self, idx):
         for i, ev in enumerate(self.events):
@@ -1641,6 +2202,16 @@ class MainWindow(QMainWindow):
             self._ga_naar(self.events[rij].start_frame)
 
     # ── Afspelen ─────────────────────────────────────────────────────────
+    def _speel_interval_ms(self):
+        """Timer-interval per frame, geschaald met de gekozen afspeelsnelheid."""
+        factor = self.combo_snelheid.currentData() or 1.0
+        return max(1, int(1000 / ((self.video_info.fps or 30.0) * factor)))
+
+    def _zet_snelheid(self, _idx=None):
+        # Draait de video al, herstart de timer meteen met het nieuwe tempo.
+        if self.speeltimer.isActive():
+            self.speeltimer.start(self._speel_interval_ms())
+
     def _toggle_afspelen(self):
         if self.speeltimer.isActive():
             self.speeltimer.stop()
@@ -1648,8 +2219,7 @@ class MainWindow(QMainWindow):
         else:
             if self.huidige_idx >= len(self.resultaten) - 1:
                 self._ga_naar(0)
-            interval_ms = max(1, int(1000 / (self.video_info.fps or 30.0)))
-            self.speeltimer.start(interval_ms)
+            self.speeltimer.start(self._speel_interval_ms())
             self.btn_play.setText("⏸")
 
     def _speel_tick(self):

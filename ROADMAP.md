@@ -119,7 +119,16 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
-## Fase 3 — Skelet-editor (punten verslepen)
+## Fase 3 — Skelet-editor (punten verslepen) ✅
+
+> **Af (20 juli 2026)** — zelftest (`python schaats_db.py`) dekt de opslag-round-trip (bewerken → `landmarks_ruw.npz`-backup + `bewerkt=1` + verse events-cache; herstel origineel → npz terug + `bewerkt=0`); GUI handmatig getest.
+>
+> **Wat er staat:** "Bewerken"-knop op de weergavepagina (`_toggle_bewerken`) met sleepbare handles per landmark (`_teken_handles`/`_zoek_landmark`/`_handle_straal`), verslepen + uitvloeien naar ± N buurframes met cosinus-afbouw (`_editor_muis_druk`/`_beweeg`/`_los`, `_zet_landmark`, `_uitvloei_frames`), live herberekenen (`_na_edit` → `verwerk_afgeleiden` + `segmenteer_afzetten`, géén smoothing), undo/redo (`_undo`/`_redo`), "herstel origineel". Opslagkant in `schaats_db.py`: `bewaar_bewerkte_landmarks` (npz overschrijven + eenmalige `landmarks_ruw.npz`-backup + `bewerkt=1` + cache), `herstel_originele_landmarks`, `ververs_events_cache`, gedeelde `_schrijf_events_cache`.
+>
+> **Afwijkingen van het plan hieronder:**
+> - Grijpradius schaalt met de torso-lengte op scherm (`GRIJP_MIN_PX`/`GRIJP_MAX_PX`) i.p.v. een vaste 12 px — leesbaar bij een verre schaatser en op elke zoomstand.
+> - Pixel-correct bewerken op elke zoomstand vroeg eerst de **crop-and-magnify-zoom** (los gebouwd, zelfde commit; zie CLAUDE.md `_toon_pixmap`/`_crop_norm`).
+> - Punten *plaatsen* op frames zónder pose: niet gedaan (conform de openstaande vraag: eerste versie alleen bestaande punten verslepen).
 
 **Doel:** na een analyse kleine detectiefoutjes repareren door landmarkpunten te verslepen; werkt op elke uit de database geladen analyse.
 
@@ -253,7 +262,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | 0 | Serialisatie (`npz` + plain landmarks) | ✅ **af** (16 jul 2026) |
 | 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | ✅ **af** (18 jul 2026) |
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
-| 3 | Skelet-editor met uitvloeien + undo | middelgroot, 1–2 sessies |
+| 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026) |
 | 4 | Instellingen, gedeelde map, conflictafhandeling | middelgroot, 1–2 sessies |
 | 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
 | 6 | Sneller analyseren | gefaseerd: stappen 1+2+6 in 1 sessie; export/DirectML apart experiment |

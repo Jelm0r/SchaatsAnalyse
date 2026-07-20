@@ -36,6 +36,7 @@ from schaats_analyse import sla_landmarks_op, laad_landmarks
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
 NPZ_NAAM    = "landmarks.npz"
+NPZ_RUW_NAAM = "landmarks_ruw.npz"   # pristine landmarks vóór de eerste handmatige edit (fase 3)
 SCHEMA_VERSIE = 1
 ENV_BIBLIOTHEEK = "SCHAATSANALYSE_BIBLIOTHEEK"   # override voor tests
 
@@ -245,17 +246,25 @@ def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, event
                  info.w, info.h, info.fps, info.totaal,
                  _normaliseer_backend(backend),
                  json.dumps(instellingen or {}, ensure_ascii=False)))
-            con.executemany(
-                "INSERT INTO afzet_event_cache(analyse_id, idx, been, start_frame,"
-                "                              eind_frame, hoek, min_hoek, max_hoek, opmerking)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [(analyse_id, i, ev.been, ev.start_frame, ev.eind_frame,
-                  ev.hoek, ev.min_hoek, ev.max_hoek, ev.opmerking)
-                 for i, ev in enumerate(events)])
+            _schrijf_events_cache(con, analyse_id, events)
         return analyse_id
     except Exception:
         shutil.rmtree(doelmap, ignore_errors=True)
         raise
+
+
+def _schrijf_events_cache(con, analyse_id, events):
+    """Vervangt de events-cache van één analyse (DELETE + INSERT) binnen een lopende
+    transactie. Gedeeld door sla_analyse_op, bewaar_bewerkte_landmarks en
+    ververs_events_cache — de cache is puur voor snelle lijstweergave."""
+    con.execute("DELETE FROM afzet_event_cache WHERE analyse_id = ?", (analyse_id,))
+    con.executemany(
+        "INSERT INTO afzet_event_cache(analyse_id, idx, been, start_frame,"
+        "                              eind_frame, hoek, min_hoek, max_hoek, opmerking)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [(analyse_id, i, ev.been, ev.start_frame, ev.eind_frame,
+          ev.hoek, ev.min_hoek, ev.max_hoek, ev.opmerking)
+         for i, ev in enumerate(events)])
 
 
 def laad_analyse(bieb, analyse_id):
@@ -285,6 +294,46 @@ def analyse_video_pad(bieb, analyse_id):
     if rij is None:
         raise KeyError(f"Analyse {analyse_id} staat niet in de bibliotheek.")
     return _abs_pad(bieb, rij["video_bestand"])
+
+
+# ── Skelet-editor (fase 3) ──────────────────────────────────────────────────────
+
+def bewaar_bewerkte_landmarks(bieb, analyse_id, resultaten, info, events):
+    """
+    Overschrijft de landmarks van een analyse met handmatig gecorrigeerde (skelet-
+    editor). Bij de éérste edit wordt de originele landmarks.npz eenmalig veiliggesteld
+    als landmarks_ruw.npz, zodat 'herstel origineel' altijd terug kan. Zet analyse.bewerkt
+    = 1 en ververst de events-cache in één transactie. Draait per drop, dus houd het licht.
+    """
+    doelmap = os.path.join(bieb, MEDIA_MAP, analyse_id)
+    npz = os.path.join(doelmap, NPZ_NAAM)
+    ruw = os.path.join(doelmap, NPZ_RUW_NAAM)
+    if not os.path.isfile(ruw) and os.path.isfile(npz):
+        shutil.copy2(npz, ruw)          # pristine origineel, alleen bij de eerste edit
+    sla_landmarks_op(npz, resultaten, info)
+    with _verbind(bieb) as con:
+        con.execute("UPDATE analyse SET bewerkt = 1 WHERE id = ?", (analyse_id,))
+        _schrijf_events_cache(con, analyse_id, events)
+
+
+def herstel_originele_landmarks(bieb, analyse_id):
+    """Zet de landmarks terug naar vóór de eerste edit (landmarks_ruw.npz → landmarks.npz)
+    en analyse.bewerkt = 0. Retourneert True als er een origineel was, anders False (de
+    analyse is nooit bewerkt). De GUI herlaadt daarna en ververst zelf de events-cache."""
+    doelmap = os.path.join(bieb, MEDIA_MAP, analyse_id)
+    ruw = os.path.join(doelmap, NPZ_RUW_NAAM)
+    if not os.path.isfile(ruw):
+        return False
+    shutil.copy2(ruw, os.path.join(doelmap, NPZ_NAAM))
+    with _verbind(bieb) as con:
+        con.execute("UPDATE analyse SET bewerkt = 0 WHERE id = ?", (analyse_id,))
+    return True
+
+
+def ververs_events_cache(bieb, analyse_id, events):
+    """Herschrijft alleen de events-cache (na een herberekening, bv. na herstel origineel)."""
+    with _verbind(bieb) as con:
+        _schrijf_events_cache(con, analyse_id, events)
 
 
 def hernoem_analyse(bieb, analyse_id, titel):
@@ -366,6 +415,30 @@ if __name__ == "__main__":
 
         hernoem_analyse(bieb, aid, "Hernoemd")
         assert lijst_analyses(bieb, sid)[0]["titel"] == "Hernoemd"
+
+        # Skelet-editor (fase 3): bewerken → ruw-backup ontstaat, npz wijzigt,
+        # bewerkt=1, cache bijgewerkt; herstel origineel → npz == origineel, bewerkt=0.
+        map_a = os.path.join(bieb, MEDIA_MAP, aid)
+        assert not os.path.isfile(os.path.join(map_a, NPZ_RUW_NAAM))   # nog niet bewerkt
+        bewerkt_res = list(data["resultaten"])
+        r0 = bewerkt_res[0]
+        r0.lm[26] = r0.lm[26]._replace(x=0.123, y=0.456, visibility=1.0)  # r_knie verschoven
+        bewerkte_events = [AfzetEvent(0, "links", 0, 5, 0.00, 0.20, 30.0, 28.0, 33.0)]
+        bewaar_bewerkte_landmarks(bieb, aid, bewerkt_res, data["info"], bewerkte_events)
+        assert os.path.isfile(os.path.join(map_a, NPZ_RUW_NAAM))
+        with np.load(os.path.join(map_a, NPZ_NAAM)) as gew:
+            assert abs(float(gew["landmarks"][0, 26, 0]) - 0.123) < 1e-6
+        with np.load(os.path.join(map_a, NPZ_RUW_NAAM)) as orig:
+            assert np.array_equal(orig["landmarks"], arrays["landmarks"])
+        la_b = lijst_analyses(bieb, sid)
+        assert la_b[0]["bewerkt"] == 1 and la_b[0]["aantal_afzetten"] == 1
+
+        assert herstel_originele_landmarks(bieb, aid) is True
+        with np.load(os.path.join(map_a, NPZ_NAAM)) as hersteld:
+            assert np.array_equal(hersteld["landmarks"], arrays["landmarks"])
+        ververs_events_cache(bieb, aid, events)   # zoals de GUI na herstel doet
+        la_h = lijst_analyses(bieb, sid)
+        assert la_h[0]["bewerkt"] == 0 and la_h[0]["aantal_afzetten"] == 2
 
         # Fout-injectie: onleesbare video → geen DB-rij, geen (extra) mediamap.
         try:
