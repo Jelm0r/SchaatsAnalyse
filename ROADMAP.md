@@ -217,13 +217,13 @@ SQLite is niet ontworpen voor gelijktijdig schrijven via cloudsync. Op teamschaa
 
 ## Fase 6 — Sneller analyseren (meer uit de CPU/iGPU halen)
 
-**Doel:** de YOLO-analyse (nu ~2 s/frame op CPU met yolo11x-pose op 1280) fors versnellen. Hardware hier: **Ryzen 7 7735U** (8 cores/16 threads) met **geïntegreerde Radeon 680M** — geen NVIDIA, dus geen CUDA; de realistische route is geoptimaliseerde CPU-inference en eventueel de iGPU via DirectML.
+**Doel:** de YOLO-analyse (nu ~2 s/frame op CPU met yolo26x-pose op 1280) fors versnellen. Hardware hier: **Ryzen 7 7735U** (8 cores/16 threads) met **geïntegreerde Radeon 680M** — geen NVIDIA, dus geen CUDA; de realistische route is geoptimaliseerde CPU-inference en eventueel de iGPU via DirectML.
 
 In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste testvideo (zie meetprotocol hieronder):
 
 1. **Batch-inference in de verfijningspass** (`_verfijn_landmarks`): de crops worden nu één voor één door `model.predict()` gehaald; ultralytics accepteert een lijst beelden. Crops verzamelen en in batches van bv. 8–16 voorspellen → minder overhead per frame, betere corebenutting. Weinig code, geen kwaliteitsverlies.
 2. **Prefetch-thread voor het videolezen**: `cv2.VideoCapture.read()` + resize in een aparte thread met een kleine queue, zodat decoderen en inference elkaar overlappen i.p.v. afwisselen. Geldt voor alle passes (detectie, verfijning, auto-horizon).
-3. **Lichter model voor de detectiepass, x voor de verfijning**: pass 1 hoeft alleen bboxes/track-IDs en globale keypoints te leveren; de nauwkeurige hoeken komen uit de crop-pass. `yolo11m-pose` (of zelfs `s`) op 1280 voor pass 1 + `yolo11x-pose` voor de crops kan een flink deel van de looptijd schelen. **Wel valideren** dat pass 1 de verre/bewegingsonscherpe schaatser nog vindt (dat was de reden voor 1280 × x) — op de testvideo controleren dat de dekking 100% blijft en de events identiek.
+3. **Lichter model voor de detectiepass, x voor de verfijning**: pass 1 hoeft alleen bboxes/track-IDs en globale keypoints te leveren; de nauwkeurige hoeken komen uit de crop-pass. `yolo26m-pose` (of zelfs `s`) op 1280 voor pass 1 + `yolo26x-pose` voor de crops kan een flink deel van de looptijd schelen. **Wel valideren** dat pass 1 de verre/bewegingsonscherpe schaatser nog vindt (dat was de reden voor 1280 × x) — op de testvideo controleren dat de dekking 100% blijft en de events identiek.
 4. **Geëxporteerd model i.p.v. PyTorch**: `model.export(format=...)` van ultralytics en dan inferen met:
    - **OpenVINO** (`format="openvino"`): geoptimaliseerde CPU-runtime, werkt ook op AMD-CPU's; typisch 1.5–3× sneller dan torch-CPU, zelfde gewichten dus zelfde output (kleine numerieke afwijkingen).
    - **ONNX Runtime + DirectML** (`format="onnx"`, `onnxruntime-directml`): draait op de Radeon-iGPU. Potentieel de grootste sprong, maar iGPU-drivers/DirectML zijn de wisselvalligste van dit lijstje — als experiment plannen, met CPU-pad als terugval.

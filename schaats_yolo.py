@@ -19,12 +19,12 @@ elk frame de doelschaatser is. Dat is veel robuuster dan per frame streaming kie
    schaatser is voorspelbaar).
 4. **Verfijningspass** (`verfijn`): per doel-frame wordt de pose opnieuw geschat met
    een **top-down model op de bekende bounding box** — bij voorkeur **RTMPose-26**
-   (Halpe26, via rtmlib/ONNXRuntime): wezenlijk nauwkeuriger dan yolo11x-pose
+   (Halpe26, via rtmlib/ONNXRuntime): wezenlijk nauwkeuriger dan yolo26x-pose
    (~76 vs ~69,5 COCO-AP, subpixel SimCC-decodering) én met échte hiel/teen-
    keypoints, en bovendien veel sneller op CPU. Detectiegaten worden via
    geïnterpoleerde bboxes alsnog gevuld. De pakkleur blijft de poortwachter, zodat
    de verfijning nooit stiekem de andere schaatser pakt. Is rtmlib niet
-   geïnstalleerd, dan valt de pass terug op de oude vierkante-crop + yolo11x-route.
+   geïnstalleerd, dan valt de pass terug op de oude vierkante-crop + yolo26x-route.
 
 De rest van de pijplijn (offline smoothing, afgeleiden, tekenen, GUI) uit
 `schaats_analyse.py` wordt ongewijzigd hergebruikt. Vereist torch/ultralytics
@@ -56,9 +56,11 @@ from schaats_analyse import (
 BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
                 else "YOLO-pose + ByteTrack")
 
-# yolo11x-pose = meest nauwkeurig (traagst op CPU). Alternatief: "yolo11m-pose.pt"
+# yolo26x-pose = meest nauwkeurig (traagst op CPU). Alternatief: "yolo26m-pose.pt"
 # (sneller, iets minder nauwkeurig). Ultralytics downloadt het model bij eerste gebruik.
-STANDAARD_YOLO_MODEL = "yolo11x-pose.pt"
+# NB: YOLOv12 is nooit als pose-model uitgebracht (alleen detectie); YOLO26 is het
+# nieuwste pose-model in ultralytics, opvolger van yolo11x-pose.
+STANDAARD_YOLO_MODEL = "yolo26x-pose.pt"
 
 # ── Detectie ────────────────────────────────────────────────────────────────────
 DETECT_IMGSZ = 1280       # inferentieresolutie detectiepass; 640 mist verre/blurry schaatsers
@@ -87,7 +89,7 @@ RTMPOSE_MODEL = ('https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/'
                  '-7fb6e239_20230606.zip')
 RTMPOSE_INPUT = (288, 384)   # (breedte, hoogte) van de modelinvoer
 RTMPOSE_MIN_SCORE = 0.3      # min. gemiddelde been-keypointscore om de schatting te vertrouwen
-# Terugvalroute zonder rtmlib (vierkante crop door yolo11x):
+# Terugvalroute zonder rtmlib (vierkante crop door yolo26x):
 VERFIJN_IMGSZ   = 640        # inferentiegrootte op de uitsnede
 VERFIJN_MARGE   = 1.9        # cropzijde = marge × grootste bbox-zijde
 VERFIJN_MIN_PX  = 256        # ondergrens cropzijde (pixels)

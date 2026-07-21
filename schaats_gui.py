@@ -1629,7 +1629,7 @@ class MainWindow(QMainWindow):
         self.input_pad = dlg.video_pad
 
         # Modelkeuze is alleen relevant voor de MediaPipe-backend; YOLO gebruikt zijn
-        # eigen model (yolo11x-pose.pt) en negeert model_pad.
+        # eigen model (yolo26x-pose.pt) en negeert model_pad.
         heavy = False
         if not IS_YOLO:
             if dlg.chk_heavy.isChecked():
