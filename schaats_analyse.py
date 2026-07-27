@@ -120,6 +120,50 @@ LR_SWAP_FACTOR = 0.8      # wissel alleen als de gewisselde toewijzing dúidelij
 STANCE_SMOOTH_S = 0.18    # smoothing-venster (s) van het stand-signaal
 STANCE_BAND_FRAC = 0.20   # hysterese-band als fractie van de signaalamplitude
 
+# ── Afzet-voltooiing uit beenstrekking ──────────────────────────────────────────
+# "Been maximaal gestrekt = afzet klaar." I.p.v. een per-frame 2-van-3-stem met vaste
+# drempels detecteren we het strek-máximum als een piek van een glad, schaalvrij
+# signaal (rechte-lijn heup→enkel / som botlengtes). Geen magische drempel nodig en de
+# hoek wordt precies op de piek afgelezen. De slagtijd is voorspelbaar: uit de mediane
+# stand-run-lengte schatten we de halve slagperiode als zachte prior tegen spookafzetten.
+STREK_SMOOTH_S      = 0.15   # smoothing-venster (s) van het strek-ratio-signaal
+STREK_MIN_SLAG_FRAC = 0.35   # een stand-run korter dan deze fractie van de halve slag-
+                             # periode is (bijna zeker) een ruis-omslag → geen afzet.
+                             # Laag gehouden zodat snelle openingsslagen blijven staan.
+STREK_MIN_RUN_S     = 0.20   # absolute ondergrens (s) voor een stand-run die als échte slag
+                             # meetelt. Nodig omdat de halve slagperiode uit de mediane run-
+                             # lengte komt: tellen de ruis-runs daarin mee, dan zakt de mediaan
+                             # — en dus de drempel — juist bij véél L/R-flips (zie BUGS.md A3).
+                             # Een halve schaatsslag duurt nooit minder dan ~0,2 s.
+STREK_PLATEAU_BAND  = 0.02   # het been is een hele fase "gestrekt" (van rechtop komen tot
+                             # volle zijwaartse push). Frames waarin de strek-ratio binnen
+                             # deze band onder het per-run maximum zit tellen als "gestrekt";
+                             # binnen dat plateau lezen we de vlakste (laagste) onderbeenhoek
+                             # af = de eigenlijke afzethoek (niet het rechtop-komen).
+STREK_MIN_HELLING_DEG = 20.0 # minimale helling van het onderbeen t.o.v. de vertícaal bij
+                             # afzet-voltooiing (dus: afzethoek ≤ 90 − 20 = 70°). Beslaat het
+                             # strek-plateau van een run alléén de opricht-fase, dan is de
+                             # "vlakste hoek" binnen dat plateau nog steeds het rechtop-komen
+                             # en rapporteert de tool een afzet van 74–83°. Dit is geen
+                             # tuning-getal maar meetkunde: bij een onderbeen dat maar 20°
+                             # uit het lood staat is de zijwaartse component van de afzet
+                             # sin(20°) ≈ 0,34 — er is dan simpelweg niet opzij geduwd.
+                             # Op de 18 opgeslagen analyses scheidt deze grens de drie
+                             # rechtop-kom-events (74,3 / 79,4 / 83,1°) van alle 84 gezonde
+                             # afzetten; de steilste gezonde meting staat op 66,7°.
+                             # Zo'n event verdwijnt niet — het wordt gemarkeerd (zie
+                             # ONV_GEEN_PUSH) en valt buiten gem/min/max.
+
+# Redenen waarom een afzet wél zichtbaar blijft maar buiten de statistiek valt
+# (`FrameResultaat.afzet_onvolledig` → `AfzetEvent.onvolledig`). Bewust één vlag mét
+# reden i.p.v. twee losse booleans: elke plek die de statistiek filtert hoeft alleen op
+# waarheid te toetsen, terwijl de GUI de gebruiker kan vertellen wát er mis was — "de
+# video hield op" vraagt om een langere opname, "geen volledige afzet waargenomen" om
+# een kritische blik op de been-toewijzing. De teksten zijn tegelijk de marker die in
+# de events-cache van de bibliotheek meereist (schaats_db).
+ONV_AFGEKAPT  = "afgekapt"              # run loopt door tot het einde van video/pose-segment
+ONV_GEEN_PUSH = "geen volledige push"   # plateau beslaat alleen het rechtop-komen
+
 # ── Perspectiefcorrectie (fase 7) ───────────────────────────────────────────────
 # De 3D-reconstructie zelf zit in schaats_perspectief.py; hier alleen de koppeling.
 ENKEL_HOOGTE_M       = 0.10   # enkel-landmark ligt op malleolus + schaats, niet óp het ijs
@@ -161,10 +205,14 @@ class FrameResultaat:
     lm_data: dict = None        # pixelcoördinaten per landmark
     been: str = None
     hoek: float = None
-    smooth_hoek: float = None
+    smooth_hoek: float = None   # gecentreerd gemiddelde van `hoek` (weergave; zero-lag)
     kniehoek: float = None
     gewicht_erop: bool = None
     signalen: list = field(default_factory=list)
+    strek_ratio: float = None   # strekking standbeen (0–1, ~1 = gestrekt); piek = einde afzet
+    afzet_onvolledig: str = None  # None = volwaardige afzet; anders de reden waarom de hoek
+                                  # van deze stand-run niet als meting telt (ONV_AFGEKAPT /
+                                  # ONV_GEEN_PUSH) — beide leveren een te steile hoek
     pose_gevonden: bool = False
     horizon_deg: float = 0.0    # camerakanteling t.o.v. het ijs bij dit frame (per-frame bij auto)
     # Kwaliteitsvlag uit de verfijningspass (alleen YOLO+RTMPose-backend): horizontale
@@ -188,10 +236,14 @@ class AfzetEvent:
     eind_frame: int
     start_tijd: float
     eind_tijd: float
-    hoek: float       # hoek bij afzet-voltooiing (representatief)
+    hoek: float       # hoek op het voltooiingsframe zelf (niet gemiddeld — zie segmenteer_afzetten)
     min_hoek: float
     max_hoek: float
     opmerking: str = None   # bv. "alternatie?" als L/R niet klopt, of "samengevoegd"
+    onvolledig: str = None  # None = telt mee; anders de reden waarom deze afzet buiten
+                            # gem/min/max valt (ONV_AFGEKAPT / ONV_GEEN_PUSH). Het event
+                            # blijft zichtbaar — er is immers iets gebeurd — maar de hoek
+                            # is in beide gevallen systematisch te steil om te meten.
     # Perspectiefcorrectie (None zonder kalibratie):
     correctie: float = None      # toegepaste correctie bij afzet-voltooiing (graden)
     betrouwbaar: bool = True     # False: hoek gemeten met been bijna in de kijkrichting
@@ -426,13 +478,15 @@ def teken_been_overlay(frame, lm_data, been, hoek, gewicht_erop, kniehoek, horiz
              (enkel[0] + ex, enkel[1] - ey),
              WIT, 2)
 
-    # Hoeklijn verlengd (enkel → richting knie, maar projectie op grond)
-    if hoek > 0:
-        lijn_len = 80
-        richting_x = int(np.sin(np.radians(hoek)) * lijn_len * (-1 if been == 'links' else 1))
-        richting_y = -int(np.cos(np.radians(hoek)) * lijn_len)
-        eind = (enkel[0] + richting_x, enkel[1] + richting_y)
-        cv2.line(frame, enkel, eind, GEEL, 2, cv2.LINE_AA)
+    # Hoeklijn verlengd (enkel → richting knie, maar projectie op grond). Een hoek ≤ 0
+    # betekent dat de knie onder de enkel zit: geen schaatshouding maar een kapotte
+    # detectie. Die lijn tekenen we juist wél, in rood — stilzwijgend weglaten verbergt
+    # het probleem terwijl de tabel de waarde gewoon rapporteert.
+    lijn_len = 80
+    richting_x = int(np.sin(np.radians(hoek)) * lijn_len * (-1 if been == 'links' else 1))
+    richting_y = -int(np.cos(np.radians(hoek)) * lijn_len)
+    eind = (enkel[0] + richting_x, enkel[1] + richting_y)
+    cv2.line(frame, enkel, eind, GEEL if hoek > 0 else ROOD, 2, cv2.LINE_AA)
 
     # Knooppunten
     for punt in [heup, knie, enkel]:
@@ -448,9 +502,10 @@ def teken_been_overlay(frame, lm_data, been, hoek, gewicht_erop, kniehoek, horiz
 
 
 def teken_hud(frame, been, hoek, gewicht_erop, kniehoek, smooth_hoek, frame_nr, fps, w, h,
-              correctie=None, betrouwbaar=True, snelheid=None):
+              correctie=None, betrouwbaar=True, snelheid=None, strek_ratio=None):
     """Teken het HUD-paneel linksboven. `correctie`/`betrouwbaar`/`snelheid` zijn de
-    perspectiefcorrectie-velden (alleen getoond als er een kalibratie actief was)."""
+    perspectiefcorrectie-velden (alleen getoond als er een kalibratie actief was).
+    `strek_ratio` toont de beenstrekking (afzet-detectie: piek = einde afzet)."""
     tijd = frame_nr / fps if fps > 0 else 0
     kleur_status = GROEN if gewicht_erop else ROOD
     status_tekst = "GEWICHT OP BEEN" if gewicht_erop else "AFZET VOLTOOID"
@@ -468,6 +523,9 @@ def teken_hud(frame, been, hoek, gewicht_erop, kniehoek, smooth_hoek, frame_nr, 
             regels.insert(4, (f"Snelheid: {snelheid:.1f} m/s", WIT, 0.5))
         if not betrouwbaar:
             regels.append(("HOEK ONBETROUWBAAR (kijkrichting)", ROOD, 0.45))
+
+    if strek_ratio is not None:           # beenstrekking: piek = afzet klaar
+        regels.insert(len(regels) - 1, (f"Strekking: {strek_ratio:.2f}", PAARS, 0.5))
 
     paneel_h = 26 * len(regels) + 40      # 5 regels → 170, zoals voorheen
     overlay = frame.copy()
@@ -526,7 +584,7 @@ def teken_overlay_op_frame(frame, resultaat, fps, toon_skelet=True, toon_afzetbe
         teken_hud(frame, resultaat.been, resultaat.hoek, resultaat.gewicht_erop,
                   resultaat.kniehoek, resultaat.smooth_hoek, resultaat.frame_nr, fps, w, h,
                   correctie=resultaat.hoek_correctie, betrouwbaar=resultaat.hoek_betrouwbaar,
-                  snelheid=resultaat.snelheid)
+                  snelheid=resultaat.snelheid, strek_ratio=resultaat.strek_ratio)
 
 
 def _zichtbare_xy(lm, idxs=None, min_vis=TRACK_MIN_VIS):
@@ -1163,6 +1221,146 @@ def _lm_px(r, idx, w, h):
     return (r.lm[idx].x * w, r.lm[idx].y * h)
 
 
+def _strek_ratio(r, been, w, h):
+    """Beenstrekking als schaalvrije ratio: rechte-lijn heup→enkel gedeeld door de som
+    van de botlengtes (heup→knie + knie→enkel). ~1.0 = volledig gestrekt (knie op de
+    lijn), lager = gebogen. Schaalvrij (dichtbij/ver weg maakt niet uit) én zonder vaste
+    pixeldrempel — precies wat nodig is om het strek-máximum (= einde afzet) als piek te
+    vinden i.p.v. met een harde hoekgrens. Op float-pixels: op afstand is het onderbeen
+    maar tientallen pixels."""
+    h_idx, k_idx, e_idx = (L_HIP, L_KNEE, L_ANKLE) if been == 'links' else (R_HIP, R_KNEE, R_ANKLE)
+    heup  = np.array(_lm_px(r, h_idx, w, h))
+    knie  = np.array(_lm_px(r, k_idx, w, h))
+    enkel = np.array(_lm_px(r, e_idx, w, h))
+    bot = float(np.hypot(*(knie - heup)) + np.hypot(*(enkel - knie)))
+    return float(np.hypot(*(enkel - heup)) / bot) if bot > 1e-6 else 0.0
+
+
+def bepaal_afzet_uit_strek(resultaten, w, h, fps):
+    """
+    Bepaalt de afzet-voltooiing uit de **beenstrekking** i.p.v. de per-frame 2-van-3-
+    stem (`detecteer_gewicht_op_been`). Het standbeen is een hele fase "gestrekt": van
+    rechtop komen na de plaatsing (been ≈ verticaal → onderbeenhoek ~80-90°) tot de
+    volledige zijwaartse afzet (been plat → ~50°). We nemen als afzet-voltooiing niet
+    het strek-máximum (dat valt op het rechtop-komen → een misleidend hoge hoek), maar
+    binnen die gestrekte fase het frame met de **vlakste (laagste) onderbeenhoek** = de
+    eigenlijke, meest horizontale push. Dat volgt de observatie "been maximaal = afzet
+    klaar" én leest de hoek op het betekenisvolle moment; het rechtop-komen (hoge hoek)
+    valt automatisch af en de recovery zit al buiten het strek-plateau.
+
+    Werkt per aaneengesloten **stand-run** (frames waarin `r.been` gelijk blijft, met
+    pose + lm_data — de cyclus-toewijzing levert precies één push per run). Per run:
+    het gestrekte plateau = het aaneengesloten venster rond `argmax(strek_ratio)` waar
+    de ratio binnen `STREK_PLATEAU_BAND` onder z'n maximum blijft; de afzet-voltooiing
+    `c` = het plateau-frame met de kleinste onderbeenhoek. Zet per frame `r.strek_ratio`
+    (gesmoothd, voor HUD/debug) en `r.gewicht_erop` (True t/m `c`, daarna False → het
+    event spant de hele load+push en eindigt op de vlakste-hoek-frame).
+
+    "Voorspelbare slagtijd" zit erin als **zachte prior**: uit de mediane run-lengte
+    schatten we de halve slagperiode; een run die daar een fractie (STREK_MIN_SLAG_FRAC)
+    korter dan is, is vrijwel zeker een ruis-omslag van de been-toewijzing en levert
+    géén afzet (voorkomt spookafzetten door kortstondige L/R-flips). LET OP: bij een
+    versnellende start zijn de slagen korter — de fractie staat daarom laag zodat alleen
+    écht korte (ruis-)runs sneuvelen, niet de snelle openingsslagen. De mediaan loopt
+    alleen over runs van minstens `STREK_MIN_RUN_S`: nemen de ruis-runs eraan deel, dan
+    zakt de schatting — en dus de drempel — precies wanneer je hem nodig hebt.
+
+    Twee soorten runs leveren wél een event — je wilt zien dát er iets gebeurde — maar met
+    `afzet_onvolledig` gemarkeerd, zodat de GUI en de bibliotheek-statistiek ze buiten
+    gem/min/max houden:
+
+    - **`ONV_AFGEKAPT`** — de run eindigt niet op een beenwissel maar op het einde van de
+      video of van het pose-segment. De push is daar niet afgemaakt, het plateau bevat
+      alleen het rechtop-komen en de "vlakste hoek" is systematisch veel te steil (gemeten:
+      +15 tot +25° op de laatste afzet). Een run die aan het *begin* van een segment is
+      afgekapt telt gewoon mee: daar mist alleen de load-fase, terwijl de push-voltooiing
+      (waar de hoek vandaan komt) wél in beeld is.
+    - **`ONV_GEEN_PUSH`** — de run is lang genoeg (`min_run`) en eindigt netjes op een
+      beenwissel, maar het strek-plateau beslaat alléén de opricht-fase; de vlakste hoek
+      binnen dat plateau is dan nog steeds het rechtop-komen. Herkenbaar aan de meetkunde:
+      het onderbeen staat bij "voltooiing" minder dan `STREK_MIN_HELLING_DEG` uit het lood,
+      dus er is niet opzij geduwd. Kwam voor in 3 van de 100 events in de bibliotheek.
+
+    Vereist de globale cyclus-been-toewijzing. Retourneert de geschatte slagperiode
+    (frames), puur informatief.
+    """
+    # Aaneengesloten runs van gelijk standbeen (binnen frames met pose + lm_data).
+    # `afgekapt` = de run eindigt niet op een beenwissel maar op een detectiegat of het
+    # einde van de video; de afzet is dan niet uit-geobserveerd.
+    runs, huidig = [], None
+    for i, r in enumerate(resultaten):
+        heeft = r.pose_gevonden and r.lm_data is not None and r.been in ('links', 'rechts')
+        if not heeft:
+            if huidig is not None:
+                huidig['afgekapt'] = True
+                runs.append(huidig); huidig = None
+            continue
+        if huidig is None or huidig['been'] != r.been:
+            if huidig is not None:
+                runs.append(huidig)
+            huidig = {'been': r.been, 'idx': [], 'afgekapt': False}
+        huidig['idx'].append(i)
+    if huidig is not None:
+        huidig['afgekapt'] = True          # video is op → laatste push niet afgemaakt
+        runs.append(huidig)
+
+    # Halve slagperiode robuust schatten: alleen runs die lang genoeg zijn om überhaupt
+    # een halve slag te kunnen zijn (zie STREK_MIN_RUN_S). Zonder zulke runs valt hij
+    # terug op álle runs — dan is er niets beters.
+    min_abs = max(2, int(round(STREK_MIN_RUN_S * fps))) if fps > 0 else 2
+    lengtes = [len(run['idx']) for run in runs]
+    echte = [n for n in lengtes if n >= min_abs] or lengtes
+    half_periode = float(np.median(echte)) if echte else 0.0
+    min_run = max(min_abs, int(round(STREK_MIN_SLAG_FRAC * half_periode))) if half_periode else min_abs
+
+    win = max(SMOOTH_POLY + 2, int(round(STREK_SMOOTH_S * fps)))
+    if win % 2 == 0:
+        win += 1
+
+    for run in runs:
+        idx, been = run['idx'], run['been']
+        ratio = np.array([_strek_ratio(resultaten[i], been, w, h) for i in idx])
+        ratio_s = _savgol(ratio, win, SMOOTH_POLY) if len(idx) >= 3 else ratio
+        for t, i in enumerate(idx):
+            resultaten[i].strek_ratio = round(float(ratio_s[t]), 3)
+            resultaten[i].afzet_onvolledig = ONV_AFGEKAPT if run['afgekapt'] else None
+        if len(idx) < min_run:                    # te kort → ruis-omslag, geen afzet
+            for i in idx:
+                resultaten[i].gewicht_erop = False
+            continue
+
+        # Gestrekte fase = het aaneengesloten plateau rond de strek-piek (ratio binnen de
+        # band onder z'n maximum). Recovery (knie buigt → ratio zakt) valt er buiten.
+        piek = int(np.argmax(ratio_s))
+        drempel = ratio_s[piek] - STREK_PLATEAU_BAND
+        lo = hi = piek
+        while lo - 1 >= 0 and ratio_s[lo - 1] >= drempel:
+            lo -= 1
+        while hi + 1 < len(idx) and ratio_s[hi + 1] >= drempel:
+            hi += 1
+
+        # Binnen het plateau de vlakste (laagste) onderbeenhoek = afzet-voltooiing. Het
+        # rechtop-komen (hoge hoek) valt zo automatisch af.
+        e_idx, k_idx = (L_ANKLE, L_KNEE) if been == 'links' else (R_ANKLE, R_KNEE)
+        hoeken = [bereken_hoek_tov_ijs(_lm_px(resultaten[idx[t]], e_idx, w, h),
+                                       _lm_px(resultaten[idx[t]], k_idx, w, h),
+                                       resultaten[idx[t]].horizon_deg)
+                  for t in range(lo, hi + 1)]
+        c = lo + int(np.argmin(hoeken))
+        for t, i in enumerate(idx):
+            resultaten[i].gewicht_erop = (t <= c)
+
+        # Meetkundige eindtoets: staat het onderbeen bij de "voltooiing" nog vrijwel
+        # rechtop, dan besloeg het plateau alleen het opricht-moment en is er geen
+        # zijwaartse afzet waargenomen. Het event blijft staan, maar de hoek is geen
+        # meting. Een al afgekapte run houdt zijn eigen (bekende) reden.
+        if not run['afgekapt'] and (90.0 - min(hoeken)) < STREK_MIN_HELLING_DEG:
+            for i in idx:
+                resultaten[i].afzet_onvolledig = ONV_GEEN_PUSH
+
+    return half_periode * 2.0
+
+
 def _wereldtraject(resultaten, perspectief, fps, w, h):
     """
     Wereldposities (m) + rijrichting per frame uit de gekalibreerde enkelposities.
@@ -1225,21 +1423,56 @@ def _perspectief_hoek(r, enkel_px, knie_px, perspectief, richting):
         r.hoek_correctie = None
         r.hoek_betrouwbaar = False
         return oude_hoek
-    hoek = round(rec.hoek, 1)
+    hoek = round(float(rec.hoek), 1)     # gewone float: gaat zo de DB/CSV/JSON in
     r.hoek_correctie = round(hoek - oude_hoek, 1)
     r.hoek_betrouwbaar = rec.betrouwbaar
     return hoek
 
 
+def _zet_smooth_hoek(resultaten, smooth_n):
+    """
+    Vult `r.smooth_hoek`: een **gecentreerd** (zero-lag) gemiddelde van `r.hoek` over
+    `smooth_n` frames, per aaneengesloten reeks van hetzelfde standbeen.
+
+    Bewust géén achterwaartse deque meer: zo'n trailing gemiddelde ijlt een halve
+    venster na, en omdat de afzethoek naar z'n minimum toe daalt lag de gerapporteerde
+    hoek daardoor systematisch te steil. Een detectiegat óf een beenwissel breekt de
+    reeks, zodat er nooit over een gat heen of tussen twee benen door wordt gemiddeld.
+    Puur een weergave-grootheid (HUD/grafiek); de tabel rapporteert de hoek van één
+    frame (zie `segmenteer_afzetten`).
+    """
+    half = max(0, (int(smooth_n) - 1) // 2)
+
+    def vul(run):
+        hoeken = np.array([r.hoek for r in run], dtype=float)
+        for t, r in enumerate(run):
+            lo, hi = max(0, t - half), min(len(run), t + half + 1)
+            r.smooth_hoek = round(float(hoeken[lo:hi].mean()), 1)
+
+    run = []
+    for r in list(resultaten) + [None]:
+        heeft_hoek = r is not None and r.hoek is not None
+        aansluitend = heeft_hoek and (not run or (r.been == run[-1].been
+                                                 and r.frame_nr == run[-1].frame_nr + 1))
+        if run and not aansluitend:
+            vul(run)
+            run = []
+        if heeft_hoek:
+            run.append(r)
+
+
 def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclus=True,
-                       perspectief=None):
+                       perspectief=None, afzet_strek=True):
     """
     Vult per frame de afgeleide grootheden in (afzetbeen, hoek, kniehoek, gewicht),
     berekend uit resultaat.lm. Wordt ná de offline smoothing aangeroepen zodat alles
     op de gladde landmarks is gebaseerd.
 
     Het afzetbeen wordt cyclus-bewust toegewezen (`wijs_afzetbeen_cyclus`) als
-    `cyclus`, anders per frame (`bepaal_afzetbeen`). De rest is sequentieel i.v.m. de
+    `cyclus`, anders per frame (`bepaal_afzetbeen`). De afzet-voltooiing komt met
+    `afzet_strek` (default) uit de beenstrekking (`bepaal_afzet_uit_strek`: strek-
+    máximum = einde afzet); zonder (of zonder `cyclus`) uit de per-frame gewicht-stem
+    (`detecteer_gewicht_op_been`). De rest is sequentieel i.v.m. de
     tijd-histories; bij een detectiegat worden die geleegd. De afzethoek wordt
     gecorrigeerd met de per-frame `r.horizon_deg` (door `analyseer` gezet: constant of
     per-frame bij auto-horizon).
@@ -1251,13 +1484,23 @@ def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclu
     voor de hóek (de kalibratie kent de camerastand exact); `r.horizon_deg` blijft de
     ware-horizonkanteling voor de overlay.
     """
-    # Pass 1: pixelcoördinaten voor alle pose-frames.
+    # Pass 1: pixelcoördinaten voor alle pose-frames. De onvolledig-vlag hoort bij de
+    # been-runs van déze doorrekening (na een skelet-edit kunnen die verschuiven), dus
+    # eerst schoon.
     for r in resultaten:
         r.lm_data = get_landmarks(r.lm, w, h) if (r.pose_gevonden and r.lm is not None) else None
+        r.afzet_onvolledig = None
 
     # Been-toewijzing (globaal, cyclus-bewust) vóór de per-frame afgeleiden.
     if cyclus:
         wijs_afzetbeen_cyclus(resultaten, h, fps)
+
+    # Afzet-voltooiing uit de beenstrekking (strek-máximum = einde afzet). Vereist de
+    # globale cyclus-been-toewijzing; zonder cyclus (diagnose-stand) valt hij terug op
+    # de per-frame gewicht-stem hieronder.
+    gebruik_strek = afzet_strek and cyclus
+    if gebruik_strek:
+        bepaal_afzet_uit_strek(resultaten, w, h, fps)
 
     # Wereldtraject + snelheid (alleen mét kalibratie).
     if perspectief is not None:
@@ -1274,13 +1517,12 @@ def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclu
                     r.snelheid = round(float(np.hypot(d[0], d[1])) * fps / (j1 - j0), 2)
 
     # Pass 2: hoek, kniehoek en gewicht per frame.
-    hoek_buffer = deque(maxlen=smooth_n)
     enkel_hist  = {'links': deque(maxlen=10), 'rechts': deque(maxlen=10)}
     heup_hist   = deque(maxlen=10)
 
     for i, r in enumerate(resultaten):
         if not (r.pose_gevonden and r.lm_data is not None):
-            hoek_buffer.clear(); heup_hist.clear()
+            heup_hist.clear()
             enkel_hist['links'].clear(); enkel_hist['rechts'].clear()
             continue
 
@@ -1300,18 +1542,19 @@ def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclu
             hoek = bereken_hoek_tov_ijs(lm_data['l_enkel'], lm_data['l_knie'], r.horizon_deg)
         else:
             hoek = bereken_hoek_tov_ijs(lm_data['r_enkel'], lm_data['r_knie'], r.horizon_deg)
-        hoek_buffer.append(hoek)
-        smooth_hoek = round(float(np.mean(hoek_buffer)), 1)
 
-        gewicht_erop, kniehoek, signalen = detecteer_gewicht_op_been(
+        gewicht_stem, kniehoek, signalen = detecteer_gewicht_op_been(
             been, lm_data, enkel_hist, heup_hist, w, h, threshold)
 
         r.been = been
         r.hoek = hoek
-        r.smooth_hoek = smooth_hoek
         r.kniehoek = kniehoek
-        r.gewicht_erop = gewicht_erop
-        r.signalen = signalen
+        if not gebruik_strek:            # met strek staat r.gewicht_erop al globaal gezet
+            r.gewicht_erop = gewicht_stem
+        r.signalen = signalen           # de 3 oude signalen blijven als HUD-diagnose
+
+    # Pass 3: het weergave-gemiddelde van de hoek — gecentreerd, dus zonder naijlen.
+    _zet_smooth_hoek(resultaten, smooth_n)
 
 
 def fase_voortgang(progress_callback, fase, n_fasen):
@@ -1404,6 +1647,9 @@ def _merge_events(a, b):
         min_hoek=min(a.min_hoek, b.min_hoek),
         max_hoek=max(a.max_hoek, b.max_hoek),
         opmerking="samengevoegd",
+        # Is een van beide delen onvolledig, dan geldt dat voor het geheel; de reden van
+        # het láátste deel weegt het zwaarst, want dáár wordt de hoek afgelezen.
+        onvolledig=b.onvolledig or a.onvolledig,
         correctie=b.correctie, betrouwbaar=a.betrouwbaar and b.betrouwbaar,
         snelheid=round(float(np.mean(snelheden)), 2) if snelheden else None,
         slaglengte=round(float(np.sum(slagen)), 2) if slagen else None,
@@ -1544,6 +1790,20 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
     Als `alternerend`, wordt daarna de L/R-alternatie-regel toegepast
     (`forceer_alternerend`): opgesplitste afzetten samenvoegen, onmogelijke
     herhalingen markeren.
+
+    `hoek` is de hoek van het **laatste frame** van het event — precies het frame dat
+    `bepaal_afzet_uit_strek` als afzet-voltooiing koos (de vlakste onderbeenhoek binnen
+    het strek-plateau). Dus `r.hoek`, niet `r.smooth_hoek`: een gemiddelde over de
+    frames vóór dat moment ligt op een dalende hoek per definitie te hoog (te steil).
+    `min_hoek`/`max_hoek` komen uit dezelfde reeks, zodat de tabel één definitie van
+    "de hoek" gebruikt.
+
+    Een event erft `onvolledig` van zijn frames (`FrameResultaat.afzet_onvolledig`): de
+    afzet liep nog toen de video/het pose-segment ophield (`ONV_AFGEKAPT`), of er is
+    binnen de run helemaal geen zijwaartse push waargenomen (`ONV_GEEN_PUSH`). In beide
+    gevallen is de hoek het rechtop-komen i.p.v. de voltooide push; zo'n event blijft
+    zichtbaar, maar hoort buiten gemiddelde/min/max te vallen (GUI + bibliotheeklijst
+    doen dat).
     """
     events = []
     huidig = None
@@ -1571,6 +1831,7 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
                 hoek=hoeken[-1],
                 min_hoek=min(hoeken),
                 max_hoek=max(hoeken),
+                onvolledig=laatste.afzet_onvolledig,
                 correctie=laatste.hoek_correctie,
                 betrouwbaar=laatste.hoek_betrouwbaar,
                 snelheid=round(float(np.mean(snelheden)), 2) if snelheden else None,
@@ -1583,7 +1844,7 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
             if huidig is None or huidig['been'] != r.been:
                 _sluit_af()
                 huidig = {'been': r.been, 'start': r, 'laatste': r, 'hoeken': [], 'frames': []}
-            huidig['hoeken'].append(r.smooth_hoek)
+            huidig['hoeken'].append(r.hoek)
             huidig['frames'].append(r)
             huidig['laatste'] = r
         else:

@@ -31,13 +31,20 @@ import uuid
 from contextlib import contextmanager
 from datetime import date
 
-from schaats_analyse import sla_landmarks_op, laad_landmarks
+from schaats_analyse import (sla_landmarks_op, laad_landmarks,
+                             ONV_AFGEKAPT, ONV_GEEN_PUSH)
 
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
 NPZ_NAAM    = "landmarks.npz"
 NPZ_RUW_NAAM = "landmarks_ruw.npz"   # pristine landmarks vóór de eerste handmatige edit (fase 3)
-SCHEMA_VERSIE = 1
+SCHEMA_VERSIE = 2   # v2 (fase 4): kolom analyse.video_bytes voor de cloud-sync-check
+# Tekstvlaggen in afzet_event_cache.opmerking voor een afzet die zichtbaar blijft maar
+# buiten de gemiddelde hoek valt (`AfzetEvent.onvolledig`). De teksten zijn die van
+# schaats_analyse zelf, zodat caches van vóór de tweede reden gewoon blijven werken:
+# `ONV_AFGEKAPT` is nog steeds letterlijk "afgekapt".
+AFGEKAPT_MARKER = ONV_AFGEKAPT
+ONVOLLEDIG_MARKERS = (ONV_AFGEKAPT, ONV_GEEN_PUSH)
 ENV_BIBLIOTHEEK = "SCHAATSANALYSE_BIBLIOTHEEK"   # override voor tests
 
 
@@ -204,21 +211,29 @@ def verwijder_schaatser(bieb, schaatser_id):
 
 def lijst_analyses(bieb, schaatser_id):
     """Lijstweergave uit de events-cache (geen npz nodig): titel, datum,
-    aantal afzetten, gemiddelde hoek."""
+    aantal afzetten, gemiddelde hoek.
+
+    De gemiddelde hoek slaat **onvolledige** afzetten over — de push liep nog toen de video
+    ophield, of er is binnen de stand-run geen zijwaartse push waargenomen; beide geven een
+    veel te steile hoek die het gemiddelde omhoog trekt. Ze tellen wél mee in het aantal,
+    want ze zijn gebeurd."""
+    niet_like = " AND ".join(["c.opmerking NOT LIKE ?"] * len(ONVOLLEDIG_MARKERS))
     with _verbind(bieb) as con:
         rijen = con.execute(
             "SELECT a.id, a.titel, a.datum, a.backend, a.bewerkt, a.aangemaakt_op,"
+            "       a.aangemaakt_door,"
             "       (SELECT COUNT(*)  FROM afzet_event_cache c WHERE c.analyse_id = a.id)"
             "       AS aantal_afzetten,"
-            "       (SELECT AVG(hoek) FROM afzet_event_cache c WHERE c.analyse_id = a.id)"
-            "       AS gem_hoek "
+            "       (SELECT AVG(hoek) FROM afzet_event_cache c WHERE c.analyse_id = a.id"
+            f"         AND (c.opmerking IS NULL OR ({niet_like}))) AS gem_hoek "
             "FROM analyse a WHERE a.schaatser_id = ? "
-            "ORDER BY a.datum DESC, a.aangemaakt_op DESC", (schaatser_id,)).fetchall()
+            "ORDER BY a.datum DESC, a.aangemaakt_op DESC",
+            tuple(f"%{m}%" for m in ONVOLLEDIG_MARKERS) + (schaatser_id,)).fetchall()
         return [dict(r) for r in rijen]
 
 
 def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, events,
-                   backend, instellingen, datum=None):
+                   backend, instellingen, datum=None, aangemaakt_door=""):
     """
     Slaat een afgeronde analyse op in de bibliotheek: kopieert de video, schrijft de
     landmarks als .npz en insert de DB-rij + events-cache in één transactie.
@@ -263,8 +278,21 @@ def _schrijf_events_cache(con, analyse_id, events):
         "                              eind_frame, hoek, min_hoek, max_hoek, opmerking)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [(analyse_id, i, ev.been, ev.start_frame, ev.eind_frame,
-          ev.hoek, ev.min_hoek, ev.max_hoek, ev.opmerking)
+          ev.hoek, ev.min_hoek, ev.max_hoek, _cache_opmerking(ev))
          for i, ev in enumerate(events)])
+
+
+def _cache_opmerking(ev):
+    """Opmerkingstekst voor de cache. De onvolledig-vlag (`AfzetEvent.onvolledig`: de push
+    liep nog toen de video ophield, óf er is geen zijwaartse push waargenomen — beide geven
+    een te steile hoek) krijgt geen eigen kolom — dat zou een schemamigratie kosten voor
+    iets wat bij het openen tóch vers herberekend wordt — maar reist als tekst mee, zodat
+    `lijst_analyses` zo'n afzet buiten de gemiddelde hoek kan houden
+    (`ONVOLLEDIG_MARKERS`)."""
+    reden = getattr(ev, 'onvolledig', None)
+    if reden:
+        return f"{reden} · {ev.opmerking}" if ev.opmerking else reden
+    return ev.opmerking
 
 
 def laad_analyse(bieb, analyse_id):
