@@ -20,6 +20,7 @@ __pycache__/
 *.mov
 *.MOV
 *.avi
+*.mkv
 
 # IDE / OS
 .vscode/
