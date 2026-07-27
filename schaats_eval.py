@@ -53,6 +53,11 @@ ANNOTATIE_PUNTEN = [
 ]
 ZOOM = 6          # uitvergroting van de precisie-klik
 ZOOM_REGIO = 100  # zijde (px) van de uitsnede rond de grove klik
+# Ondergrens voor de botlengte-trend als fractie van de mediane botlengte. Een bot kan
+# in beeld krimpen doordat de schaatser wegrijdt of het been in de kijkrichting draait,
+# maar niet tot een kwart van zijn eigen mediaan — zakt de trend daar onder, dan is de
+# fit door een uitschieter getrokken en is de noemer betekenisloos (zie _botlengte_cv).
+TREND_MIN_FRAC = 0.25
 
 
 # ── Hulpjes ─────────────────────────────────────────────────────────────────────
@@ -87,17 +92,28 @@ def _botlengte_cv(resultaten, w, h, idx_a, idx_b, fps, been=None):
     stándbeen is — het been waarop daadwerkelijk gemeten wordt. Het zweefbeen is
     frontaal geregeld (deels) verborgen achter het standbeen; detectiefouten dáár
     zijn geen meetfouten.
+
+    Retourneert `(cv, n_gebruikt, n_overgeslagen)`. Overgeslagen zijn frames waar de
+    trend onder `TREND_MIN_FRAC` × de mediane botlengte zakt: een polynoomfit door een
+    diepe uitschieter (zweefbeen dat achter het standbeen wegvalt) kan lokaal naar nul
+    of zelfs **negatief** duiken, en dan blaast `lengte / trend` de CV op tot een
+    zevencijferig onzingetal (BUGS.md R3: `CV tibia_l: 981184.372`). Zulke frames
+    hebben geen bruikbare noemer; ze horen geteld te worden, niet gedeeld.
     """
     lengtes = [float(np.linalg.norm(_px(r, idx_a, w, h) - _px(r, idx_b, w, h)))
                for r in resultaten
                if r.pose_gevonden and r.lm is not None and _zichtbaar(r, idx_a, idx_b)
                and (been is None or r.been == been)]
     if len(lengtes) < 10:
-        return None, len(lengtes)
+        return None, len(lengtes), 0
     lengtes = np.array(lengtes)
     venster = max(5, int(round(0.7 * fps)) | 1)
-    trend = np.maximum(_savgol(lengtes, venster, 2), 1e-6)
-    return float(np.std(lengtes / trend - 1.0)), len(lengtes)
+    trend = _savgol(lengtes, venster, 2)
+    geldig = trend >= TREND_MIN_FRAC * float(np.median(lengtes))
+    n_over = int((~geldig).sum())
+    if int(geldig.sum()) < 10:      # te weinig bruikbare noemers → geen uitspraak
+        return None, int(geldig.sum()), n_over
+    return float(np.std(lengtes[geldig] / trend[geldig] - 1.0)), int(geldig.sum()), n_over
 
 
 def _jitter(resultaten, w, h, idxs):
@@ -130,19 +146,24 @@ def bereken_metrics(pad, golden_pad=None):
 
     for naam, (a, b) in (('tibia_l', (L_KNEE, L_ANKLE)), ('tibia_r', (R_KNEE, R_ANKLE)),
                          ('femur_l', (L_HIP, L_KNEE)), ('femur_r', (R_HIP, R_KNEE))):
-        cv, n = _botlengte_cv(resultaten, w, h, a, b, info.fps)
-        m[f'cv_{naam}'] = cv
+        cv, n, over = _botlengte_cv(resultaten, w, h, a, b, info.fps)
+        m[f'cv_{naam}'], m[f'n_{naam}'], m[f'over_{naam}'] = cv, n, over
     # Standbeen-varianten: alleen frames waarin dit been het meetbeen is.
     for naam, been, (a, b) in (('stand_l', 'links', (L_KNEE, L_ANKLE)),
                                ('stand_r', 'rechts', (R_KNEE, R_ANKLE))):
-        cv, n = _botlengte_cv(resultaten, w, h, a, b, info.fps, been=been)
-        m[f'cv_{naam}'] = cv
+        cv, n, over = _botlengte_cv(resultaten, w, h, a, b, info.fps, been=been)
+        m[f'cv_{naam}'], m[f'n_{naam}'], m[f'over_{naam}'] = cv, n, over
     m['jitter_knie_enkel'] = _jitter(resultaten, w, h, (L_KNEE, R_KNEE, L_ANKLE, R_ANKLE))
 
     m['n_events'] = len(events)
     m['volgorde'] = ''.join('L' if e.been == 'links' else 'R' for e in events)
     m['alternatie_fouten'] = sum(1 for e in events if e.opmerking == 'gemiste tegenafzet?')
     m['hoeken'] = [e.hoek for e in events]
+    # Onvolledige afzetten (video hield op tijdens de push, of er is helemaal geen
+    # zijwaartse push waargenomen) hebben een te steile hoek en horen niet als meting
+    # gelezen te worden — hier alleen gemarkeerd mét reden, want de metrics zijn een
+    # diagnosemiddel: je wilt zien dát ze er zijn en waaróm.
+    m['onvolledig'] = {i: e.onvolledig for i, e in enumerate(events) if e.onvolledig}
 
     # Middellijn-kwaliteitsvlag (alleen aanwezig in nieuwere analyses).
     devs = [abs(v) for r in resultaten if getattr(r, 'middellijn_dev', None)
@@ -192,13 +213,24 @@ def print_metrics(m):
     print(f"\n== {os.path.basename(m['pad'])} ==")
     print(f"  dekking:          {m['dekking']:.1%}  ({m['frames']} frames)")
     for naam in ('tibia_l', 'tibia_r', 'femur_l', 'femur_r', 'stand_l', 'stand_r'):
-        cv = m[f'cv_{naam}']
-        print(f"  CV {naam}:       {cv:.3f}" if cv is not None else f"  CV {naam}:       -")
+        cv, n = m[f'cv_{naam}'], m.get(f'n_{naam}', 0)
+        # Het aantal metingen erbij: een CV over een handvol frames zegt weinig. Idem het
+        # aantal frames zonder bruikbare trend — dat zijn er veel bij een been dat
+        # regelmatig achter het andere wegvalt, en dan is ook de CV met een korrel zout.
+        over = m.get(f'over_{naam}', 0)
+        tel = f"(n={n}" + (f", {over} overgeslagen)" if over else ")")
+        print(f"  CV {naam}:       {cv:.3f}  {tel}" if cv is not None
+              else f"  CV {naam}:       onbetrouwbaar/te weinig metingen  {tel}")
     j = m['jitter_knie_enkel']
     print(f"  jitter knie/enkel: {j:.2f} px/frame^2" if j is not None else "  jitter: -")
     print(f"  events: {m['n_events']}  volgorde {m['volgorde']}  "
           f"alternatiefouten {m['alternatie_fouten']}")
-    print(f"  hoeken bij voltooiing: {[round(x, 1) for x in m['hoeken']]}")
+    onvolledig = m.get('onvolledig', {})
+    hoek_tekst = ', '.join(f"{round(x, 1)}{'*' if i in onvolledig else ''}"
+                           for i, x in enumerate(m['hoeken']))
+    print(f"  hoeken bij voltooiing: [{hoek_tekst}]"
+          + (f"   (* = {'/'.join(sorted(set(onvolledig.values())))}, telt niet mee)"
+             if onvolledig else ""))
     if m.get('middellijn_dev_px') is not None:
         print(f"  middellijn-afwijking knie: {m['middellijn_dev_px']:.1f} px gem.")
     if m.get('goud_n'):
@@ -279,6 +311,7 @@ def annoteer(video_pad, uit_pad, n_frames=15):
 
     frame_nr = -1
     ok = True
+    gestopt = False          # 'q' moet de héle lus stoppen, niet alleen het huidige punt
     for doel in doelen:
         if str(doel) in frames_uit:
             continue
@@ -307,8 +340,10 @@ def annoteer(video_pad, uit_pad, n_frames=15):
                     punten = None
                     break
                 if res == 'q':
-                    punten = None
-                    doelen = []
+                    # Alleen `doelen = []` herbindt de naam; de for-lus itereert over het
+                    # oorspronkelijke lijst-object en ging daardoor gewoon door naar het
+                    # volgende frame. Vandaar een expliciete vlag.
+                    punten, gestopt = None, True
                     break
                 continue
             gx, gy = res
@@ -326,6 +361,8 @@ def annoteer(video_pad, uit_pad, n_frames=15):
             i += 1
         if punten:
             frames_uit[str(doel)] = punten
+        if gestopt:
+            break
 
     cap.release()
     cv2.destroyAllWindows()
