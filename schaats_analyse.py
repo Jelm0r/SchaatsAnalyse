@@ -236,8 +236,8 @@ def bereken_hoek_tov_ijs(enkel_xy, knie_xy, horizon_deg=0.0):
     """
     dx = knie_xy[0] - enkel_xy[0]
     dy = enkel_xy[1] - knie_xy[1]   # y-as omgekeerd in beeldcoördinaten
-    hoek = np.degrees(np.arctan2(dy, abs(dx)))
-    return round(hoek - horizon_deg, 1)
+    hoek = float(np.degrees(np.arctan2(dy, abs(dx))))
+    return round(hoek - horizon_deg, 1)     # gewone float: gaat zo de DB/CSV/JSON in
 
 
 def horizon_hoek_uit_lijn(p1, p2):
@@ -384,7 +384,6 @@ def detecteer_gewicht_op_been(been, lm_data, enkel_history, heup_history, w, h, 
     if len(heup_history) >= 4:
         heup_midden_huidig  = (lm_data['l_heup'][0] + lm_data['r_heup'][0]) / 2 / w
         heup_midden_eerder  = (heup_history[-4][0] + heup_history[-4][1]) / 2 / w
-        been_kant = lm_data['l_enkel'][0]/w if been == 'links' else lm_data['r_enkel'][0]/w
 
         verschuiving = heup_midden_huidig - heup_midden_eerder
         # Bij linkerben: heup verschuift rechts (positief) als gewicht overgaat
@@ -1612,8 +1611,10 @@ def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.01
     """
     def toon_voortgang(frame_nr, totaal):
         if frame_nr % 30 == 0:
-            pct = frame_nr / totaal * 100 if totaal > 0 else 0
-            print(f"  {frame_nr}/{totaal} frames ({pct:.0f}%)")
+            # `totaal` komt uit CAP_PROP_FRAME_COUNT en klopt op VFR-.MOV's geregeld niet;
+            # klem het percentage zodat de CLI geen 103% meldt.
+            pct = min(100.0, frame_nr / totaal * 100) if totaal > 0 else 0
+            print(f"  {frame_nr}/{max(totaal, frame_nr)} frames ({pct:.0f}%)")
 
     if from_npz:
         print(f"[INFO] Landmarks laden uit {from_npz} (geen detectie) ...")
