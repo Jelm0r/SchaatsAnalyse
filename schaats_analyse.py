@@ -330,10 +330,15 @@ def bepaal_afzetbeen(lm_data, heup_history, w):
 
     # Hogere y-waarde = lager in beeld = dichter bij ijs
     if abs(l_enkel_y - r_enkel_y) < 10:
-        # Ankels op gelijke hoogte: gebruik heupverschuiving als tiebreaker
+        # Enkels op gelijke hoogte: gebruik heupverschuiving als tiebreaker. `heup_history`
+        # bevat tuples (l_heup_x, r_heup_x), dus vergelijk het heup-*midden* met dat van 3
+        # frames terug — net als `detecteer_gewicht_op_been`. (Eerder werd hier de rechter-
+        # heup van nu tegen de línkerheup van toen gezet: dat mat niet de verschuiving maar
+        # de constante heupbreedte, waardoor de tiebreaker altijd 'links' antwoordde.)
         if len(heup_history) >= 3:
-            heup_dx = lm_data['r_heup'][0] - heup_history[-3][0]
-            return 'links' if heup_dx > 0 else 'rechts'
+            midden_nu     = (lm_data['l_heup'][0] + lm_data['r_heup'][0]) / 2
+            midden_eerder = (heup_history[-3][0] + heup_history[-3][1]) / 2
+            return 'links' if midden_nu - midden_eerder > 0 else 'rechts'
         return 'rechts'
 
     return 'links' if l_enkel_y > r_enkel_y else 'rechts'
@@ -914,44 +919,62 @@ def _begrens_interpolatie(betrouwbaar, max_run):
 def _fix_lr_swaps(X, Y, V, w, h):
     """
     Herstel links/rechts-verwisselingen van de beengewrichten binnen één segment.
-    Werkt in-place op de segment-arrays X/Y/V (T×33). Per gewrichtspaar (knieën,
-    enkels) worden de twee trajecten op continuïteit gevolgd: past op frame t de
-    gewisselde toewijzing dúidelijk beter bij de vorige posities (kosten <
-    LR_SWAP_FACTOR × ongewisseld), dan worden L en R daar omgedraaid. Hiel en teen
-    volgen de enkel-beslissing (die zitten aan hetzelfde lichaamsdeel vast).
+    Werkt in-place op de segment-arrays X/Y/V (T×33). De twee beentrajecten worden op
+    continuïteit gevolgd: past op frame t de gewisselde toewijzing dúidelijk beter bij
+    de vorige posities (kosten < LR_SWAP_FACTOR × ongewisseld), dan worden L en R daar
+    omgedraaid.
+
+    De beslissing geldt voor het **hele been tegelijk** — knie én enkel, met hiel en
+    teen mee — op de opgetelde kosten van beide gewrichtsparen. Zouden knie en enkel
+    los van elkaar beslissen, dan kan de ene wél en de andere niet wisselen: dan hangt
+    de linkerknie aan de rechterenkel, een anatomisch onmogelijk skelet met een
+    onzinnige tibialengte (die vervolgens de botlengte-check laat aanslaan).
 
     Omdat het kettinkje op het eerste frame is verankerd, kan een verkeerd eerste
     frame de hele reeks omgekeerd labelen; daarom achteraf een meerderheidsstem
     tegen de ruwe detectorlabels — de detector heeft het meestal goed, wij
-    repareren alleen de minderheids-stukken.
+    repareren alleen de minderheids-stukken. Die stem loopt uitsluitend over de
+    frames waar we écht een beslissing hebben genomen (zie `besloten`).
     """
-    paren = ((L_KNEE, R_KNEE, ()),
-             (L_ANKLE, R_ANKLE, ((L_HEEL, R_HEEL), (L_TOE, R_TOE))))
+    paren   = ((L_KNEE, R_KNEE), (L_ANKLE, R_ANKLE))
+    volgers = ((L_HEEL, R_HEEL), (L_TOE, R_TOE))     # zitten aan de enkel vast
     T = len(X)
-    for l, r, volgers in paren:
-        gewisseld = np.zeros(T, dtype=bool)
-        prev_l = prev_r = None
-        for t in range(T):
-            if V[t, l] < VIS_MIN or V[t, r] < VIS_MIN:
-                continue                     # onbetrouwbaar frame: niet beslissen
-            pl = np.array([X[t, l] * w, Y[t, l] * h])
-            pr = np.array([X[t, r] * w, Y[t, r] * h])
-            if prev_l is not None:
-                kost_id = (np.linalg.norm(pl - prev_l) + np.linalg.norm(pr - prev_r))
-                kost_sw = (np.linalg.norm(pl - prev_r) + np.linalg.norm(pr - prev_l))
-                if kost_sw < LR_SWAP_FACTOR * kost_id:
-                    gewisseld[t] = True
-                    pl, pr = pr, pl
-            prev_l, prev_r = pl, pr
-        if not gewisseld.any():
-            continue
-        if gewisseld.mean() > 0.5:           # ketting verkeerd verankerd: labels omdraaien
-            gewisseld = ~gewisseld
-        wissel_idx = [(l, r)] + list(volgers)
-        for t in np.flatnonzero(gewisseld):
-            for a, b in wissel_idx:
-                for A in (X, Y, V):
-                    A[t, a], A[t, b] = A[t, b], A[t, a]
+    gewisseld = np.zeros(T, dtype=bool)
+    besloten  = np.zeros(T, dtype=bool)   # frames waar de continuïteitskost een oordeel gaf
+    vorige = {}                           # paar → (laatste linker-, laatste rechterpositie)
+    for t in range(T):
+        huidig = {(l, r): (np.array([X[t, l] * w, Y[t, l] * h]),
+                           np.array([X[t, r] * w, Y[t, r] * h]))
+                  for l, r in paren
+                  if V[t, l] >= VIS_MIN and V[t, r] >= VIS_MIN}
+        if not huidig:
+            continue                      # onbetrouwbaar frame: niet beslissen
+        besloten[t] = True
+        kost_id = kost_sw = 0.0
+        vergeleken = False
+        for paar, (pl, pr) in huidig.items():
+            if paar not in vorige:
+                continue
+            ql, qr = vorige[paar]
+            kost_id += np.linalg.norm(pl - ql) + np.linalg.norm(pr - qr)
+            kost_sw += np.linalg.norm(pl - qr) + np.linalg.norm(pr - ql)
+            vergeleken = True
+        if vergeleken and kost_sw < LR_SWAP_FACTOR * kost_id:
+            gewisseld[t] = True
+            huidig = {paar: (pr, pl) for paar, (pl, pr) in huidig.items()}
+        vorige.update(huidig)
+    if not gewisseld.any():
+        return
+    # Meerderheidsstem alléén over de besliste frames. Een overgeslagen frame staat
+    # op False omdat er géén oordeel is, niet omdat er "niet gewisseld" moest worden;
+    # zou de inversie die frames meenemen, dan kregen juist de onbetrouwbaarste
+    # frames een L/R-wissel zonder enige onderbouwing, tegen hun buren in.
+    if gewisseld[besloten].mean() > 0.5:  # ketting verkeerd verankerd: labels omdraaien
+        gewisseld[besloten] = ~gewisseld[besloten]
+    for t in np.flatnonzero(gewisseld):
+        for a, b in paren + volgers:
+            for A in (X, Y, V):
+                A[t, a], A[t, b] = A[t, b], A[t, a]
 
 
 def _botlengte_uitschieters(X, Y, V, w, h):
@@ -1006,8 +1029,12 @@ def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
         return
 
     for seg in segmenten:
-        if len(seg) < 3:
-            continue
+        # Ook heel korte segmenten (versnipperde detectie) gaan door de molen. De
+        # filters degraderen daar netjes: Savitzky–Golay geeft een venster < poly+2
+        # ongewijzigd terug, `_begrens_interpolatie` laat een randreeks staan en de
+        # botlengte-check slaat een te korte reeks over — maar de L/R-fix doet wél zijn
+        # werk. Ze overslaan liet daar ruwe, ongecontroleerde data staan zonder dat dat
+        # ergens uit bleek.
         X = np.array([[resultaten[i].lm[j].x for j in range(n_lm)] for i in seg])
         Y = np.array([[resultaten[i].lm[j].y for j in range(n_lm)] for i in seg])
         V = np.array([[resultaten[i].lm[j].visibility for j in range(n_lm)] for i in seg])
