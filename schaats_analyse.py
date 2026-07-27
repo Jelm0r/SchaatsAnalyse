@@ -55,8 +55,26 @@ Landmark = namedtuple('Landmark', ['x', 'y', 'z', 'visibility'])
 # eigen tracker (DoelTracker), zodat de detectie niet naar een andere schaatser springt.
 NUM_POSES_DEFAULT = 5     # max. aantal gelijktijdig te detecteren schaatsers
 TRACK_GATE        = 0.14  # max. genormaliseerde sprong van de torso-centroïde per frame
+TRACK_GATE_GROEI  = 0.25  # ... die per gemist frame groeit: na een gat is de voorspelling
+                          # onzekerder (de snelheidsschatting veroudert mee)
+TRACK_GATE_MAX    = 0.25  # bovengrens van de gegroeide poort — daarboven is "de dichtstbij"
+                          # geen bewijs meer dat het dezelfde schaatser is
+TRACK_HERSEED_GATE = 0.25 # bij herseeden na langdurig verlies: max. afstand tot de
+                          # (geëxtrapoleerde) laatst bekende plek. Ruim t.o.v. TRACK_GATE
+                          # (~8 frames rijden) maar niet ruimer, want de voorspelling is
+                          # al mee-geëxtrapoleerd. Bewust gelijk aan TRACK_GATE_MAX, zodat de
+                          # acceptatie bij de overgang coast→herseed niet verspringt. Ligt er
+                          # niemand binnen deze poort, dan
+                          # liever géén pose dan een skelet op de verkeerde persoon (dat
+                          # levert plausibele maar onjuiste hoeken op).
 TRACK_HERVIND_S   = 0.5   # zolang de doelschaatser kwijt is voordat we opnieuw seeden (s)
 TRACK_MIN_VIS     = 0.3   # minimale zichtbaarheid om een landmark mee te tellen
+# Koude start zónder muisklik: niet blind "de grootste pose" nemen — een omstander langs
+# de boarding is in beeld geregeld groter dan de schaatser die verder weg rijdt. We kijken
+# eerst een seconde mee en kiezen dan de grootste *beweger* (mediane bbox × afgelegde weg),
+# net als de YOLO-backend met MIN_VERPLAATSING doet.
+SEED_WARMUP_S     = 1.0   # zolang kijken we mee voordat de doelschaatser gekozen wordt (s)
+SEED_MIN_VERPLAATSING = 0.02  # kortere afgelegde weg in dat venster = statische omstander
 TORSO_IDX         = (11, 12, 23, 24)  # schouders + heupen: stabiele identiteits-centroïde
 
 # ── Offline landmark-smoothing (Savitzky–Golay) ─────────────────────────────────
@@ -513,7 +531,7 @@ def _zichtbare_xy(lm, idxs=None, min_vis=TRACK_MIN_VIS):
     return [(l.x, l.y) for l in bron if l.visibility >= min_vis]
 
 
-def _torso_centroid(lm):
+def torso_centroid(lm):
     """
     Stabiele identiteits-centroïde (schouders + heupen), genormaliseerd. De romp
     beweegt rustiger dan de ledematen, dus dit is een betrouwbaar anker om dezelfde
@@ -545,6 +563,64 @@ def _bbox_oppervlak(lm):
     return (box[2] - box[0]) * (box[3] - box[1])
 
 
+def _volg_kandidaten(buffer, gate=TRACK_GATE, max_gat=3):
+    """
+    Rijg de poses uit een reeks frames tot ruwe kandidaat-sporen: elke pose wordt aan
+    het spoor gekoppeld waarvan de laatste torso-centroïde het dichtst bij ligt (binnen
+    `gate`, en niet ouder dan `max_gat` frames), anders begint er een nieuw spoor.
+
+    Dit is bewust simpeler dan `DoelTracker` — het hoeft bij de koude start alleen goed
+    genoeg te zijn om "rijdt" van "staat stil langs de boarding" te onderscheiden.
+    Retourneert dicts met `start` (eerste frame-index), `punten` en `opp`.
+    """
+    sporen = []
+    for i, poses in enumerate(buffer):
+        centroids = [(c, p) for c, p in ((torso_centroid(p), p) for p in poses)
+                     if c is not None]
+        for c, p in centroids:
+            beste, beste_afst = None, gate
+            for s in sporen:
+                if s['laatst'] == i or i - s['laatst'] > max_gat:
+                    continue            # dit frame al vergeven, of het spoor is verlopen
+                d = ((s['punten'][-1][0] - c[0]) ** 2 + (s['punten'][-1][1] - c[1]) ** 2) ** 0.5
+                if d < beste_afst:
+                    beste, beste_afst = s, d
+            if beste is None:
+                sporen.append({'start': i, 'laatst': i, 'punten': [c],
+                               'opp': [_bbox_oppervlak(p)]})
+            else:
+                beste['punten'].append(c)
+                beste['opp'].append(_bbox_oppervlak(p))
+                beste['laatst'] = i
+    return sporen
+
+
+def _pad_lengte(punten):
+    """Totale afgelegde weg langs een reeks genormaliseerde punten."""
+    return sum(((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5
+               for a, b in zip(punten, punten[1:]))
+
+
+def _kies_bewegend_doel(buffer):
+    """
+    Kies uit de eerste frames de doelschaatser als **grootste beweger**: mediane
+    bbox-oppervlakte × afgelegde weg, met `SEED_MIN_VERPLAATSING` als ondergrens.
+    Zonder dat criterium wint bij een koude start simpelweg de grootste pose in beeld —
+    en dat is geregeld een omstander langs de boarding, die dichter bij de camera staat
+    dan de schaatser die verderop rijdt.
+
+    Retourneert `(startframe, centroïde op dat frame)` of None als er niets te kiezen is.
+    """
+    sporen = _volg_kandidaten(buffer)
+    if not sporen:
+        return None
+    bewegers = [s for s in sporen if _pad_lengte(s['punten']) >= SEED_MIN_VERPLAATSING]
+    beste = max(bewegers or sporen,
+                key=lambda s: float(np.median(s['opp']))
+                              * max(_pad_lengte(s['punten']), 1e-6))
+    return beste['start'], beste['punten'][0]
+
+
 class DoelTracker:
     """
     Volgt één doelschaatser door de frames heen. MediaPipe levert per frame een
@@ -552,21 +628,51 @@ class DoelTracker:
     best bij de voorspelde positie van het doel past, met een afstandspoort zodat
     de tracking niet naar een andere schaatser overspringt als ze elkaar kruisen.
 
-    Seeden: als `doel_punt` (genormaliseerd (x,y), bv. een muisklik) gegeven is,
-    wordt de schaatser het dichtst daarbij gekozen; anders de grootste (meest
-    prominente) schaatser in beeld.
+    Seeden: als `doel_punt` (genormaliseerd (x,y)) gegeven is, wordt de schaatser het
+    dichtst daarbij gekozen. Dat punt komt van een muisklik óf — bij een koude start
+    zonder klik — van `_kies_bewegend_doel`, dat na een warmup-venster de grootste
+    *beweger* aanwijst. Ontbreekt het punt alsnog, dan valt de tracker terug op de
+    grootste pose in beeld.
+
+    Twee dingen zijn expliciet **coast-bewust** (een detectiegat van een paar frames is
+    bij bewegingsonscherpte niets bijzonders):
+    - de voorspelling schuift per gemist frame mee (`n × snelheid`, niet 1 × snelheid) en
+      de poort groeit met de gat-lengte — anders valt de schaatser na ~3 gemiste frames
+      buiten de poort en is hij permanent kwijt, ook al wordt hij netjes gedetecteerd;
+    - de laatst bekende plek (`laatste_bekend`) wordt apart van de lock-vlag (`centroid`)
+      bijgehouden, zodat een herseed ná langdurig verlies dáárop kan aansluiten i.p.v. op
+      het (verouderde) klikpunt van frame 0 of op "de grootste pose in beeld".
     """
     def __init__(self, doel_punt=None, gate=TRACK_GATE, hervind_frames=15):
         self.doel_punt = doel_punt
         self.gate = gate
         self.hervind_frames = hervind_frames
-        self.centroid = None         # laatst bekende torso-centroïde
+        self.centroid = None         # torso-centroïde bij de laatste match; None = geen lock
+        self.laatste_bekend = None   # idem, maar blijft ook ná verlies staan (voor herseed)
         self.snelheid = (0.0, 0.0)   # geschatte verplaatsing per frame
         self.kwijt = 0               # aantal opeenvolgende frames zonder match
 
+    def _verwacht(self, vanaf, stappen):
+        """Constante-snelheid-voorspelling `stappen` frames vooruit vanaf `vanaf`. De
+        horizon wordt begrensd op `hervind_frames` en het resultaat op het beeld geklemd:
+        een oude snelheidsschatting × een lang gat rekent de schaatser anders het beeld
+        uit, waarna niemand meer binnen welke poort dan ook valt."""
+        stap = min(max(0, stappen), self.hervind_frames)
+        return (min(1.0, max(0.0, vanaf[0] + stap * self.snelheid[0])),
+                min(1.0, max(0.0, vanaf[1] + stap * self.snelheid[1])))
+
     def _seed(self, centroids):
-        """Kies een startpose uit [(centroid, pose), ...] (alle centroids != None)."""
-        if self.doel_punt is not None and self.centroid is None:
+        """Kies een startpose uit [(centroid, pose), ...] (alle centroids != None), of
+        None als er niets geloofwaardigs bij zit (alleen bij een herseed)."""
+        if self.laatste_bekend is not None:
+            # Herseed na langdurig verlies: pak de schaatser het dichtst bij de laatst
+            # bekende plek, mee-geëxtrapoleerd over de verliesduur. Niemand binnen de
+            # ruime poort → geen lock (liever een gat dan de verkeerde persoon volgen).
+            ex, ey = self._verwacht(self.laatste_bekend, self.kwijt)
+            beste = min(centroids, key=lambda cp: (cp[0][0]-ex)**2 + (cp[0][1]-ey)**2)
+            afstand = ((beste[0][0]-ex)**2 + (beste[0][1]-ey)**2) ** 0.5
+            return beste if afstand <= TRACK_HERSEED_GATE else None
+        if self.doel_punt is not None:
             dx, dy = self.doel_punt
             # Bij een muisklik telt vooral wélke schaatser je aanwees: geef voorrang aan
             # de schaatser wiens bounding box het klikpunt bevat, zodat hij niet op een
@@ -578,50 +684,49 @@ class DoelTracker:
             binnen = [cp for cp in centroids if _in_box(cp)]
             kandidaten = binnen if binnen else centroids
             return min(kandidaten, key=lambda cp: (cp[0][0]-dx)**2 + (cp[0][1]-dy)**2)
-        if self.centroid is not None:
-            # Net kwijt geweest: pak de schaatser het dichtst bij de laatst bekende plek.
-            cx, cy = self.centroid
-            return min(centroids, key=lambda cp: (cp[0][0]-cx)**2 + (cp[0][1]-cy)**2)
         # Koude start zonder klik: volg de grootste (meest prominente) schaatser.
         return max(centroids, key=lambda cp: _bbox_oppervlak(cp[1]))
 
     def update(self, poses):
         """Kies de doel-pose voor dit frame; retourneert de landmarklijst of None."""
-        centroids = [(_torso_centroid(p), p) for p in poses]
+        centroids = [(torso_centroid(p), p) for p in poses]
         centroids = [(c, p) for c, p in centroids if c is not None]
         if not centroids:
             self.kwijt += 1
-            if self.kwijt > self.hervind_frames:
-                self.centroid = None
             return None
 
         # Nog geen lock, of te lang kwijt → (her)seed.
         if self.centroid is None or self.kwijt > self.hervind_frames:
-            c, p = self._seed(centroids)
-            self.centroid = c
+            gekozen = self._seed(centroids)
+            if gekozen is None:
+                self.kwijt += 1      # herseed geweigerd: blijf coasten (geen pose dit frame)
+                return None
+            c, p = gekozen
+            self.centroid = self.laatste_bekend = c
             self.snelheid = (0.0, 0.0)
             self.kwijt = 0
             return p
 
-        # Voorspel de positie en kies de dichtstbijzijnde pose binnen de poort.
-        px = self.centroid[0] + self.snelheid[0]
-        py = self.centroid[1] + self.snelheid[1]
+        # Voorspel de positie — mee-geëxtrapoleerd over de gemiste frames — en kies de
+        # dichtstbijzijnde pose binnen de poort, die met de gat-lengte meegroeit.
+        n = self.kwijt + 1                     # frames sinds de laatste match
+        px, py = self._verwacht(self.centroid, n)
+        poort = min(self.gate * (1.0 + TRACK_GATE_GROEI * self.kwijt), TRACK_GATE_MAX)
         (bc, bp), afstand = min(
             (((c, p), ((c[0]-px)**2 + (c[1]-py)**2) ** 0.5) for c, p in centroids),
             key=lambda t: t[1],
         )
-        if afstand > self.gate:
+        if afstand > poort:
             # Beste kandidaat te ver → waarschijnlijk de andere schaatser; coast.
             self.kwijt += 1
-            if self.kwijt > self.hervind_frames:
-                self.centroid = None
             return None
 
-        # Match: snelheid en positie licht gedempt bijwerken.
-        vx, vy = bc[0] - self.centroid[0], bc[1] - self.centroid[1]
+        # Match: snelheid (per frame, dus gedeeld door de gat-lengte) en positie licht
+        # gedempt bijwerken.
+        vx, vy = (bc[0] - self.centroid[0]) / n, (bc[1] - self.centroid[1]) / n
         self.snelheid = (0.5 * self.snelheid[0] + 0.5 * vx,
                          0.5 * self.snelheid[1] + 0.5 * vy)
-        self.centroid = bc
+        self.centroid = self.laatste_bekend = bc
         self.kwijt = 0
         return bp
 
@@ -660,6 +765,29 @@ def analyseer_frames(input_pad, model_pad, force_fps=None, num_poses=NUM_POSES_D
     tracker  = DoelTracker(doel_punt=doel_punt,
                            hervind_frames=int(max(1, fps * TRACK_HERVIND_S)))
     frame_nr = 0
+    # Koude start zonder klik: eerst een seconde meekijken en dán pas kiezen (zie
+    # _kies_bewegend_doel). Met een klik is er niets te kiezen en analyseren we direct.
+    warmup = 0 if doel_punt is not None else int(max(1, round(fps * SEED_WARMUP_S)))
+    buffer = [] if warmup else None
+
+    def _maak(nr, doel):
+        r = FrameResultaat(frame_nr=nr, tijd=nr / fps if fps > 0 else 0)
+        if doel is not None:
+            r.lm = doel
+            r.pose_gevonden = True
+        return r
+
+    def _leeg_buffer():
+        """Kies de doelschaatser uit de gebufferde frames en speel die frames daarna
+        alsnog door de tracker af, zodat er geen enkel frame verloren gaat."""
+        keuze = _kies_bewegend_doel(buffer)
+        start = 0
+        if keuze is not None:
+            start, tracker.doel_punt = keuze
+        for i, poses in enumerate(buffer):
+            # Vóór het startframe van het gekozen spoor is het doel nog niet in beeld;
+            # de tracker zou daar op een omstander locken, dus die frames blijven leeg.
+            yield _maak(i, tracker.update(poses) if i >= start else None)
 
     with mp_vision.PoseLandmarker.create_from_options(landmarker_options) as landmarker:
 
@@ -674,18 +802,21 @@ def analyseer_frames(input_pad, model_pad, force_fps=None, num_poses=NUM_POSES_D
             results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             poses = results.pose_landmarks or []
-            doel = tracker.update(poses)
+            if buffer is not None:
+                buffer.append(poses)
+                if len(buffer) >= warmup:
+                    yield from _leeg_buffer()
+                    buffer = None
+            else:
+                yield _maak(frame_nr, tracker.update(poses))
 
-            resultaat = FrameResultaat(frame_nr=frame_nr, tijd=frame_nr / fps if fps > 0 else 0)
-            if doel is not None:
-                resultaat.lm = doel
-                resultaat.pose_gevonden = True
-
-            yield resultaat
             frame_nr += 1
 
             if progress_callback is not None:
                 progress_callback(frame_nr, totaal)
+
+        if buffer:                       # video korter dan het warmup-venster
+            yield from _leeg_buffer()
 
     cap.release()
 
