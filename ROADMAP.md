@@ -127,6 +127,28 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
+## Extra — Vergelijk schaatsers (twee analyses naast elkaar) ✅
+
+> **Af (27 juli 2026)** — buiten de fasering. Twee opgeslagen analyses naast elkaar om schaatsers (of dezelfde schaatser op twee momenten) te vergelijken.
+>
+> **Voorwerk — videopaneel uitgefactoreerd.** Alle afspeel-state zat als losse `self.*`-attributen in `MainWindow`, dus twee spelers naast elkaar was onmogelijk. Nieuwe `VideoSpeler(QWidget)` met eigen capture/timer/zoom/pan en alle bediening; `MainWindow` benadert `video_info`/`resultaten`/`huidige_idx` nog via read-only properties, zodat de bestaande editor- en tabelcode ongewijzigd bleef. De skelet-editor haakt in via `overlay_tekenaar` + `op_muis_druk/_beweeg/_los` (plain callables); pannen blijft in de speler, vóór de callback, zodat de voorrangsregel per constructie klopt. Analysepagina werkt daarna identiek — inclusief een meegenomen fix: `slider.setRange` in `laad()` staat nu in `blockSignals`, zodat een korte analyse na een lange geen spook-seek meer geeft.
+>
+> **Wat er staat:** knop "Vergelijk schaatsers..." op de startpagina → derde pagina met twee `VergelijkKant`-widgets (kop, eigen `VideoSpeler`, "Kies analyse...", sync-punt, minimale afzettabel `#`/`Been`/`Hoek` met grijze markering voor onvolledige afzetten). `AnalyseKiezer` (schaatser → analyse) wordt tweemaal gebruikt bij het openen en per kant om te wisselen. Elke kant is los af te spelen; **"Start alles"** speelt beide vanaf hun sync-punt via **één masterklok** die het doelframe per kant uit de wandkloktijd × de eigen fps berekent — zelfcorrigerend en correct bij verschillende fps (twee losse timers zouden binnen seconden uit de pas lopen). Standaard ¼×. Gedeelde laadhelper `_laad_analyse_data` raakt geen `MainWindow`-state aan, zodat de vergelijking de instellingen van de geopende analyse niet overschrijft.
+>
+> **Bewust nog niet:** sync-punten worden niet opgeslagen (geen DB-kolom, zou een schemabump + migratie kosten); geen gecombineerde statistiek of grafiek over de twee kanten heen; de tabel is opzet minimaal — eerst kijken wat een trainer in de praktijk mist.
+
+---
+
+## Extra — Openstaand: dynamische zoom + soepeler vergelijken (nog te bouwen)
+
+Drie kleine, losstaande verbeterpunten (27 juli 2026), nog niet uitgewerkt:
+
+- **Dynamische zoom bij "Volg schaatser"**: de zoomfactor moet meeademen met de afstand tot de camera, zodat de schaatser steeds ongeveer **even groot** in beeld blijft. Nu volgt alleen het pan-middelpunt mee (`_zoom_volg`); de zoomfactor zelf staat vast (slider).
+- **Rechtstreeks vergelijken vanuit een geopende analyse**: knop "Vergelijk met andere analyse..." op de weergavepagina, zodat je niet eerst terug naar de bibliotheek hoeft om de vergelijkpagina te starten — de huidige analyse gaat dan meteen als linkerkant mee.
+- **Eén kant wisselen op de vergelijkpagina**: nu moet je bij het starten van "Vergelijk schaatsers" meteen twee analyses kiezen; je moet ook later een kant apart kunnen omwisselen zonder de andere kant (en de sync-instellingen) kwijt te raken.
+
+---
+
 ## Fase 3 — Skelet-editor (punten verslepen) ✅
 
 > **Af (20 juli 2026)** — zelftest (`python schaats_db.py`) dekt de opslag-round-trip (bewerken → `landmarks_ruw.npz`-backup + `bewerkt=1` + verse events-cache; herstel origineel → npz terug + `bewerkt=0`); GUI handmatig getest.
@@ -283,8 +305,9 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | ✅ **af** (18 jul 2026) |
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
 | — | Batch-analyse (extra, buiten de fasering) | ✅ **af** (20 jul 2026) |
+| — | Vergelijk schaatsers + `VideoSpeler`-refactor (extra) | ✅ **af** (27 jul 2026) |
 | 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026) |
-| 4 | Instellingen, gedeelde map, conflictafhandeling | middelgroot, 1–2 sessies |
+| 4 | Instellingen, gedeelde map, conflictafhandeling | ✅ **af** (20 jul 2026) |
 | 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
 | 6 | Sneller analyseren | gefaseerd: stappen 1+2+6 in 1 sessie; export/DirectML apart experiment |
 | 7 | Perspectiefcorrectie via baanlijnen | *nice-to-have (niet nu — frontale, horizontale camera)*; groot, 2–3 sessies (stap 3, de 3D-reconstructie, is onderzoekswerk — eerst valideren op testmateriaal) |
