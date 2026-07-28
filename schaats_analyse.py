@@ -84,6 +84,23 @@ TORSO_IDX         = (11, 12, 23, 24)  # schouders + heupen: stabiele identiteits
 SMOOTH_WINDOW_S = 0.25    # vensterlengte in seconden (wordt omgezet naar oneven # frames)
 SMOOTH_POLY     = 2       # polynoomorde van de SG-fit
 HORIZON_SMOOTH_S = 0.5    # vensterlengte (s) voor het smoothen van de per-frame horizon-schatting
+# Ruimte die de schaatser per frame in beeld inneemt (voor de automatische zoom in de GUI).
+# De omvang golft mee met de schaatscyclus (door de knieën zakken, benen spreiden), dus
+# smoothen we over ruwweg één slag — wat overblijft is de trage verandering van de afstand
+# tot de camera.
+KADER_SMOOTH_S   = 1.5    # vensterlengte (s) voor het smoothen van de kadergrootte
+KADER_MIDDEN_S   = 0.5    # vensterlengte (s) voor het smoothen van het kader-middelpunt;
+                          # korter, want het midden moet de schaatser echt volgen — alleen
+                          # het meebewegen met armen en benen moet eruit
+KADER_POLY       = 1      # lineair, niet SMOOTH_POLY: de afstand tot de camera verandert
+                          # lokaal recht-toe-recht-aan, terwijl de kwadratische randfit van
+                          # SG de cyclus-golf naar buiten toe extrapoleert — gemeten 15% mis
+                          # op het eerste frame tegen 3% met een lineaire fit
+KADER_MIN_FRAMES = 5      # minder bruikbare frames = geen zinnig kader-signaal
+KADER_GAT_S      = 1.0    # zolang mag een detectiegat overbrugd worden met de laatst bekende
+                          # kadering; duurt het langer, dan weten we niet waar de schaatser
+                          # is en zoomt het kader vloeiend terug naar het volledige beeld —
+                          # liever alles zien dan een uitvergroting van de verkeerde plek
 
 # ── Uitschieter-verwerping (occlusie) ───────────────────────────────────────────
 # Als een ledemaat een ander verbergt (bv. arm vóór heup/been) verspringt een landmark
@@ -938,6 +955,27 @@ def _hampel_uitschieters(y, window=HAMPEL_WINDOW, k=HAMPEL_K):
     return mask
 
 
+def _gat_afstand(betrouwbaar):
+    """Per frame: hoeveel frames het van het dichtstbijzijnde betrouwbare frame af ligt
+    (0 waar het zelf betrouwbaar is). Maat voor hoe diep je in een detectiegat zit."""
+    idx = np.flatnonzero(np.asarray(betrouwbaar, dtype=bool))
+    n = len(betrouwbaar)
+    if len(idx) == 0:
+        return np.full(n, float(n))
+    alle = np.arange(n)
+    dichtstbij = np.searchsorted(idx, alle).clip(0, len(idx) - 1)
+    vorige = (dichtstbij - 1).clip(0, len(idx) - 1)
+    return np.minimum(np.abs(alle - idx[dichtstbij]), np.abs(alle - idx[vorige])).astype(float)
+
+
+def _lopend_max(y, window):
+    """Gecentreerd lopend maximum: de envelope van een golvend signaal."""
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    half = window // 2
+    return np.array([y[max(0, i - half):min(n, i + half + 1)].max() for i in range(n)])
+
+
 def _interpoleer_onbetrouwbaar(y, betrouwbaar):
     """Vervang niet-betrouwbare posities door lineaire interpolatie uit de rest."""
     y = np.asarray(y, dtype=float).copy()
@@ -1171,6 +1209,75 @@ def bepaal_horizon_reeks(input_pad, n_frames, fps, force_fps=None, progress_call
     window = max(SMOOTH_POLY + 2, int(round(HORIZON_SMOOTH_S * fps)))
     y = _savgol(y, window, SMOOTH_POLY)
     return [round(float(v), 2) for v in y]
+
+
+def kader_reeks(resultaten, fps):
+    """
+    Het kader dat de schaatser per frame nodig heeft: `(midden_x, midden_y, straal)`, alles
+    genormaliseerd. De GUI leidt hier de automatische zoom én het volgpunt uit af — de
+    uitsnede is in genormaliseerde coördinaten symmetrisch (0.5/zoom in x én y), dus één
+    straal rond één middelpunt is precies wat er in beeld moet passen.
+
+    Het middelpunt is het midden van álle zichtbare landmarks, níet `torso_centroid`: dat
+    laatste ligt hoog in het lichaam (schouders + heupen), zodat een kader eromheen boven
+    het hoofd net zoveel ruimte krijgt als onder de schaatsen — een kwart van het beeld
+    verspild. De straal is de afstand van dat midden tot het verste punt, dus tot een bij
+    de afzet ver uitgestrekt been, niet enkel de lichaamslengte.
+
+    Opschoning als in `bepaal_horizon_reeks`: gaten (geen pose) en uitschieters (een ledemaat
+    dat kort wegvalt of verspringt) weg-geïnterpoleerd, daarna smoothen. Voor de straal
+    eerst een **lopend maximum** over `KADER_SMOOTH_S` en pas daarna Savitzky–Golay; die
+    volgorde is essentieel, want gladstrijken alléén vlakt de piek af en dan valt een ver
+    uitgestrekt been net buiten beeld. Het maximum over ruwweg één slag is een envelope die
+    de breedste stand van dat moment altijd dekt en toch traag beweegt, zodat het kader niet
+    met elke slag meepompt. Het middelpunt wordt korter gesmoothd (`KADER_MIDDEN_S`) — dat
+    moet de schaatser wél volgen — en de straal wordt er ná die smoothing tegen gemeten,
+    zodat de twee bij elkaar passen.
+
+    Retourneert een lijst tupels van dezelfde lengte als `resultaten`, of None als er te
+    weinig pose is om iets zinnigs te zeggen (de caller valt dan terug op een vaste zoom).
+    """
+    punten_per_frame = [
+        _zichtbare_xy(r.lm) if (r.pose_gevonden and r.lm is not None) else []
+        for r in resultaten
+    ]
+    betrouwbaar = np.array([len(p) > 0 for p in punten_per_frame])
+    if betrouwbaar.sum() < KADER_MIN_FRAMES:
+        return None
+
+    def _opschonen(waarden):
+        """Gaten + uitschieters eruit — het recept van bepaal_horizon_reeks, zonder smoothing."""
+        y = np.array([v if v is not None else np.nan for v in waarden], dtype=float)
+        y = _interpoleer_onbetrouwbaar(y, betrouwbaar)
+        betr2 = betrouwbaar & ~_hampel_uitschieters(y)
+        return _interpoleer_onbetrouwbaar(y, betr2), betr2
+
+    midden_window = max(KADER_POLY + 2, int(round(KADER_MIDDEN_S * fps)))
+    straal_window = max(KADER_POLY + 2, int(round(KADER_SMOOTH_S * fps)))
+    cx, _ = _opschonen([(min(x for x, _ in p) + max(x for x, _ in p)) / 2 if p else None
+                        for p in punten_per_frame])
+    cy, _ = _opschonen([(min(y for _, y in p) + max(y for _, y in p)) / 2 if p else None
+                        for p in punten_per_frame])
+    cx = _savgol(cx, midden_window, KADER_POLY)
+    cy = _savgol(cy, midden_window, KADER_POLY)
+
+    # Straal t.o.v. het gesmoothte midden (niet het ruwe), anders sluiten ze niet op elkaar aan.
+    ruw_straal = [max((max(abs(x - cx[i]), abs(y - cy[i])) for x, y in p), default=None)
+                  for i, p in enumerate(punten_per_frame)]
+    straal, betr2 = _opschonen(ruw_straal)
+    straal = _savgol(_lopend_max(straal, straal_window), straal_window, KADER_POLY)
+    # De SG-randfit kan doorschieten tot ≤ 0; dat zou verderop een deling door nul geven.
+    ondergrens = max(1e-3, float(np.median(straal[betr2] if betr2.any() else straal)) * 0.05)
+    straal = np.maximum(ondergrens, straal)
+
+    # Lange detectiegaten: het kader vloeiend openen tot het volledige beeld (straal 0.5).
+    # Buiten een gat is `f` 0 en verandert er niets. Het mengen gebeurt in "zoom"-ruimte
+    # (0.5/straal) en niet in de straal zelf: dicht bij de schaatser is de straal klein, en
+    # daar zou een lineaire menging de zoom in een paar frames laten instorten. Het midden
+    # blijft staan waar het stond — bij straal 0.5 valt de uitsnede toch over het hele beeld.
+    f = np.clip(_gat_afstand(betrouwbaar) / max(1.0, KADER_GAT_S * fps), 0.0, 1.0)
+    straal = 0.5 / ((0.5 / straal) * (1 - f) + 1.0 * f)
+    return [(float(cx[i]), float(cy[i]), float(straal[i])) for i in range(len(resultaten))]
 
 
 def wijs_afzetbeen_cyclus(resultaten, h, fps):

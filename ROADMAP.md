@@ -139,13 +139,34 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
-## Extra — Openstaand: dynamische zoom + soepeler vergelijken (nog te bouwen)
+## Extra — Automatische zoom ✅
 
-Drie kleine, losstaande verbeterpunten (27 juli 2026), nog niet uitgewerkt:
+> **Af (28 juli 2026)** — het programma bepaalt de zoom zelf: de schaatser staat de hele clip helemaal in beeld met wat lucht eromheen. Buiten de fasering; hoorde bij de drie losse verbeterpunten van 27 juli.
+>
+> **Waarom:** gemeten over de bibliotheek wordt een schaatser tijdens een clip 1,4–5,8× groter in beeld. Eén vaste zoomfactor klopt dus hooguit een paar seconden en de trainer zat tijdens het afspelen aan de slider. De trainer wil de kadering ook niet zélf hoeven kiezen — dat is werk dat het programma kan doen.
+>
+> **Wat er staat:** `kader_reeks()` in `schaats_analyse.py` berekent bij het laden één keer offline per frame `(midden, straal)` van de schaatser — vooraf i.p.v. online, zodat scrubben exact dezelfde uitsnede geeft als ernaartoe afspelen. In `VideoSpeler` staan `_zoom` (ingesteld, 1–5×) en `_zoom_eff` (toegepast, tot 8×) los van elkaar; met de checkbox **"Automatische zoom"** (standaard uit) volgt `_zoom_eff` uit de kaderstraal plus 15% marge, en volgt de uitsnede het kader-middelpunt. Zolang de automaat aan staat zijn de zoom-slider en "Passend" uitgeschakeld; aan het muiswiel draaien neemt de zoom weer over. Zit in `VideoSpeler`, dus de vergelijkpagina heeft het per kant — twee schaatsers op verschillende afstand worden zo pas echt vergelijkbaar. Zie CLAUDE.md (bullet "Automatische zoom") voor de details.
+>
+> **Wat de meting uitwees (op echte analyses, alle frames nagelopen):**
+> - Kaderen om `torso_centroid` verspilt een kwart van het beeld (dat punt ligt hoog in het lichaam) — vandaar het midden van álle zichtbare landmarks: beeldvulling 0,40 → 0,56.
+> - Alleen smoothen vlakt de piek af en dan valt een uitgestrekt been buiten beeld; eerst een lopend maximum over één slag, dán smoothen. Resultaat: geen enkel frame met de schaatser buiten de uitsnede, bij < 2% zoomverandering per frame.
+> - `KADER_POLY=1` i.p.v. de gedeelde `SMOOTH_POLY=2`: de kwadratische randfit extrapoleert de slag-golf en zit 15% mis op het eerste frame (lineair: 3%).
+> - Het plafond hoort niet op de videoresolutie te zitten maar op de vergroting op het scherm: staande telefoonclips staan in een liggend paneel al gekrompen en mogen ver inzoomen, 4K-liggend nauwelijks.
+> - Bij een lang detectiegat hield het kader de laatst bekende stand vast — dat leverde een 8×-uitvergroting van de plek waar de schaatser wás (zichtbaar op de eerste seconde van IMG_9002). Nu gaat het kader na `KADER_GAT_S` vloeiend open tot het volledige beeld.
+>
+> **Bewust niet:** geen persistentie (zoomstand en checkbox horen bij het kijken, niet bij de analyse); geen automatische keuze wanneer de automaat aan moet — dat blijft een vinkje.
 
-- **Dynamische zoom bij "Volg schaatser"**: de zoomfactor moet meeademen met de afstand tot de camera, zodat de schaatser steeds ongeveer **even groot** in beeld blijft. Nu volgt alleen het pan-middelpunt mee (`_zoom_volg`); de zoomfactor zelf staat vast (slider).
-- **Rechtstreeks vergelijken vanuit een geopende analyse**: knop "Vergelijk met andere analyse..." op de weergavepagina, zodat je niet eerst terug naar de bibliotheek hoeft om de vergelijkpagina te starten — de huidige analyse gaat dan meteen als linkerkant mee.
-- **Eén kant wisselen op de vergelijkpagina**: nu moet je bij het starten van "Vergelijk schaatsers" meteen twee analyses kiezen; je moet ook later een kant apart kunnen omwisselen zonder de andere kant (en de sync-instellingen) kwijt te raken.
+---
+
+## Extra — Soepeler vergelijken ✅
+
+> **Af (28 juli 2026)** — de twee losse verbeterpunten van 27 juli op de vergelijkpagina.
+>
+> **Rechtstreeks vergelijken vanuit een geopende analyse:** knop **"⇄ Vergelijk met..."** in de transportbalk van de weergavepagina (naast "Bewerken", via `voeg_bedieningsknop`). De geopende analyse gaat altijd naar de **linkerkant** — vanuit een geopende analyse is er nooit een lege kant om slim over na te denken, dus voorspelbaar is beter — en voor rechts wordt meteen om een analyse gevraagd, voorgeselecteerd op dezelfde schaatser (dus "deze schaatser toen vs. nu" is twee klikken). Stond er rechts al een ándere analyse, dan blijft die staan inclusief sync-punt; annuleren van de kiezer opent de pagina gewoon met alleen links gevuld. De kant laadt de analyse **opnieuw uit de bibliotheek** i.p.v. de resultatenlijst van de weergavepagina te delen: de skelet-editor muteert die `FrameResultaat`-objecten in place. Daarvoor is `_kies_vergelijk_kant` gesplitst in de dialoog en een herbruikbaar `_zet_vergelijk_kant(kant, analyse_id, naam)`; de knop staat uit zolang er geen opgeslagen analyse open is (een niet-bewaarde analyse valt niet uit de bibliotheek te laden).
+>
+> **Eén kant wisselen** bleek er al te zijn: elke `VergelijkKant` had z'n eigen "Kies analyse..."-knop die alleen die kant vervangt (meegekomen met de `VideoSpeler`-refactor, maar nooit uit deze lijst gehaald). Wat er wél bij moest: de knop heet **"Wisselen..."** zodra er een analyse staat, er is een **✕**-knop om een kant leeg te maken (bedraad vanuit de pagina zodat de masterklok eerst losgelaten wordt), en dezelfde analyse opnieuw laden **houdt het sync-punt** — dat hoort bij de video, niet bij het laden. Een andere analyse begint nog steeds op frame 0.
+>
+> **Bewust niet:** nog steeds geen opgeslagen sync-punten (zie de sectie hierboven — schemabump); geen derde kant.
 
 ---
 

@@ -40,7 +40,7 @@ import schaats_perspectief
 from schaats_analyse import (
     segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
-    torso_centroid, ONV_AFGEKAPT, ONV_GEEN_PUSH,
+    torso_centroid, kader_reeks, ONV_AFGEKAPT, ONV_GEEN_PUSH,
 )
 
 # Skelet-editor (fase 3)
@@ -75,8 +75,21 @@ LANDMARK_NAMEN = {
 }
 
 # Inzoomen op de schaatser in de weergave
-ZOOM_MAX  = 5.0        # maximale zoomfactor van de weergave-uitsnede
+ZOOM_MAX  = 5.0        # maximale zoomfactor van de weergave-uitsnede (handmatig: slider/wiel)
 ZOOM_STAP = 1.25       # muiswiel-factor per notch
+# De automatische zoom mag verder inzoomen dan de handmatige grens: een schaatser die aan
+# het begin van de clip ver weg is, moet echt vergroot worden om beeldvullend te zijn.
+# Op 4K is 1/8 uitsnede nog 480×270 px; daaronder wordt het te zacht.
+ZOOM_AUTO_MAX = 8.0    # bovengrens van de automatische zoom
+# ...maar nooit verder dan waar er nog pixels zijn. Wat telt is niet de videoresolutie maar
+# hoeveel de uitsnede op het scherm wordt opgeblazen: staande telefoonbeelden staan in een
+# liggend paneel al fors gekrompen (veel ruimte om in te zoomen), 4K-liggend nauwelijks.
+# De gebruiker kiest de zoom hier niet zelf, dus hoort het programma geen pap af te leveren.
+KADER_MAX_VERGROTING = 2.5   # max. schermpixels per videopixel bij automatische zoom
+# Lucht rondom de schaatser, als fractie van de ruimte die hij zelf nodig heeft. De
+# landmarks houden op bij de neus en de tenen, terwijl de bovenkant van het hoofd en de
+# ijzers er nog buiten steken — en een schaatser strak tegen de rand kijkt niet prettig.
+KADER_MARGE = 0.15
 
 # Afspeelsnelheden (slow motion): (label, factor op de fps). 1.0 = echte snelheid.
 SNELHEDEN = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25), ("⅛×", 0.125), ("1/16×", 0.0625)]
@@ -1170,11 +1183,17 @@ class VideoSpeler(QWidget):
         self._laatste_frame = None    # ruwe kopie van het huidige frame (voor laag-toggles)
         self._weergave_scaled = None  # QSize van de getoonde (geschaalde) pixmap, voor omrekening
 
-        # Inzoomen op de schaatser
+        # Inzoomen op de schaatser. Twee zoomwaarden, bewust uit elkaar gehouden:
+        # `_zoom` is wat de gebruiker instelde (slider/wiel, 1–ZOOM_MAX), `_zoom_eff` is wat
+        # er daadwerkelijk getoond wordt. Zonder automatische zoom zijn ze gelijk.
         self._zoom = 1.0            # 1.0 = passend (geen crop); tot ZOOM_MAX
+        self._zoom_eff = 1.0        # toegepaste zoom van het huidige frame (tot ZOOM_AUTO_MAX)
         self._pan_cx = 0.5          # genormaliseerd middelpunt van de uitsnede (volledig frame)
         self._pan_cy = 0.5
         self._zoom_volg = True      # auto-centreren op de schaatser (spiegel van chk_volg)
+        self._volg_forceren = False  # eenmalig centreren zonder framewissel (na een zoom-actie)
+        self._zoom_auto = False     # zoom door het programma laten bepalen (spiegel van chk_auto)
+        self._kader = None          # (midden_x, midden_y, straal) per frame, of None
         self._crop_norm = (0.0, 0.0, 1.0, 1.0)  # (x0n, y0n, breedten, hoogten): getoonde crop
         self._pan_sleep = None      # laatste muispositie tijdens een handmatige pan-sleep
 
@@ -1253,6 +1272,14 @@ class VideoSpeler(QWidget):
         self.chk_volg.setToolTip("Houd de schaatser gecentreerd in beeld tijdens het inzoomen.")
         self.chk_volg.toggled.connect(self._zet_zoom_volg)
         self._rij_toggles.addWidget(self.chk_volg)
+        self.chk_auto = QCheckBox("Automatische zoom")
+        self.chk_auto.setToolTip(
+            "Het programma kiest de zoom: de schaatser staat helemaal in beeld met wat ruimte "
+            "eromheen, de hele clip lang. Rijdt hij naar de camera toe, dan zoomt het beeld "
+            "vanzelf uit.\nZolang dit aan staat is de zoomregelaar buiten werking; aan het "
+            "muiswiel draaien neemt de zoom weer over.")
+        self.chk_auto.toggled.connect(self._zet_zoom_auto)
+        self._rij_toggles.addWidget(self.chk_auto)
         self._rij_toggles.addWidget(QLabel("Zoom"))
         self.slider_zoom = QSlider(Qt.Horizontal)
         self.slider_zoom.setRange(100, int(ZOOM_MAX * 100))   # 100 = 1.0×
@@ -1313,12 +1340,18 @@ class VideoSpeler(QWidget):
         self.resultaten = resultaten
         self.video_pad = video_pad
 
-        # Zoom resetten (geen zoom-lekkage tussen analyses).
-        self._zoom = 1.0
+        # Zoom resetten (geen zoom-lekkage tussen analyses). De stand van "Automatische zoom"
+        # blijft wél staan: dat is een voorkeur van de kijker, geen eigenschap van de clip.
+        self._zoom = self._zoom_eff = 1.0
         self._pan_cx = self._pan_cy = 0.5
         self._zoom_volg = True
+        self._volg_forceren = True     # bij het eerste frame meteen op de schaatser richten
         self._pan_sleep = None
         self._crop_norm = (0.0, 0.0, 1.0, 1.0)
+        # Eén keer offline: welk kader heeft de schaatser per frame nodig? Kost een fractie
+        # van een seconde en maakt de automatische zoom onafhankelijk van de afspeelrichting
+        # (scrubben geeft exact dezelfde uitsnede als ernaartoe afspelen).
+        self._kader = kader_reeks(resultaten, info.fps or 30.0)
         self.slider_zoom.blockSignals(True)
         self.slider_zoom.setValue(100)
         self.slider_zoom.blockSignals(False)
@@ -1351,6 +1384,7 @@ class VideoSpeler(QWidget):
             self.cap = None
         self._laatste_frame = None
         self._weergave_pos = 0
+        self._kader = None
         self.video_info = None
         self.resultaten = []
         self.huidige_idx = -1
@@ -1365,8 +1399,18 @@ class VideoSpeler(QWidget):
     def zet_besturing_actief(self, actief):
         for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
                   self.btn_frame_verder, self.btn_eind, self.slider,
-                  self.chk_volg, self.slider_zoom, self.btn_zoom_reset):
+                  self.chk_volg, self.chk_auto, self.slider_zoom, self.btn_zoom_reset):
             w.setEnabled(actief)
+        self._zet_handzoom_actief(actief)
+
+    def _zet_handzoom_actief(self, actief=None):
+        """Zet de handmatige zoomregelaars aan/uit: bepaalt het programma de zoom, dan zijn
+        ze buiten werking (grijs) — dat is eerlijker dan een slider die niets doet."""
+        if actief is None:
+            actief = self.slider.isEnabled()
+        aan = bool(actief) and not self._zoom_auto
+        self.slider_zoom.setEnabled(aan)
+        self.btn_zoom_reset.setEnabled(aan)
 
     # ── Navigeren + tekenen ──────────────────────────────────────────────
     def ga_naar(self, idx):
@@ -1438,13 +1482,30 @@ class VideoSpeler(QWidget):
         self.huidige_idx = idx
 
         resultaat = self.resultaten[idx]
+        # De automatische zoom verschilt per frame; label (en de uitgeschakelde slider als
+        # aflezing) tonen daarom de toegepaste factor. Eerst rekenen, dán pas het volgen:
+        # automatisch kan er ook zonder handmatige zoom een uitsnede zijn, en die moet
+        # mee-centreren.
+        self._zoom_eff = self._bereken_zoom_eff(idx)
+        self.lbl_zoom.setText(f"{self._zoom_eff:.1f}×")
+        if self._zoom_auto:
+            self.slider_zoom.blockSignals(True)
+            self.slider_zoom.setValue(int(round(min(ZOOM_MAX, self._zoom_eff) * 100)))
+            self.slider_zoom.blockSignals(False)
         # Auto-volgen: centreer de zoom-uitsnede op de schaatser, maar alleen bij een echte
         # framewissel en niet tijdens een handle-sleep — anders verspringt de uitsnede onder
         # de cursor bij het verslepen of het togglen van een laag.
-        if nieuw_frame and self._zoom > 1.0 and self._zoom_volg and not self.volgen_bevroren:
-            c = torso_centroid(resultaat.lm) if resultaat.pose_gevonden else None
+        if ((nieuw_frame or self._volg_forceren) and self._zoom_eff > 1.0
+                and self._zoom_volg and not self.volgen_bevroren):
+            # Automatisch: op het kader-middelpunt, want de zoom is op datzelfde kader
+            # gemeten — daar staat de schaatser dus gegarandeerd compleet in beeld.
+            # Handmatig: op de romp, die rustiger beweegt dan de armen en benen.
+            kader = self._kader_op(idx) if self._zoom_auto else None
+            c = (kader[:2] if kader is not None
+                 else torso_centroid(resultaat.lm) if resultaat.pose_gevonden else None)
             if c is not None:
                 self._pan_cx, self._pan_cy = c   # klemmen gebeurt in _toon_pixmap
+        self._volg_forceren = False
         teken_overlay_op_frame(
             frame, resultaat, self.video_info.fps,
             toon_skelet=self.chk_skelet.isChecked(),
@@ -1467,7 +1528,7 @@ class VideoSpeler(QWidget):
         # Inzoomen = een uitsnede rond het pan-middelpunt opschalen. De uitsnede houdt
         # dezelfde beeldverhouding als het frame, zodat de KeepAspectRatio-letterbox
         # (en dus de coördinaat-omrekening van de editor) onveranderd blijft.
-        z = max(1.0, self._zoom)
+        z = max(1.0, self._zoom_eff)
         if z > 1.0:
             cw, ch = w / z, h / z
             x0 = min(max(self._pan_cx * w - cw / 2, 0.0), w - cw)   # crop binnen het frame klemmen
@@ -1493,6 +1554,40 @@ class VideoSpeler(QWidget):
         self.label.setPixmap(pixmap)
 
     # ── Inzoomen op de schaatser ─────────────────────────────────────────────
+    def _kader_op(self, idx):
+        """Kader `(midden_x, midden_y, straal)` van frame `idx` (offline reeks), of None."""
+        if self._kader is None or not (0 <= idx < len(self._kader)):
+            return None
+        return self._kader[idx]
+
+    def _zoom_plafond(self):
+        """Hoe ver de automaat mag inzoomen. Bij zoom 1× past het frame met factor `s` op het
+        paneel; bij zoom z wordt dat `z·s` schermpixels per videopixel. Boven
+        `KADER_MAX_VERGROTING` wordt dat zichtbaar pap, dus daar houdt de automaat op."""
+        info = self.video_info
+        if info is None or not info.w or not info.h:
+            return ZOOM_AUTO_MAX
+        s = min(self.label.width() / info.w, self.label.height() / info.h)
+        if s <= 0:
+            return ZOOM_AUTO_MAX
+        return min(ZOOM_AUTO_MAX, max(1.0, KADER_MAX_VERGROTING / s))
+
+    def _bereken_zoom_eff(self, idx):
+        """De zoom die op frame `idx` daadwerkelijk toegepast wordt.
+
+        Handmatig is dat simpelweg de ingestelde zoom. Automatisch bepaalt het programma hem
+        uit de schaatser zelf: de uitsnede is (genormaliseerd) 0.5/zoom groot rondom het
+        kader-middelpunt, dus vullen we die met de ruimte die de schaatser nodig heeft plus
+        `KADER_MARGE` lucht. Verder uitzoomen dan het volledige beeld kan niet, dus dichtbij
+        blijft de zoom gewoon op 1× staan."""
+        z = min(ZOOM_MAX, max(1.0, self._zoom))
+        if not self._zoom_auto:
+            return z
+        kader = self._kader_op(idx)
+        if kader is None or not kader[2]:
+            return z            # geen bruikbare pose: laat de handmatige zoom staan
+        return min(self._zoom_plafond(), max(1.0, 0.5 / (kader[2] * (1.0 + KADER_MARGE))))
+
     def _zet_zoom(self, z):
         """Centrale zoom-setter: klemt, werkt slider+label bij (zonder signaal-lus) en
         hertekent het huidige frame goedkoop (geen herlezen van de video)."""
@@ -1500,7 +1595,8 @@ class VideoSpeler(QWidget):
         self._zoom = z
         if z <= 1.0:
             self._pan_cx = self._pan_cy = 0.5
-        self.lbl_zoom.setText(f"{z:.1f}×")
+        self._volg_forceren = True   # bewuste zoom-actie: meteen op de schaatser richten
+        self.lbl_zoom.setText(f"{z:.1f}×")     # _toon_frame zet er zo de effectieve zoom in
         self.slider_zoom.blockSignals(True)
         self.slider_zoom.setValue(int(round(z * 100)))
         self.slider_zoom.blockSignals(False)
@@ -1515,12 +1611,30 @@ class VideoSpeler(QWidget):
             # de scroll en gebeurt er buiten een geladen analyse helemaal niets.
             QLabel.wheelEvent(self.label, event)
             return
+        if self._zoom_auto:
+            # Aan het wiel draaien = de zoom overnemen, net zoals handmatig slepen het
+            # auto-volgen overneemt. `_zet_zoom_auto` neemt de huidige stand over, dus het
+            # beeld springt niet — er wordt vanaf hier alleen niet meer bijgestuurd.
+            self.chk_auto.setChecked(False)
         factor = ZOOM_STAP if delta > 0 else 1.0 / ZOOM_STAP
         self._zet_zoom(self._zoom * factor)
         event.accept()
 
     def _zet_zoom_volg(self, aan):
         self._zoom_volg = bool(aan)
+        self._volg_forceren = True
+        self.toon_huidig_frame()
+
+    def _zet_zoom_auto(self, aan):
+        """Zet de automatische zoom aan/uit. Bij uitzetten wordt de laatst getoonde zoom de
+        handmatige stand, zodat het beeld op dat moment niet verspringt — behalve boven
+        `ZOOM_MAX`, waar de handmatige regelaar nu eenmaal ophoudt."""
+        self._zoom_auto = bool(aan)
+        self._zet_handzoom_actief()
+        if not self._zoom_auto:
+            self._zet_zoom(self._zoom_eff)     # neemt over, hertekent en herstelt de slider
+            return
+        self._volg_forceren = True
         self.toon_huidig_frame()
 
     def _zoom_reset(self):
@@ -1561,7 +1675,7 @@ class VideoSpeler(QWidget):
         # Deze tak moet bovenaan blijven: buiten de bewerk-modus is links-slepen bedoeld om
         # het ingezoomde beeld te verschuiven (pannen), in de bewerk-modus is het = punt
         # verplaatsen (dat handelt de eigenaar af).
-        if (not self.bewerk_modus and self._zoom > 1.0
+        if (not self.bewerk_modus and self._zoom_eff > 1.0
                 and event.button() == Qt.LeftButton):
             self._pan_sleep = event.position()
             return
@@ -1577,7 +1691,7 @@ class VideoSpeler(QWidget):
             sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
             _, _, wn, hn = self._crop_norm
             if sw > 0 and sh > 0:
-                half = 0.5 / self._zoom
+                half = 0.5 / max(1.0, self._zoom_eff)
                 # slepen naar rechts toont de linkerkant → uitsnede-midden schuift mee
                 self._pan_cx = min(1.0 - half, max(half, self._pan_cx - d.x() / sw * wn))
                 self._pan_cy = min(1.0 - half, max(half, self._pan_cy - d.y() / sh * hn))
@@ -1665,6 +1779,12 @@ class VergelijkKant(QWidget):
         self.btn_kies = QPushButton("Kies analyse...")
         self.btn_kies.clicked.connect(kies_callback)
         kop.addWidget(self.btn_kies)
+        # Leegmaken wordt van buiten bedraad (zie _bouw_vergelijkpagina): de masterklok
+        # moet eerst los, en die kent de kant niet andersom.
+        self.btn_leeg = QPushButton("✕")
+        self.btn_leeg.setToolTip("Deze kant leegmaken.")
+        self.btn_leeg.setEnabled(False)
+        kop.addWidget(self.btn_leeg)
         v.addLayout(kop)
 
         self.speler = VideoSpeler(min_grootte=(320, 200))
@@ -1700,16 +1820,23 @@ class VergelijkKant(QWidget):
 
     # ── Vullen / legen ───────────────────────────────────────────────────
     def toon(self, analyse_id, schaatser_naam, data):
-        """Neemt een geladen analyse (dict uit MainWindow._laad_analyse_data) in gebruik."""
+        """Neemt een geladen analyse (dict uit MainWindow._laad_analyse_data) in gebruik.
+
+        Dezelfde analyse opnieuw laden (bv. na een edit) houdt het sync-punt: dat hoort bij
+        de video, niet bij het laden. Een ándere analyse begint weer op frame 0."""
+        zelfde = analyse_id == self.analyse_id
         self.analyse_id = analyse_id
         self.events = data["events"]
-        self.sync_frame = 0
+        self.sync_frame = (min(self.sync_frame, max(0, len(data["resultaten"]) - 1))
+                           if zelfde else 0)
         self.lbl_titel.setText(f"{schaatser_naam} — {data['titel']}")
-        self.lbl_sync.setText("sync: frame 0")
         self.speler.laad(data["info"], data["resultaten"], data["video_pad"])
         self._vul_tabel()
+        self.btn_kies.setText("Wisselen...")
         self.btn_sync.setEnabled(True)
-        self.speler.ga_naar(0)
+        self.btn_leeg.setEnabled(True)
+        self.speler.ga_naar(self.sync_frame)
+        self._toon_sync_label()
 
     def leeg(self):
         """Laat de video los (nodig voordat de mediamap gewist kan worden)."""
@@ -1720,7 +1847,9 @@ class VergelijkKant(QWidget):
         self.tabel.setRowCount(0)
         self.lbl_titel.setText(f"{self.naam} — nog geen analyse gekozen")
         self.lbl_sync.setText("sync: frame 0")
+        self.btn_kies.setText("Kies analyse...")
         self.btn_sync.setEnabled(False)
+        self.btn_leeg.setEnabled(False)
 
     def heeft_analyse(self):
         return self.analyse_id is not None and bool(self.speler.resultaten)
@@ -1730,6 +1859,12 @@ class VergelijkKant(QWidget):
         if not self.heeft_analyse():
             return
         self.sync_frame = max(0, self.speler.huidige_idx)
+        self._toon_sync_label()
+
+    def _toon_sync_label(self):
+        if not self.heeft_analyse():
+            self.lbl_sync.setText("sync: frame 0")
+            return
         tijd = self.speler.resultaten[self.sync_frame].tijd
         self.lbl_sync.setText(f"sync: frame {self.sync_frame}  (t={tijd:.2f}s)")
 
@@ -1781,6 +1916,10 @@ class MainWindow(QMainWindow):
         self.bieb = None            # bibliotheekpad (gezet door _zet_bibliotheek)
         self.trainer_naam = schaats_db.trainer_naam()  # fase 4: gaat mee als aangemaakt_door
         self.analyse_id = None      # id van de geopende analyse in de bibliotheek
+        # Bij wie de geopende analyse hoort — nodig voor de kop op de vergelijkpagina
+        # (en als voorkeur in de analysekiezer); de DB kent alleen het id.
+        self.analyse_schaatser_id = None
+        self.analyse_schaatser_naam = ""
         self._pending_opslag = None # {schaatser_id, titel, instellingen} voor de worker
         self._bezig = False         # draait er een (batch-)analyse op de achtergrond?
         self._afsluiten = False     # venster gaat dicht: worker-slots niets meer laten doen
@@ -2021,6 +2160,9 @@ class MainWindow(QMainWindow):
             splitter.addWidget(kant)
             # Zelf op ▶ drukken = handmatige besturing overnemen: de masterklok laten los.
             kant.speler.btn_play.clicked.connect(self._stop_alles)
+            # Een kant leegmaken terwijl de masterklok loopt: eerst de klok los.
+            kant.btn_leeg.clicked.connect(
+                lambda _=False, k=kant: (self._stop_alles(), k.leeg()))
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         v.addWidget(splitter, stretch=1)
@@ -2076,6 +2218,13 @@ class MainWindow(QMainWindow):
             "direct opgeslagen.")
         self.btn_bewerken.toggled.connect(self._toggle_bewerken)
         self.speler.voeg_bedieningsknop(self.btn_bewerken)
+
+        self.btn_vergelijk_deze = QPushButton("⇄ Vergelijk met...")
+        self.btn_vergelijk_deze.setToolTip(
+            "Zet deze analyse links op de vergelijkpagina en kies er een andere naast.")
+        self.btn_vergelijk_deze.clicked.connect(self._vergelijk_met_deze)
+        self.btn_vergelijk_deze.setEnabled(False)
+        self.speler.voeg_bedieningsknop(self.btn_vergelijk_deze)
 
         # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus.
         self.editor_balk = QWidget()
@@ -2292,6 +2441,14 @@ class MainWindow(QMainWindow):
         item = self.lijst_schaatsers.currentItem()
         return item.data(Qt.UserRole) if item else None
 
+    def _schaatser_naam(self, schaatser_id):
+        """Naam bij een schaatser-id, of "" als die er niet (meer) is."""
+        if schaatser_id is None:
+            return ""
+        s = next((x for x in schaats_db.lijst_schaatsers(self.bieb)
+                  if x["id"] == schaatser_id), None)
+        return s["naam"] if s else ""
+
     def _geselecteerde_analyse_id(self):
         rij = self.tabel_analyses.currentRow()
         if rij < 0:
@@ -2434,6 +2591,9 @@ class MainWindow(QMainWindow):
         self.speler.sluit()
         self.events = []
         self.analyse_id = None
+        self.analyse_schaatser_id = None
+        self.analyse_schaatser_naam = ""
+        self.btn_vergelijk_deze.setEnabled(False)
         self.input_pad = None
         self.tabel.setRowCount(0)
         self.serie_hoek.clear()
@@ -2616,6 +2776,8 @@ class MainWindow(QMainWindow):
 
         self.input_pad = data["video_pad"]
         self.analyse_id = analyse_id
+        self.analyse_schaatser_id = data["meta"]["schaatser_id"]
+        self.analyse_schaatser_naam = self._schaatser_naam(self.analyse_schaatser_id)
         # De gebruiker bekijkt nu bewust deze analyse; een op de achtergrond lopende
         # analyse mag hem hier straks niet uit wegrukken.
         self._auto_toon_klaar = False
@@ -2643,19 +2805,48 @@ class MainWindow(QMainWindow):
             "Vergelijken: zet per kant een sync-punt op dezelfde fase van de slag en "
             "druk op 'Start alles'.")
 
-    def _kies_vergelijk_kant(self, kant):
+    def _vergelijk_met_deze(self):
+        """Vanaf de weergavepagina rechtstreeks vergelijken: de geopende analyse gaat
+        links, en voor rechts wordt (als daar nog niets bruikbaars staat) meteen om een
+        analyse gevraagd. Scheelt de omweg via de bibliotheek."""
+        if self.analyse_id is None:
+            return
+        self._pauzeer_alles()
+        if not self._zet_vergelijk_kant(self.kant_links, self.analyse_id,
+                                        self.analyse_schaatser_naam):
+            return          # melding is al getoond
+        # Een andere analyse rechts blijft staan (inclusief sync-punt); dezelfde analyse
+        # twee keer naast elkaar heeft geen zin.
+        if (not self.kant_rechts.heeft_analyse()
+                or self.kant_rechts.analyse_id == self.analyse_id):
+            self._kies_vergelijk_kant(self.kant_rechts,
+                                      voorkeur_id=self.analyse_schaatser_id)
+        self.stack.setCurrentWidget(self.pagina_vergelijk)
+        self.statusBar().showMessage(
+            "Vergelijken: zet per kant een sync-punt op dezelfde fase van de slag en "
+            "druk op 'Start alles'.")
+
+    def _kies_vergelijk_kant(self, kant, voorkeur_id=None):
         """Laat één kant een analyse kiezen en laadt die. True als het gelukt is."""
+        if voorkeur_id is None:
+            voorkeur_id = self._geselecteerde_schaatser_id()
         dlg = AnalyseKiezer(self.bieb, titel=f"{kant.naam}: kies analyse",
-                            voorkeur_schaatser_id=self._geselecteerde_schaatser_id(),
-                            parent=self)
+                            voorkeur_schaatser_id=voorkeur_id, parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.analyse_id is None:
             return False
+        return self._zet_vergelijk_kant(kant, dlg.analyse_id, dlg.schaatser_naam)
+
+    def _zet_vergelijk_kant(self, kant, analyse_id, schaatser_naam):
+        """Laadt een analyse uit de bibliotheek in één kant. True als het gelukt is.
+
+        Bewust opnieuw laden i.p.v. de resultatenlijst van de weergavepagina delen: de
+        skelet-editor muteert die objecten in place, en elke speler heeft z'n eigen
+        VideoCapture."""
         self._stop_alles()
-        analyse_id, naam = dlg.analyse_id, dlg.schaatser_naam
         data = self._laad_analyse_data(analyse_id)
         if data is None:
             return False
-        kant.toon(analyse_id, naam, data)
+        kant.toon(analyse_id, schaatser_naam, data)
         return True
 
     def _sluit_vergelijk_voor(self, ids):
@@ -2856,6 +3047,8 @@ class MainWindow(QMainWindow):
             return
 
         self.analyse_id = analyse_id
+        self.analyse_schaatser_id = opslag.get("schaatser_id")
+        self.analyse_schaatser_naam = self._schaatser_naam(self.analyse_schaatser_id)
         if analyse_id is not None:
             # Weergave leest voortaan de bibliotheekkopie; het origineel mag weg.
             try:
@@ -3058,6 +3251,9 @@ class MainWindow(QMainWindow):
         self._vul_tabel()
         self._vul_grafiek()
         self.btn_export.setEnabled(bool(events))
+        # Vergelijken kan alleen met een analyse die in de bibliotheek staat — de
+        # vergelijkkant laadt hem daar opnieuw uit.
+        self.btn_vergelijk_deze.setEnabled(self.analyse_id is not None)
 
         herkomst = f"  ·  geladen uit {bron}" if bron else ""
         self.statusBar().showMessage(
