@@ -1571,11 +1571,15 @@ def fase_voortgang(progress_callback, fase, n_fasen):
 def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, horizon_deg=0.0, auto_horizon=False,
-              perspectief=None):
+              perspectief=None, waarschuwing_callback=None):
     """
     Volledige analyse-pijplijn: multi-pose detectie + doel-tracking (streaming),
     daarna offline landmark-smoothing en het berekenen van de afgeleide grootheden.
     Retourneert (VideoInfo, lijst[FrameResultaat]).
+
+    `waarschuwing_callback(tekst)` bestaat voor signatuur-compatibiliteit met de YOLO-
+    backend (die meldt er stille terugvallen in de doelkeuze mee). Deze backend kiest
+    zijn doel streaming per frame en heeft nog geen melding die hier past.
 
     De horizoncorrectie is óf een vaste `horizon_deg` (handmatige lijn), óf — bij
     `auto_horizon` — **per frame** gedetecteerd (`bepaal_horizon_reeks`, voor een

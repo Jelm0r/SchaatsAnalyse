@@ -76,9 +76,12 @@ REF_HIST_N      = 25         # referentie = gemiddelde van de recentste N doel-h
 STITCH_MAX_GAP_S  = 2.0      # max. tijdsgat dat gestitcht mag worden
 STITCH_GATE_BASIS = 0.06     # afstandspoort (genormaliseerd) bij gat 0 ...
 STITCH_GATE_GROEI = 0.015    # ... die per gat-frame groeit (onzekerheid van de voorspelling)
+STITCH_MAX_OVERLAP = 2       # frames dat een kandidaat met de keten mag overlappen
 SNELHEID_VENSTER  = 5        # aantal detecties waarover de snelheid wordt geschat
 MIN_VERPLAATSING  = 0.06     # tracklet-padlengte hieronder = statische omstander
 KLIK_ZOEK_FRAMES  = 60       # zolang zoeken we (in frames) naar de aangeklikte schaatser
+SEED_MIN_LEN      = 5        # detecties; een kortere seed geeft een te dunne kleurreferentie
+BOOTSTRAP_MAX_GAP = 3        # frames; zo dichtbij mag een fragment een korte seed aanvullen
 
 # ── Verfijning ──────────────────────────────────────────────────────────────────
 GAP_VUL_S       = 1.0        # max. detectiegat dat via geïnterpoleerde bboxes wordt gevuld
@@ -142,7 +145,14 @@ def _torso_hist(frame_bgr, kp_xy, kp_conf, bbox_px=None):
     """
     HSV-histogram van de torso (polygon schouders→heupen) — de "kleur van het pak".
     Valt terug op het centrale bovenstuk van de bounding box als de torso-keypoints
-    onbetrouwbaar zijn. Retourneert een L1-genormaliseerd histogram, of None.
+    onbetrouwbaar zijn. Retourneert `(hist_of_None, uit_masker)`.
+
+    Die tweede waarde is de **herkomst**, en die telt: een masker-histogram bevat
+    alleen pak-pixels, een bbox-terugval óók achtergrond (ijs, boarding, publiek).
+    De twee zijn niet uitwisselbaar, dus een bbox-histogram mag niet met dezelfde
+    drempels tegen een masker-referentie worden gehouden — anders zakt zo'n frame
+    onterecht onder de split-drempel en knipt de tracklet-splitser een gat in een
+    verder prima keten.
     """
     h, w = frame_bgr.shape[:2]
     mask = None
@@ -159,14 +169,14 @@ def _torso_hist(frame_bgr, kp_xy, kp_conf, bbox_px=None):
         x0 = int(max(0, bx0 + 0.25 * bw)); x1 = int(min(w, bx1 - 0.25 * bw))
         y0 = int(max(0, by0 + 0.15 * bh)); y1 = int(min(h, by0 + 0.55 * bh))
         if x1 - x0 < 3 or y1 - y0 < 3:
-            return None
+            return None, False
     if mask is None and bbox_px is None:
-        return None
+        return None, False
     hsv = cv2.cvtColor(frame_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     hist = cv2.calcHist([hsv], [0, 1, 2], mask, list(KLEUR_BINS),
                         [0, 180, 0, 256, 0, 256])
     cv2.normalize(hist, hist, 1.0, 0, cv2.NORM_L1)
-    return hist
+    return hist, mask is not None
 
 
 def _hist_sim(a, b):
@@ -212,6 +222,14 @@ class Detectie:
     area: float
     lm: list                    # MediaPipe-33 Landmarks
     hist: object = None         # torso-HSV-histogram of None
+    hist_masker: bool = False   # True = uit de torso-polygon, False = bbox-terugval
+
+    @property
+    def ref_hist(self):
+        """Het histogram voor zover het als bewijs mag dienen: alleen de masker-
+        variant. De bbox-terugval bevat achtergrond en zou de referentie vervuilen
+        én bij vergelijking met een masker-referentie stelselmatig te laag scoren."""
+        return self.hist if self.hist_masker else None
 
 
 def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callback=None):
@@ -234,6 +252,7 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
             for i in range(len(xy)):
                 cx, cy, bw, bh = xywh[i]
                 bbox_px = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
+                hist, uit_masker = _torso_hist(res.orig_img, xy[i], conf[i], bbox_px)
                 dets.append(Detectie(
                     frame=len(frames),
                     tid=int(ids[i]) if ids is not None else None,
@@ -241,7 +260,8 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
                     bbox=(bbox_px[0] / w, bbox_px[1] / h, bbox_px[2] / w, bbox_px[3] / h),
                     area=(bw * bh) / (w * h),
                     lm=_coco_naar_landmarks(xy[i], conf[i], w, h),
-                    hist=_torso_hist(res.orig_img, xy[i], conf[i], bbox_px),
+                    hist=hist,
+                    hist_masker=uit_masker,
                 ))
         frames.append(dets)
         if progress_callback is not None:
@@ -264,25 +284,36 @@ def _splits_op_kleur(tracklet):
     Knip een tracklet op de plekken waar de pakkleur aanhoudend verspringt — dat is
     vrijwel altijd ByteTrack die na een kruising/occlusie de andere schaatser aan
     hetzelfde ID hangt. Retourneert een lijst deel-tracklets.
+
+    Alleen masker-histogrammen (`Detectie.ref_hist`) mogen knippen: een bbox-terugval
+    bevat achtergrond en scoort daardoor stelselmatig laag tegen een masker-referentie
+    — die zou anders een gat knippen waar niets aan de hand is. Zo'n frame telt dus
+    niet mee vóór de knip, maar reset de teller ook niet: het geeft simpelweg geen
+    oordeel.
     """
     stukken, huidig = [], []
     ref = KleurReferentie()
-    laag = []                       # opeenvolgende detecties onder de split-drempel
+    laag = []                       # detecties sinds het eerste afwijkende frame
+    n_laag = 0                      # daarvan: het aantal met een écht oordeel
     for d in tracklet:
-        s = ref.sim(d.hist)
+        if d.ref_hist is None:
+            (laag if laag else huidig).append(d)   # geen bruikbaar histogram: geen oordeel
+            continue
+        s = ref.sim(d.ref_hist)                    # None zolang de referentie leeg is
         if s is not None and s < KLEUR_SPLIT_MIN:
             laag.append(d)
-            if len(laag) >= KLEUR_SPLIT_N:
+            n_laag += 1
+            if n_laag >= KLEUR_SPLIT_N:
                 # Aanhoudend een ander pak: knip vóór het eerste afwijkende frame.
                 if huidig:
                     stukken.append(huidig)
-                huidig, ref, laag = list(laag), KleurReferentie(), []
+                huidig, ref, laag, n_laag = list(laag), KleurReferentie(), [], 0
                 for d2 in huidig:
-                    ref.voeg_toe(d2.hist)
+                    ref.voeg_toe(d2.ref_hist)
             continue
-        huidig.extend(laag); laag = []          # korte dip (occlusie-mix): behouden
+        huidig.extend(laag); laag, n_laag = [], 0   # korte dip (occlusie-mix): behouden
         huidig.append(d)
-        ref.voeg_toe(d.hist)
+        ref.voeg_toe(d.ref_hist)
     huidig.extend(laag)
     if huidig:
         stukken.append(huidig)
@@ -302,7 +333,13 @@ def _kies_seed(tracklets, frames, doel_punt):
     pak het eerste tracklet waarvan de bounding box het klikpunt bevat (dichtstbijzijnde
     centroid bij meerdere). Zonder klik: de grootste *beweger* — mediane oppervlakte ×
     padlengte — zodat statische omstanders langs de boarding nooit gekozen worden.
+
+    Retourneert `(tracklet_of_None, klik_gemist)`. `klik_gemist` is True als er wél
+    geklikt is maar niemand onder de klik gevonden werd — dan is stilzwijgend de
+    grootste beweger gekozen en dat hoort de gebruiker te weten (het kan de verkeerde
+    schaatser zijn).
     """
+    klik_gemist = False
     if doel_punt is not None:
         dx, dy = doel_punt
         per_frame = {}
@@ -314,15 +351,19 @@ def _kies_seed(tracklets, frames, doel_punt):
                     if d.bbox[0] - 0.03 <= dx <= d.bbox[2] + 0.03
                     and d.bbox[1] - 0.03 <= dy <= d.bbox[3] + 0.03]
             if raak:
-                return min(raak, key=lambda dt: (dt[0].centroid[0] - dx) ** 2
-                                                + (dt[0].centroid[1] - dy) ** 2)[1]
-        # Niemand onder de klik gevonden → val terug op de grootste beweger.
+                # Bij meerdere treffers eerst een tracklet dat lang genoeg is voor een
+                # bruikbare kleurreferentie; is alles kort, dan telt de klik gewoon.
+                lang = [dt for dt in raak if len(dt[1]) >= SEED_MIN_LEN]
+                return min(lang or raak, key=lambda dt: (dt[0].centroid[0] - dx) ** 2
+                                                        + (dt[0].centroid[1] - dy) ** 2)[1], False
+        # Niemand onder de klik gevonden → val terug op de grootste beweger, maar meld het.
+        klik_gemist = True
     bewegers = [t for t in tracklets if _pad_lengte(t) >= MIN_VERPLAATSING]
     kandidaten = bewegers or tracklets
     if not kandidaten:
-        return None
+        return None, klik_gemist
     return max(kandidaten, key=lambda t: float(np.median([d.area for d in t]))
-                                         * max(_pad_lengte(t), 1e-6))
+                                         * max(_pad_lengte(t), 1e-6)), klik_gemist
 
 
 def _snelheid(dets):
@@ -341,86 +382,134 @@ def _stik_keten(seed, tracklets, fps):
     """
     Rijg tracklets aaneen tot één doel-keten, voor- en achterwaarts vanaf het seed-
     tracklet. Een kandidaat wordt alleen geaccepteerd als (a) zijn pakkleur bij de
-    lopende referentie past (≥ KLEUR_MATCH_MIN) en (b) zijn startpositie binnen de
+    lopende referentie past (≥ KLEUR_MATCH_MIN) en (b) zijn aansluitpositie binnen de
     poort van de constante-snelheid-voorspelling over het gat ligt. Retourneert
     (keten-detecties gesorteerd op frame, KleurReferentie).
+
+    Drie fijnere punten:
+    - de kleur wordt gemeten aan de **kant van de kandidaat die aan de keten grenst**
+      (begin bij vooruit stitchen, eind bij achteruit) — daar zijn belichting en schaal
+      het best vergelijkbaar;
+    - een kandidaat mag een paar frames met de keten **overlappen**
+      (`STITCH_MAX_OVERLAP`): rond een occlusie bestaan twee ID's kort naast elkaar, en
+      met een strikte "moet ná het einde beginnen"-eis bleef dat gat voorgoed staan.
+      Dubbele frames worden onderaan alsnog op kleur uitgedund;
+    - een **korte seed** (fragment van 1–2 detecties, goed mogelijk ná `_splits_op_kleur`)
+      geeft een kleurreferentie van één histogram; die wordt eerst op positie aangedikt
+      (`_bootstrap`) vóór de kleur als poortwachter gaat dienen.
     """
     max_gap = int(round(STITCH_MAX_GAP_S * fps))
     keten = list(seed)
     ref = KleurReferentie()
     for d in keten:
-        ref.voeg_toe(d.hist)
+        ref.voeg_toe(d.ref_hist)
     rest = [t for t in tracklets if t is not seed]
 
-    def _kleur_sim(t):
-        sims = [s for s in (ref.sim(d.hist) for d in t[:10]) if s is not None]
-        return float(np.median(sims)) if sims else None
+    def _kleur_sim(t, richting):
+        """(similarity, zeker) van de ketenkant van kandidaat `t`. `zeker` is False als
+        er alleen bbox-terugval-histogrammen zijn: die zijn niet met een masker-
+        referentie vergelijkbaar, dus dan zegt het getal niets."""
+        rand = t[:10] if richting > 0 else t[-10:]
+        sims = [s for s in (ref.sim(d.ref_hist) for d in rand) if s is not None]
+        if sims:
+            return float(np.median(sims)), True
+        sims = [s for s in (ref.sim(d.hist) for d in rand) if s is not None]
+        return (float(np.median(sims)), False) if sims else (None, False)
+
+    def _kandidaten(richting):
+        """[(tracklet, gat, aansluitende detectie)] voor deze richting. Een gat ≤ 0 is
+        overlap met de keten en mag tot STITCH_MAX_OVERLAP frames; de kandidaat moet de
+        keten wel écht verlengen."""
+        if richting > 0:
+            eind = keten[-1].frame
+            return [(t, t[0].frame - eind, t[0]) for t in rest
+                    if t[-1].frame > eind
+                    and -STITCH_MAX_OVERLAP <= t[0].frame - eind <= max_gap]
+        begin = keten[0].frame
+        return [(t, begin - t[-1].frame, t[-1]) for t in rest
+                if t[0].frame < begin
+                and -STITCH_MAX_OVERLAP <= begin - t[-1].frame <= max_gap]
+
+    def _voorspel(richting, g):
+        """Positie waar de keten na `g` frames verwacht wordt (constante snelheid)."""
+        anker = keten[-1] if richting > 0 else keten[0]
+        v = _snelheid(keten) if richting > 0 else _snelheid(keten[:SNELHEID_VENSTER])
+        return (anker.centroid[0] + richting * v[0] * g,
+                anker.centroid[1] + richting * v[1] * g)
+
+    def _afstand(d0, richting, g):
+        px, py = _voorspel(richting, g)
+        return float(np.hypot(d0.centroid[0] - px, d0.centroid[1] - py))
+
+    def _poort(g):
+        return STITCH_GATE_BASIS + STITCH_GATE_GROEI * max(g, 0)
+
+    def _opneem(t, richting):
+        rest.remove(t)
+        keten.extend(t)
+        keten.sort(key=lambda d: d.frame)
+        for d in (t if richting > 0 else reversed(t)):
+            ref.voeg_toe(d.ref_hist)
+
+    def _bootstrap():
+        """Dik een te korte seed aan met direct aansluitende fragmenten, op positie —
+        de kleurreferentie is hier immers nog te dun om iets mee te toetsen."""
+        while len(keten) < SEED_MIN_LEN:
+            keuze = None
+            for richting in (+1, -1):
+                for t, g, d0 in _kandidaten(richting):
+                    if g > BOOTSTRAP_MAX_GAP:
+                        continue
+                    afst = _afstand(d0, richting, g)
+                    if afst <= _poort(g) and (keuze is None or afst < keuze[0]):
+                        keuze = (afst, t, richting)
+            if keuze is None:
+                return
+            _opneem(keuze[1], keuze[2])
 
     def _probeer(richting):
         """richting=+1: aan het eind doorstikken; -1: vóór het begin."""
         while True:
-            if richting > 0:
-                eind = keten[-1]
-                v = _snelheid(keten)                 # snelheid aan het keteneinde
-                kandidaten = [t for t in rest if 0 < t[0].frame - eind.frame <= max_gap]
-                def gat(t): return t[0].frame - eind.frame
-                def start_det(t): return t[0]
-            else:
-                begin = keten[0]
-                v = _snelheid(keten[:SNELHEID_VENSTER])   # snelheid aan het ketenbegin
-                kandidaten = [t for t in rest if 0 < begin.frame - t[-1].frame <= max_gap]
-                def gat(t): return begin.frame - t[-1].frame
-                def start_det(t): return t[-1]
-
             beste, beste_score = None, -1.0
-            for t in kandidaten:
-                sim = _kleur_sim(t)
-                if sim is None or sim < KLEUR_MATCH_MIN:
+            for t, g, d0 in _kandidaten(richting):
+                sim, zeker = _kleur_sim(t, richting)
+                if zeker and sim < KLEUR_MATCH_MIN:
                     continue
-                g = gat(t)
-                if richting > 0:
-                    px = keten[-1].centroid[0] + v[0] * g
-                    py = keten[-1].centroid[1] + v[1] * g
-                else:
-                    px = keten[0].centroid[0] - v[0] * g
-                    py = keten[0].centroid[1] - v[1] * g
-                d0 = start_det(t)
-                afst = float(np.hypot(d0.centroid[0] - px, d0.centroid[1] - py))
-                poort = STITCH_GATE_BASIS + STITCH_GATE_GROEI * g
+                afst = _afstand(d0, richting, g)
+                # Zonder bruikbaar kleuroordeel telt alleen de positie, en dan willen we
+                # de kandidaat echt dichtbij hebben.
+                poort = _poort(g) * (1.0 if zeker else 0.5)
                 if afst > poort:
                     continue
-                score = sim - 0.5 * afst / poort
+                score = (sim if zeker else KLEUR_MATCH_MIN) - 0.5 * afst / poort
                 if score > beste_score:
                     beste, beste_score = t, score
             if beste is None:
                 return
-            rest.remove(beste)
-            keten.extend(beste)
-            keten.sort(key=lambda d: d.frame)
-            for d in (beste if richting > 0 else reversed(beste)):
-                ref.voeg_toe(d.hist)
+            _opneem(beste, richting)
 
+    _bootstrap()
     _probeer(+1)
     _probeer(-1)
     _probeer(+1)          # na terugstikken kan er vooraan óf achteraan meer passen
     keten.sort(key=lambda d: d.frame)
 
-    # Dubbele frames (licht overlappende tracklets): houd per frame de detectie die
-    # het best bij de referentie past.
+    # Dubbele frames (overlappende tracklets): houd per frame de detectie die het best
+    # bij de referentie past.
     per_frame = {}
     for d in keten:
         z = per_frame.get(d.frame)
         if z is None:
             per_frame[d.frame] = d
         else:
-            sd, sz = ref.sim(d.hist), ref.sim(z.hist)
+            sd, sz = ref.sim(d.ref_hist), ref.sim(z.ref_hist)
             if (sd or 0.0) > (sz or 0.0):
                 per_frame[d.frame] = d
     return [per_frame[f] for f in sorted(per_frame)], ref
 
 
 # ── Verfijningspass ─────────────────────────────────────────────────────────────
-def _interpoleer_doel(doel_per_frame, n_frames, fps):
+def _interpoleer_doel(doel_per_frame, fps):
     """
     Vul detectiegaten ≤ GAP_VUL_S met lineair geïnterpoleerde bboxes, zodat de
     verfijningspass daar tóch een schatting kan proberen. Retourneert
@@ -460,7 +549,7 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
     beide routes dat nooit stilletjes een andere persoon wordt overgenomen.
     Retourneert {frame: lm} met verfijnde (of herstelde) landmarks.
     """
-    plan = _interpoleer_doel(doel_per_frame, info.totaal, info.fps)
+    plan = _interpoleer_doel(doel_per_frame, info.fps)
     w, h = info.w, info.h
     uit, devs = {}, {}
     cap = cv2.VideoCapture(input_pad)
@@ -583,9 +672,12 @@ def _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h):
 
     if float(sc[list(_HALPE_BENEN)].mean()) < RTMPOSE_MIN_SCORE:
         return None, None                  # benen niet gezien (occlusie): niet vertrouwen
-    sim = ref.sim(_torso_hist(frame, kp, sc, bbox_px))
+    hist, uit_masker = _torso_hist(frame, kp, sc, bbox_px)
+    sim = ref.sim(hist)
     if echt:
-        if sim is not None and sim < KLEUR_SPLIT_MIN:
+        # Alleen een masker-histogram mag een verfijning afwijzen: de bbox-terugval
+        # bevat achtergrond en scoort ook bij de júiste schaatser laag.
+        if uit_masker and sim is not None and sim < KLEUR_SPLIT_MIN:
             return None, None              # duidelijk een ander pak in de bbox
     else:
         if sim is None or sim < KLEUR_MATCH_MIN:
@@ -639,9 +731,11 @@ def _kies_in_crop(res, crop, verwacht_xy, kant, ref):
     kandidaten = []
     for i in range(len(xy)):
         cx, cy, bw, bh = xywh[i]
-        hist = _torso_hist(crop, xy[i], conf[i],
-                           (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2))
-        sim = ref.sim(hist)
+        hist, uit_masker = _torso_hist(crop, xy[i], conf[i],
+                                       (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2))
+        # Zonder masker is de similarity niet met de referentie vergelijkbaar; dan geldt
+        # "onbekend" (None) i.p.v. een kunstmatig lage score.
+        sim = ref.sim(hist) if uit_masker else None
         afst = float(np.hypot(cx - verwacht_xy[0], cy - verwacht_xy[1])) / kant
         kandidaten.append((i, sim, afst))
 
@@ -662,7 +756,8 @@ def _kies_in_crop(res, crop, verwacht_xy, kant, ref):
 def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, yolo_model=None, horizon_deg=0.0,
-              auto_horizon=False, verfijn=True, perspectief=None):
+              auto_horizon=False, verfijn=True, perspectief=None,
+              waarschuwing_callback=None):
     """
     Volledige analyse via YOLO-pose + ByteTrack + offline doelkeuze + crop-verfijning.
     Signatuur-compatibel met schaats_analyse.analyseer() (`model_pad` — het MediaPipe
@@ -671,6 +766,11 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
 
     `perspectief` (PerspectiefConfig) werkt identiek aan de MediaPipe-backend: de
     gedeelde stappen `zet_horizon`/`verwerk_afgeleiden` doen al het werk.
+
+    `waarschuwing_callback(tekst)` krijgt meldingen over stille terugvallen in de
+    doelkeuze (nu: een muisklik die niemand raakte). Lukt de doelkeuze helemaal niet,
+    dan is dat geen waarschuwing maar een fout — dan volgt een RuntimeError i.p.v. een
+    lege analyse die er als een geldig resultaat uitziet.
     """
     info = video_info(input_pad, force_fps)
     model = YOLO(yolo_model or STANDAARD_YOLO_MODEL)
@@ -693,12 +793,23 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     tracklets = []
     for t in _bouw_tracklets(frames):
         tracklets.extend(_splits_op_kleur(t))
-    seed = _kies_seed(tracklets, frames, doel_punt)
+    seed, klik_gemist = _kies_seed(tracklets, frames, doel_punt)
+    if seed is None:
+        # Zonder seed blijft doel_per_frame leeg en loopt de rest van de pijplijn
+        # gewoon door: geen enkel frame krijgt een pose en de GUI meldt "0 afzetten"
+        # alsof dat een meting is. Liever hard falen met een begrijpelijke reden.
+        raise RuntimeError(
+            "Geen schaatser gevonden om te volgen: de detectie leverde in deze video "
+            "geen enkele persoon op. Controleer of de schaatser in beeld is en of de "
+            "video leesbaar is (codec/resolutie), en probeer eventueel een andere clip.")
+    if klik_gemist and waarschuwing_callback is not None:
+        waarschuwing_callback(
+            "Je klik kon niet aan een schaatser gekoppeld worden — op die plek is in "
+            "de eerste seconden niemand gedetecteerd. Er is nu de grootste beweger in "
+            "beeld gevolgd; controleer of dat de bedoelde schaatser is.")
 
-    doel_per_frame, ref = {}, KleurReferentie()
-    if seed is not None:
-        keten, ref = _stik_keten(seed, tracklets, info.fps)
-        doel_per_frame = {d.frame: d for d in keten}
+    keten, ref = _stik_keten(seed, tracklets, info.fps)
+    doel_per_frame = {d.frame: d for d in keten}
 
     # Pass 2: verfijning (nauwkeurigere keypoints + gaten vullen), top-down met
     # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route.
