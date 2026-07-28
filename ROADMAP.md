@@ -166,6 +166,8 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 >
 > **Eén kant wisselen** bleek er al te zijn: elke `VergelijkKant` had z'n eigen "Kies analyse..."-knop die alleen die kant vervangt (meegekomen met de `VideoSpeler`-refactor, maar nooit uit deze lijst gehaald). Wat er wél bij moest: de knop heet **"Wisselen..."** zodra er een analyse staat, er is een **✕**-knop om een kant leeg te maken (bedraad vanuit de pagina zodat de masterklok eerst losgelaten wordt), en dezelfde analyse opnieuw laden **houdt het sync-punt** — dat hoort bij de video, niet bij het laden. Een andere analyse begint nog steeds op frame 0.
 >
+> **Eén snelheid voor beide kanten:** de snelheidsregelaar per kant is weg (`VideoSpeler(toon_snelheid=False)`); de gedeelde regelaar onderaan de pagina stuurt nu ook het los afspelen van een kant. Twee video's naast elkaar op verschillend tempo laten lopen is precies wat je bij vergelijken níet wilt, en de per-kant combo nodigde daar wel toe uit.
+>
 > **Bewust niet:** nog steeds geen opgeslagen sync-punten (zie de sectie hierboven — schemabump); geen derde kant.
 
 ---

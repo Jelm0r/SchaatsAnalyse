@@ -1170,7 +1170,7 @@ class VideoSpeler(QWidget):
                                     heeft opgeslokt
     """
 
-    def __init__(self, min_grootte=(480, 320), parent=None):
+    def __init__(self, min_grootte=(480, 320), toon_snelheid=True, parent=None):
         super().__init__(parent)
 
         # Weergave-state (per speler, zodat er meerdere tegelijk kunnen draaien)
@@ -1206,13 +1206,13 @@ class VideoSpeler(QWidget):
         self.bewerk_modus = False     # stuurt de pan-vs-editor-voorrang van de muis
         self.volgen_bevroren = False  # tijdens een editor-sleep: uitsnede niet laten verspringen
 
-        self._bouw_ui(min_grootte)
+        self._bouw_ui(min_grootte, toon_snelheid)
         self.speeltimer = QTimer(self)
         self.speeltimer.timeout.connect(self._speel_tick)
         self.zet_besturing_actief(False)
 
     # ── UI opbouw ────────────────────────────────────────────────────────
-    def _bouw_ui(self, min_grootte):
+    def _bouw_ui(self, min_grootte, toon_snelheid=True):
         self._hoofd = QVBoxLayout(self)
 
         self.label = QLabel("Geen video geladen")
@@ -1240,7 +1240,11 @@ class VideoSpeler(QWidget):
             knoppen.addWidget(w)
 
         # Afspeelsnelheid (slow motion): factor waarmee de fps vermenigvuldigd wordt.
-        knoppen.addWidget(QLabel("Snelheid"))
+        # De combo bestaat altijd (hij is de bron voor `_speel_interval_ms`), maar hoeft
+        # niet zichtbaar te zijn: op de vergelijkpagina stuurt één gedeelde regelaar
+        # beide kanten, zodat de video's altijd even snel lopen.
+        self.lbl_snelheid = QLabel("Snelheid")
+        knoppen.addWidget(self.lbl_snelheid)
         self.combo_snelheid = QComboBox()
         self.combo_snelheid.setToolTip("Afspeelsnelheid — kies een lagere factor voor slow motion.")
         for label, factor in SNELHEDEN:
@@ -1248,6 +1252,8 @@ class VideoSpeler(QWidget):
         self.combo_snelheid.setCurrentIndex(SNELHEID_DEFAULT_IDX)
         self.combo_snelheid.currentIndexChanged.connect(self._zet_snelheid)
         knoppen.addWidget(self.combo_snelheid)
+        self.lbl_snelheid.setVisible(toon_snelheid)
+        self.combo_snelheid.setVisible(toon_snelheid)
 
         knoppen.addWidget(self.lbl_tijd, stretch=1)
         self._hoofd.addLayout(knoppen)
@@ -1787,7 +1793,9 @@ class VergelijkKant(QWidget):
         kop.addWidget(self.btn_leeg)
         v.addLayout(kop)
 
-        self.speler = VideoSpeler(min_grootte=(320, 200))
+        # Zonder eigen snelheidsregelaar: de gedeelde regelaar onderaan de vergelijkpagina
+        # stuurt beide kanten, zodat twee video's nooit op verschillend tempo lopen.
+        self.speler = VideoSpeler(min_grootte=(320, 200), toon_snelheid=False)
         # De HUD wordt op vaste vol-frame-posities getekend en is in een half paneel
         # onleesbaar; per kant weer aan te zetten.
         self.speler.chk_hud.setChecked(False)
@@ -2188,13 +2196,14 @@ class MainWindow(QMainWindow):
         balk.addWidget(QLabel("Snelheid"))
         self.combo_alles_snelheid = QComboBox()
         self.combo_alles_snelheid.setToolTip(
-            "Afspeelsnelheid van 'Start alles' (de snelheidskeuze per kant geldt alleen "
-            "als je die kant los afspeelt).")
+            "Afspeelsnelheid op deze pagina — geldt voor 'Start alles' én voor een kant "
+            "die je los afspeelt, zodat de video's altijd even snel lopen.")
         for label, factor in SNELHEDEN:
             self.combo_alles_snelheid.addItem(label, factor)
         self.combo_alles_snelheid.setCurrentIndex(ALLES_SNELHEID_IDX)
         self.combo_alles_snelheid.currentIndexChanged.connect(self._zet_alles_snelheid)
         balk.addWidget(self.combo_alles_snelheid)
+        self._zet_alles_snelheid()      # kanten meteen op de startsnelheid zetten
 
         balk.addStretch(1)
         v.addLayout(balk)
@@ -2915,8 +2924,15 @@ class MainWindow(QMainWindow):
         self._alles_lopend = []
 
     def _zet_alles_snelheid(self, _idx=None):
-        """Snelheid wijzigen tijdens het samen afspelen: de klok opnieuw ijken vanaf de
-        huidige stand, anders zou het doelframe terugspringen."""
+        """De gedeelde snelheid van de vergelijkpagina toepassen.
+
+        Beide kanten krijgen dezelfde factor — ook voor los afspelen, want twee video's
+        op verschillend tempo naast elkaar zijn niet te vergelijken. Draait de masterklok,
+        dan wordt die opnieuw geijkt vanaf de huidige stand, anders zou het doelframe
+        terugspringen."""
+        idx = self.combo_alles_snelheid.currentIndex()
+        for kant in (self.kant_links, self.kant_rechts):
+            kant.speler.combo_snelheid.setCurrentIndex(idx)   # herstart een lopende timer
         if not self._alles_timer.isActive():
             return
         self._alles_lopend = [(k, max(0, k.speler.huidige_idx))
