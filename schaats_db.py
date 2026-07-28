@@ -69,6 +69,7 @@ def laad_config():
     except Exception:
         cfg = {}
     cfg.setdefault("bibliotheek_pad", standaard_bibliotheek())
+    cfg.setdefault("trainer_naam", "")    # fase 4: gaat mee als analyse.aangemaakt_door
     return cfg
 
 
@@ -88,6 +89,13 @@ def bibliotheek_pad():
     if env:
         return env
     return laad_config()["bibliotheek_pad"]
+
+
+def trainer_naam():
+    """De naam van de huidige trainer (fase 4), leeg als niet ingesteld. Wordt bij
+    nieuwe analyses als aangemaakt_door bewaard, zodat in een gedeelde bibliotheek
+    zichtbaar is wie welke analyse maakte."""
+    return (laad_config().get("trainer_naam") or "").strip()
 
 
 # ── Verbinding + schema ────────────────────────────────────────────────────────
@@ -132,6 +140,7 @@ CREATE TABLE analyse(
     instellingen_json TEXT NOT NULL DEFAULT '{}',
     aangemaakt_door   TEXT NOT NULL DEFAULT '',  -- trainersnaam (fase 4)
     bewerkt           INTEGER NOT NULL DEFAULT 0,-- handmatige skelet-edits (fase 3)
+    video_bytes       INTEGER,                   -- grootte van de gekopieerde video (fase 4, cloud-sync-check)
     aangemaakt_op     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE afzet_event_cache(
@@ -149,15 +158,47 @@ CREATE TABLE afzet_event_cache(
 """
 
 
+class BibliotheekTeNieuw(RuntimeError):
+    """De bibliotheek is met een nieuwere versie van de app gemaakt (user_version >
+    SCHEMA_VERSIE). We raken hem dan niet aan: het schema kan kolommen/tabellen hebben
+    die deze versie niet kent, en zou de versie omlaag zetten (zie open_db)."""
+
+
 def open_db(bieb):
-    """Maakt de bibliotheekmap + database + schema aan als die nog niet bestaan.
-    Idempotent; aanroepen bij het opstarten en na het wisselen van bibliotheekpad."""
+    """Maakt de bibliotheekmap + database + schema aan als die nog niet bestaan, en
+    migreert een oudere database naar het huidige schema. Idempotent; aanroepen bij het
+    opstarten en na het wisselen van bibliotheekpad.
+
+    Een **nieuwere** database (gedeelde cloudmap, collega met een recentere app) wordt
+    geweigerd met `BibliotheekTeNieuw` in plaats van stilzwijgend te worden 'gedowngrade':
+    `PRAGMA user_version` omlaag zetten zou de nieuwere app bij het volgende openen z'n
+    eigen migratie opnieuw laten draaien (`duplicate column name`) en de bibliotheek
+    onbruikbaar maken. `user_version` wordt daarom alleen geschreven ná een geslaagde
+    aanmaak of migratie."""
     os.makedirs(os.path.join(bieb, MEDIA_MAP), exist_ok=True)
     with _verbind(bieb) as con:
         versie = con.execute("PRAGMA user_version").fetchone()[0]
+        if versie > SCHEMA_VERSIE:
+            raise BibliotheekTeNieuw(
+                f"Deze bibliotheek is gemaakt met een nieuwere versie van de app "
+                f"(schema v{versie}; deze app kent v{SCHEMA_VERSIE}). "
+                f"Werk de app bij om hem te kunnen openen.")
         if versie == 0:
             con.executescript(_SCHEMA)
-            con.execute(f"PRAGMA user_version = {SCHEMA_VERSIE}")
+        elif versie < SCHEMA_VERSIE:
+            _migreer(con, versie)
+        else:
+            return                        # al bij; niets te schrijven
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSIE}")
+
+
+def _migreer(con, van):
+    """Werkt een bestaande database stapsgewijs bij naar SCHEMA_VERSIE. Cloud-veilig:
+    ALTER TABLE ADD COLUMN is een kleine, in-place wijziging die één DB-bestand houdt."""
+    if van < 2:
+        # v1 → v2 (fase 4): kolom voor de video-grootte; oude rijen krijgen NULL en
+        # slaan de sync-groottecheck bij het openen dus over (alleen bestaanscheck).
+        con.execute("ALTER TABLE analyse ADD COLUMN video_bytes INTEGER")
 
 
 def _abs_pad(bieb, rel):
@@ -241,26 +282,33 @@ def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, event
     vol), dan wordt de mediamap opgeruimd en staat er nooit een halve analyse in de
     bibliotheek. Retourneert het analyse-id (UUID).
     Draait in de praktijk in de workerthread — de videokopie kan lang duren.
+    `aangemaakt_door` (fase 4) is de trainersnaam; `video_bytes` (de grootte van de
+    gekopieerde video) wordt bewaard zodat een collega die de analyse opent terwijl de
+    cloudsync nog loopt een halve download kan herkennen.
     """
     analyse_id = str(uuid.uuid4())
     doelmap = os.path.join(bieb, MEDIA_MAP, analyse_id)
     videonaam = os.path.basename(video_pad)
     try:
         os.makedirs(doelmap)
-        shutil.copy2(video_pad, os.path.join(doelmap, videonaam))
+        videokopie = os.path.join(doelmap, videonaam)
+        shutil.copy2(video_pad, videokopie)
         sla_landmarks_op(os.path.join(doelmap, NPZ_NAAM), resultaten, info)
+        video_bytes = os.path.getsize(videokopie)
 
         rel_video = f"{MEDIA_MAP}/{analyse_id}/{videonaam}"
         with _verbind(bieb) as con:
             con.execute(
                 "INSERT INTO analyse(id, schaatser_id, titel, datum, video_bestand,"
-                "                    w, h, fps, totaal_frames, backend, instellingen_json)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "                    w, h, fps, totaal_frames, backend, instellingen_json,"
+                "                    aangemaakt_door, video_bytes)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (analyse_id, schaatser_id, titel,
                  datum or date.today().isoformat(), rel_video,
                  info.w, info.h, info.fps, info.totaal,
                  _normaliseer_backend(backend),
-                 json.dumps(instellingen or {}, ensure_ascii=False)))
+                 json.dumps(instellingen or {}, ensure_ascii=False),
+                 aangemaakt_door or "", video_bytes))
             _schrijf_events_cache(con, analyse_id, events)
         return analyse_id
     except Exception:
@@ -322,6 +370,49 @@ def analyse_video_pad(bieb, analyse_id):
     if rij is None:
         raise KeyError(f"Analyse {analyse_id} staat niet in de bibliotheek.")
     return _abs_pad(bieb, rij["video_bestand"])
+
+
+# ── Gedeelde cloudmap (fase 4) ──────────────────────────────────────────────────
+
+def detecteer_conflictkopieen(bieb):
+    """Zoekt naar conflictkopieën van de database die een cloudsyncer (Google Drive,
+    OneDrive, Dropbox) kan achterlaten wanneer twee trainers bijna tegelijk schrijven —
+    bv. 'schaats-DESKTOP.db', 'schaats (1).db' of 'schaats (conflicted copy).db'.
+    Retourneert de bestandsnamen (zonder pad), gesorteerd; leeg als alles in orde is.
+
+    Bewust detectie, geen preventie: de app kan zulke kopieën niet veilig samenvoegen,
+    maar waarschuwt zodat de trainer ze handmatig kan opruimen. 'schaats.db' zelf en de
+    kortstondige '-journal' (DELETE-mode) worden overgeslagen.
+
+    Alleen namen die op onze eigen database lijken tellen mee ('schaats….db'): een
+    syncer hangt zijn markering áchter de bestandsnaam. Een willekeurige andere
+    database die iemand in de map zet is geen conflictkopie, en zou anders bij elke
+    keer openen én elke 'Vernieuwen' opnieuw een waarschuwing opleveren."""
+    try:
+        namen = os.listdir(bieb)
+    except OSError:
+        return []
+    hoofd = DB_NAAM.lower()
+    stam  = os.path.splitext(hoofd)[0]
+    kopieen = [n for n in namen
+               if n.lower().endswith(".db") and n.lower() != hoofd
+               and n.lower().startswith(stam)]
+    return sorted(kopieen)
+
+
+def video_sync_status(video_pad, verwacht_bytes):
+    """Sync-status van een gekopieerde video in een gedeelde cloudmap (fase 4):
+    - 'ontbreekt'  : het bestand staat (nog) niet op schijf;
+    - 'onvolledig' : het bestand is kleiner dan bij het opslaan (cloud downloadt nog);
+    - None         : in orde, of de verwachte grootte is onbekend (analyse van vóór v2)."""
+    if not os.path.isfile(video_pad):
+        return "ontbreekt"
+    try:
+        if verwacht_bytes and os.path.getsize(video_pad) < verwacht_bytes:
+            return "onvolledig"
+    except OSError:
+        return "ontbreekt"
+    return None
 
 
 # ── Skelet-editor (fase 3) ──────────────────────────────────────────────────────
@@ -388,6 +479,37 @@ if __name__ == "__main__":
         bieb = os.path.join(tmp, "bieb")
         open_db(bieb)
         open_db(bieb)   # idempotent
+        with _verbind(bieb) as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
+
+        # Migratie v1 → v2 (fase 4): een oude DB zonder video_bytes-kolom wordt
+        # bijgewerkt zonder dataverlies.
+        oud = os.path.join(tmp, "oud_v1")
+        os.makedirs(os.path.join(oud, MEDIA_MAP))
+        v1_schema = "\n".join(r for r in _SCHEMA.splitlines() if "video_bytes" not in r)
+        with sqlite3.connect(os.path.join(oud, DB_NAAM)) as c:
+            c.executescript(v1_schema)
+            c.execute("PRAGMA user_version = 1")
+        open_db(oud)   # migreert
+        with _verbind(oud) as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
+            assert "video_bytes" in [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
+
+        # Nieuwere DB (collega met een recentere app): weigeren, niét downgraden.
+        nieuw = os.path.join(tmp, "nieuw_v99")
+        os.makedirs(os.path.join(nieuw, MEDIA_MAP))
+        with sqlite3.connect(os.path.join(nieuw, DB_NAAM)) as c:
+            c.executescript(_SCHEMA)
+            c.execute("ALTER TABLE analyse ADD COLUMN iets_nieuws TEXT")
+            c.execute(f"PRAGMA user_version = {SCHEMA_VERSIE + 1}")
+        try:
+            open_db(nieuw)
+            raise AssertionError("nieuwere bibliotheek had geweigerd moeten worden")
+        except BibliotheekTeNieuw:
+            pass
+        with _verbind(nieuw) as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE + 1
+            assert "iets_nieuws" in [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
 
         # Env-var override voor het bibliotheekpad.
         os.environ[ENV_BIBLIOTHEEK] = bieb
@@ -409,6 +531,13 @@ if __name__ == "__main__":
             AfzetEvent(0, "links",  0,  5, 0.00, 0.20, 40.0, 38.0, 44.0),
             AfzetEvent(1, "rechts", 6, 12, 0.24, 0.48, 42.0, 40.0, 45.0,
                        opmerking="gemiste tegenafzet?"),
+            # Onvolledig: tellen mee in het aantal, maar niet in de gemiddelde hoek —
+            # anders trekken die veel te steile hoeken het gemiddelde op. Beide redenen,
+            # want `lijst_analyses` moet ze allebei uitfilteren.
+            AfzetEvent(2, "links",  13, 19, 0.52, 0.76, 79.0, 60.0, 80.0,
+                       onvolledig=ONV_AFGEKAPT),
+            AfzetEvent(3, "rechts", 20, 26, 0.80, 1.04, 83.0, 74.0, 88.0,
+                       onvolledig=ONV_GEEN_PUSH),
         ]
         video = os.path.join(tmp, "Testvideo.mp4")
         with open(video, "wb") as f:
@@ -424,20 +553,42 @@ if __name__ == "__main__":
                         "heavy": False, "backend_naam": "YOLO-pose + ByteTrack",
                         "perspectief_gebruikt": False}
         aid = sla_analyse_op(bieb, sid, "Proefanalyse", video, info, resultaten, events,
-                             backend="YOLO-pose + ByteTrack", instellingen=instellingen)
+                             backend="YOLO-pose + ByteTrack", instellingen=instellingen,
+                             aangemaakt_door="Coach Tester")
         assert os.path.isfile(os.path.join(bieb, MEDIA_MAP, aid, "Testvideo.mp4"))
         assert os.path.isfile(os.path.join(bieb, MEDIA_MAP, aid, NPZ_NAAM))
 
         la = lijst_analyses(bieb, sid)
-        assert len(la) == 1 and la[0]["aantal_afzetten"] == 2
+        assert len(la) == 1 and la[0]["aantal_afzetten"] == 4
+        # gemiddelde over (40.0, 42.0); de onvolledige 79.0 en 83.0 vallen erbuiten
         assert abs(la[0]["gem_hoek"] - 41.0) < 1e-9 and la[0]["backend"] == "yolo"
+        assert la[0]["aangemaakt_door"] == "Coach Tester"
         assert lijst_schaatsers(bieb)[0]["aantal_analyses"] == 1
 
         data = laad_analyse(bieb, aid)
         assert data["meta"]["titel"] == "Proefanalyse"
         assert data["meta"]["instellingen"] == instellingen
+        assert data["meta"]["aangemaakt_door"] == "Coach Tester"
+        assert data["meta"]["video_bytes"] == os.path.getsize(video)
         assert os.path.isfile(data["video_pad"])
         assert data["video_pad"] == analyse_video_pad(bieb, aid)
+
+        # Cloud-sync-check (fase 4): grootte klopt → None; kleiner → onvolledig; weg → ontbreekt.
+        assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"]) is None
+        assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"] + 999) == "onvolledig"
+        assert video_sync_status(os.path.join(tmp, "weg.mp4"), 100) == "ontbreekt"
+
+        # Conflictkopie-detectie (fase 4): een tweede .db-bestand wordt gemeld.
+        assert detecteer_conflictkopieen(bieb) == []
+        with open(os.path.join(bieb, "schaats-LAPTOP.db"), "wb") as f:
+            f.write(b"nep-conflictkopie")
+        assert detecteer_conflictkopieen(bieb) == ["schaats-LAPTOP.db"]
+        # ... maar een willekeurige andere database in de map is géén conflictkopie.
+        with open(os.path.join(bieb, "adressen.db"), "wb") as f:
+            f.write(b"iets heel anders")
+        assert detecteer_conflictkopieen(bieb) == ["schaats-LAPTOP.db"]
+        os.remove(os.path.join(bieb, "adressen.db"))
+        os.remove(os.path.join(bieb, "schaats-LAPTOP.db"))
         terug = resultaten_naar_arrays(data["resultaten"], data["info"])
         assert np.array_equal(terug["landmarks"], arrays["landmarks"])
 
@@ -466,7 +617,8 @@ if __name__ == "__main__":
             assert np.array_equal(hersteld["landmarks"], arrays["landmarks"])
         ververs_events_cache(bieb, aid, events)   # zoals de GUI na herstel doet
         la_h = lijst_analyses(bieb, sid)
-        assert la_h[0]["bewerkt"] == 0 and la_h[0]["aantal_afzetten"] == 2
+        assert la_h[0]["bewerkt"] == 0 and la_h[0]["aantal_afzetten"] == 4
+        assert abs(la_h[0]["gem_hoek"] - 41.0) < 1e-9   # beide onvolledig-redenen weer eruit
 
         # Fout-injectie: onleesbare video → geen DB-rij, geen (extra) mediamap.
         try:

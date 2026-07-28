@@ -163,7 +163,19 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
-## Fase 4 — Delen met meerdere trainers (gedeelde cloudmap)
+## Fase 4 — Delen met meerdere trainers (gedeelde cloudmap) ✅
+
+> **Af (20 juli 2026)** — de bibliotheek staat bij dit team in een **Google Drive**-map (Mirror). Zelftest (`python schaats_db.py`) uitgebreid met de v1→v2-migratie, conflictkopie-detectie en de aangemaakt_door/video_bytes-round-trip; headless GUI-rooktest groen in de YOLO-venv.
+>
+> **Wat er staat:**
+> - **Trainersnaam**: knop "Jouw naam..." op de startpagina (naast "Vernieuwen"), bewaard in `config.json` (`trainer_naam`, per gebruiker — niet in de gedeelde map). Gaat als `analyse.aangemaakt_door` mee bij nieuwe én batch-analyses (via `AnalyseWorker`/`BatchWorker`), en verschijnt als tooltip "Aangemaakt door …" op de titel in de analysetabel.
+> - **Conflictdetectie** (`schaats_db.detecteer_conflictkopieen`): bij het openen/wisselen van een bibliotheek en bij "Vernieuwen" wordt gewaarschuwd als er naast `schaats.db` andere `*.db`-bestanden staan (conflictkopie van de syncer, bv. `schaats-DESKTOP.db`). Detectie, geen preventie — de trainer ruimt handmatig op.
+> - **Vernieuwen-knop**: leest de bibliotheek opnieuw van schijf (`_vernieuw_bibliotheek`) zodat analyses van collega's zichtbaar worden zonder herstart; herhaalt ook de conflictcheck.
+> - **Video-sync-check**: schema-migratie naar `user_version=2` voegt `analyse.video_bytes` toe (grootte van de gekopieerde video bij het opslaan). Bij het openen bepaalt `video_sync_status()` of de video ontbreekt (nog niet gedownload) of onvolledig is (kleiner dan opgeslagen → cloud synct nog) en toont een nette melding i.p.v. een halve video te laden. Oude analyses (v1, `video_bytes` NULL) slaan de groottecheck over.
+>
+> **Afwijkingen van het plan hieronder:**
+> - De cloud-veilige SQLite-discipline (journal DELETE, korte verbindingen, busy_timeout, relatieve paden) en de bibliotheekpad-config waren al in fase 1 naar voren gehaald — hier bleef alleen trainersnaam, conflictdetectie, vernieuwen en de sync-groottecheck over.
+> - Het optionele lock-bestandje (`media/<id>/.lock`) tegen gelijktijdig bewerken van dezelfde analyse is **bewust niet gebouwd**: het is in de ROADMAP als "desgewenst" gemarkeerd en de kans is bij UUID-mappen + kleine ploeg verwaarloosbaar ("laatste schrijver wint" blijft de geaccepteerde beperking).
 
 **Doel:** het hele team kijkt in dezelfde bibliotheek.
 
@@ -282,7 +294,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 - ~~**Fase 1**: video altijd kopiëren?~~ **Besloten (jul 2026): altijd kopiëren, origineel laten staan.**
 - ~~**Fase 1**: oude "losse" analyses importeerbaar?~~ **Besloten (jul 2026): niet nodig.**
 - **Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)? Eerste versie: nee, alleen bestaande punten verslepen.
-- **Fase 4**: welke cloudprovider gebruikt het team feitelijk? (OneDrive/Dropbox/netwerkschijf — maakt voor de bouw weinig uit, wel voor het testen.)
+- ~~**Fase 4**: welke cloudprovider gebruikt het team feitelijk?~~ **Besloten (jul 2026): Google Drive** (Mirror-modus, dus alle bestanden lokaal op schijf). Conflictdetectie is provider-agnostisch (elk `*.db` naast `schaats.db`).
 - **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?
 - **Fase 6**: hoeveel meetafwijking is acceptabel voor het "snel"-profiel? (Voorstel: events moeten identiek blijven, hoeken mogen ±1° verschillen.)
 - **Fase 7** *(nice-to-have, niet nu)*: onder de huidige aanname (frontaal, horizontaal) is de perspectiefvertekening klein en deze fase geen prioriteit. Wordt pas relevant bij een schuin geplaatste camera; dán ook: welke baanlijnen zijn scherp genoeg om na te trekken en is hun onderlinge afstand bekend (schaal in meters — zonder schaal werkt de hoekcorrectie ook, alleen snelheid/slaglengte niet)? En staat de camera dan op statief, of moet het lijn-tracken uit fase 5 mee?
