@@ -42,7 +42,7 @@ import schaats_perspectief
 from schaats_analyse import (
     segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
-    torso_centroid, kader_reeks, ONV_AFGEKAPT, ONV_GEEN_PUSH,
+    torso_centroid, kader_reeks, maak_voorvulling, ONV_AFGEKAPT, ONV_GEEN_PUSH,
 )
 
 # Skelet-editor (fase 3)
@@ -75,6 +75,17 @@ LANDMARK_NAMEN = {
     29: "linkerhiel", 30: "rechterhiel",
     31: "linkerteen", 32: "rechterteen",
 }
+
+# Handmatig skelet plaatsen op een frame zonder pose. De volgorde loopt van boven naar
+# beneden en per paar links-eerst, zodat de gebruiker een vast ritme krijgt. Meer punten
+# vragen heeft geen zin: dit is precies wat de metingen gebruiken (heup/knie/enkel voor de
+# afzet-, knie- en strekhoek) plus de schouders voor de torso, waar de grijpradius en de
+# automatische zoom op rekenen. Hiel en teen (29-32) blijven op visibility 0 staan — net als
+# bij de YOLO-backend zonder RTMPose, die ze ook niet kent.
+PLAATS_VOLGORDE  = (11, 12, 23, 24, 25, 26, 27, 28)
+# Zonder deze zes is er geen meting mogelijk; het skelet mag pas vastgelegd worden als ze
+# allemaal een zichtbare positie hebben (aangeklikt óf overgenomen uit de voorvulling).
+PLAATS_VERPLICHT = (23, 24, 25, 26, 27, 28)
 
 # Inzoomen op de schaatser in de weergave
 ZOOM_MAX  = 5.0        # maximale zoomfactor van de weergave-uitsnede (handmatig: slider/wiel)
@@ -1516,6 +1527,10 @@ class VideoSpeler(QWidget):
         # tracking aan: mouseMoveEvent vuurt ook zónder ingedrukte knop, nodig voor de
         # hover-tekst die het lichaamsdeel onder de cursor benoemt in de bewerk-modus.
         self.label.setMouseTracking(True)
+        # Rechts-slepen pant (ook in de bewerk-modus, waar links bezet is). Zonder dit
+        # propageert contextMenuEvent naar het QMainWindow, dat er zijn toolbar-/dock-menu
+        # op opent — dan klapt er bij elke pan een menu open.
+        self.label.setContextMenuPolicy(Qt.PreventContextMenu)
 
     def voeg_bedieningsknop(self, w):
         """Hangt een eigenaar-specifieke knop rechts in de toggles-rij (bv. '✏ Bewerken')."""
@@ -1582,6 +1597,17 @@ class VideoSpeler(QWidget):
         self.slider.setValue(0)
         self.slider.blockSignals(False)
         self.zet_besturing_actief(True)
+
+    def herbereken_kader(self):
+        """Het auto-zoom-kader opnieuw afleiden uit de huidige resultaten.
+
+        Alleen nodig als er frames zijn bíjgekomen die eerst geen pose hadden (handmatig
+        geplaatst skelet): `kader_reeks` opent bij een gat > KADER_GAT_S naar het volle
+        beeld, dus zonder herberekening blijft juist het net gevulde frame uitgezoomd.
+        Bewust niet na elke sleep-correctie — dan zou de zoom bij elke drop verspringen."""
+        if not self.resultaten or self.video_info is None:
+            return
+        self._kader = kader_reeks(self.resultaten, self.video_info.fps or 30.0)
 
     def sluit(self):
         """Laat het videobestand los (nodig voordat de mediamap gewist kan worden) en
@@ -1880,11 +1906,13 @@ class VideoSpeler(QWidget):
 
     # ── Muis: pannen doet de speler zelf, de rest gaat naar de eigenaar ──────
     def _muis_druk(self, event):
-        # Deze tak moet bovenaan blijven: buiten de bewerk-modus is links-slepen bedoeld om
-        # het ingezoomde beeld te verschuiven (pannen), in de bewerk-modus is het = punt
-        # verplaatsen (dat handelt de eigenaar af).
-        if (not self.bewerk_modus and self._zoom_eff > 1.0
-                and event.button() == Qt.LeftButton):
+        # Deze takken moeten bovenaan blijven: buiten de bewerk-modus is links-slepen bedoeld
+        # om het ingezoomde beeld te verschuiven (pannen), in de bewerk-modus is het = punt
+        # verplaatsen of plaatsen (dat handelt de eigenaar af). Rechts-slepen pant áltijd —
+        # dat is de enige manier om te schuiven terwijl de linkerknop bezet is.
+        if self._zoom_eff > 1.0 and (event.button() == Qt.RightButton
+                                     or (not self.bewerk_modus
+                                         and event.button() == Qt.LeftButton)):
             self._pan_sleep = event.position()
             return
         if self.op_muis_druk is not None:
@@ -2138,10 +2166,13 @@ class MainWindow(QMainWindow):
 
         # Skelet-editor (fase 3) — de zoom/pan-state zit in de VideoSpeler
         self._editor_actief = False
-        self._sleep = None          # {'idx', 'j', 'start': (nx, ny)} tijdens een sleep
-        self._undo = []             # elk item: {'j', 'oud': {frame: Landmark}, 'nieuw': {...}}
+        self._sleep = None          # {'idx', 'j', 'start_lm': Landmark} tijdens een sleep
+        # Undo-items zijn getypeerd: 'sleep' verplaatst één landmark over een uitvloei-venster,
+        # 'skelet' zet een compleet handmatig geplaatst skelet neer (of weer weg).
+        self._undo = []
         self._redo = []
         self._handmatig = {}        # {frame_idx: set(landmark_idx)} — alleen voor de overlay-markering
+        self._plaats = None         # lopende plaats-reeks, zie _start_plaatsen
 
         # Vergelijkpagina: één masterklok voor "Start alles" (zie _alles_tick)
         self._alles_timer = QTimer(self)
@@ -2201,6 +2232,15 @@ class MainWindow(QMainWindow):
         cv.addWidget(self.voortgang_balk)
         self.setCentralWidget(centraal)
 
+        # Twee permanente statusbalk-widgets: hoeveel frames een skelet hebben (dekking) en
+        # de live-status van het huidige frame. Permanent, want showMessage() overschrijft
+        # de gewone statusbalk-tekst en de dekking moet altijd afleesbaar blijven.
+        self.lbl_dekking = QLabel("")
+        self.lbl_dekking.setToolTip(
+            "Aantal frames met een skelet (gedetecteerd of handmatig geplaatst).\n"
+            "Frames zonder skelet breken een afzetmeting af — met '✏ Bewerken' zijn ze "
+            "handmatig aan te vullen.")
+        self.statusBar().addPermanentWidget(self.lbl_dekking)
         self.lbl_live = QLabel("")
         self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
         self.statusBar().addPermanentWidget(self.lbl_live)
@@ -2223,7 +2263,9 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() is not self.pagina_analyse:
             if self.btn_bewerken.isChecked():
                 self.btn_bewerken.setChecked(False)   # triggert _toggle_bewerken(False)
+            self._stop_plaatsen()                     # faalveilig: geen half skelet achterlaten
             self.lbl_live.setText("")                 # geen stale status van een andere pagina
+            self.lbl_dekking.setText("")
 
     def _bouw_startpagina(self):
         """De bibliotheek (fase 1): links de schaatsers, rechts hun analyses."""
@@ -2440,11 +2482,11 @@ class MainWindow(QMainWindow):
         self.btn_vergelijk_deze.setEnabled(False)
         self.speler.voeg_bedieningsknop(self.btn_vergelijk_deze)
 
-        # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus.
-        self.editor_balk = QWidget()
-        eb = QHBoxLayout(self.editor_balk)
-        eb.setContentsMargins(0, 0, 0, 0)
-        eb.addWidget(QLabel("Uitvloeien ±"))
+        # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus. Afbrekend (WrapBalk), want
+        # met de plaats-knoppen erbij past hij op een laptopscherm niet meer op één regel —
+        # en een te brede balk tilt het venster-minimum boven de schermhoogte uit.
+        self.editor_balk = WrapBalk()
+        self.editor_balk.addWidget(QLabel("Uitvloeien ±"))
         self.spin_uitvloei = QSpinBox()
         self.spin_uitvloei.setRange(0, 60)
         self.spin_uitvloei.setValue(8)
@@ -2452,22 +2494,63 @@ class MainWindow(QMainWindow):
         self.spin_uitvloei.setToolTip(
             "Hoe ver de correctie naar de buurframes uitvloeit (cosinus-afbouw).\n"
             "0 = alleen dit frame. Stopt bij een detectiegat.")
-        eb.addWidget(self.spin_uitvloei)
+        self.editor_balk.addWidget(self.spin_uitvloei)
         self.btn_undo = QPushButton("↶ Ongedaan")
         self.btn_undo.clicked.connect(self._undo_edit)
-        eb.addWidget(self.btn_undo)
+        self.editor_balk.addWidget(self.btn_undo)
         self.btn_redo = QPushButton("↷ Opnieuw")
         self.btn_redo.clicked.connect(self._redo_edit)
-        eb.addWidget(self.btn_redo)
+        self.editor_balk.addWidget(self.btn_redo)
+        self.btn_volgend_gat = QPushButton("⏭ Volgend gat")
+        self.btn_volgend_gat.setToolTip(
+            "Spring naar het eerstvolgende frame zonder skelet.\n"
+            "Na het laatste gat begint de zoektocht weer vooraan.")
+        self.btn_volgend_gat.clicked.connect(self._ga_naar_volgend_gat)
+        self.editor_balk.addWidget(self.btn_volgend_gat)
+        self.btn_maak_skelet = QPushButton("➕ Maak skelet")
+        self.btn_maak_skelet.setToolTip(
+            "Zet een skelet op dit frame. Het wordt overgenomen van de buurframes,\n"
+            "daarna sleep je de punten naar de juiste plek — net als op elk ander frame.\n"
+            "Valt er niets over te nemen, dan vraagt het programma de punten\n"
+            "één voor één (schouders, heupen, knieën, enkels).\n"
+            "Alleen beschikbaar op een frame zonder gedetecteerde pose.")
+        self.btn_maak_skelet.clicked.connect(self._start_plaatsen)
+        self.editor_balk.addWidget(self.btn_maak_skelet)
         self.btn_herstel = QPushButton("Herstel origineel")
         self.btn_herstel.setToolTip("Zet alle landmarks terug naar de oorspronkelijke detectie.")
         self.btn_herstel.clicked.connect(self._herstel_origineel)
-        eb.addWidget(self.btn_herstel)
+        self.editor_balk.addWidget(self.btn_herstel)
         self.lbl_editor_hint = QLabel("")
         self.lbl_editor_hint.setStyleSheet("color: #888;")
-        eb.addWidget(self.lbl_editor_hint, stretch=1)
+        self.editor_balk.addWidget(self.lbl_editor_hint)
         self.editor_balk.setVisible(False)
         self.speler.voeg_onderbalk(self.editor_balk)
+
+        # Plaats-balk: alleen zichtbaar tijdens een lopende klikreeks. Apart van de
+        # editor-balk zodat de gewone bewerk-knoppen niet met de reeks-knoppen mengen.
+        self.plaats_balk = WrapBalk()
+        self.lbl_plaats = QLabel("")
+        self.lbl_plaats.setStyleSheet("font-weight: bold;")
+        self.plaats_balk.addWidget(self.lbl_plaats)
+        self.btn_plaats_vorige = QPushButton("← Vorige punt")
+        self.btn_plaats_vorige.clicked.connect(self._plaats_vorige)
+        self.plaats_balk.addWidget(self.btn_plaats_vorige)
+        self.btn_plaats_over = QPushButton("Overslaan →")
+        self.btn_plaats_over.setToolTip(
+            "Dit punt overslaan — het houdt de positie uit de voorvulling.")
+        self.btn_plaats_over.clicked.connect(self._plaats_overslaan)
+        self.plaats_balk.addWidget(self.btn_plaats_over)
+        self.btn_plaats_klaar = QPushButton("✔ Klaar")
+        self.btn_plaats_klaar.setToolTip(
+            "Het skelet vastleggen. Kan pas als heup, knie en enkel van beide benen\n"
+            "een zichtbare positie hebben — daar rusten alle metingen op.")
+        self.btn_plaats_klaar.clicked.connect(self._plaats_klaar)
+        self.plaats_balk.addWidget(self.btn_plaats_klaar)
+        self.btn_plaats_annuleer = QPushButton("✕ Annuleren")
+        self.btn_plaats_annuleer.clicked.connect(self._plaats_annuleren)
+        self.plaats_balk.addWidget(self.btn_plaats_annuleer)
+        self.plaats_balk.setVisible(False)
+        self.speler.voeg_onderbalk(self.plaats_balk)
 
         # Sneltoetsen voor undo/redo (alleen actief in bewerk-modus, zie de handlers).
         QShortcut(QKeySequence.Undo, self).activated.connect(self._undo_edit)
@@ -3454,6 +3537,7 @@ class MainWindow(QMainWindow):
 
         # Editor-status resetten (geen edit-lekkage tussen analyses); niet via de
         # toggle-handler, want de weergave wordt hieronder toch opnieuw opgebouwd.
+        self._stop_plaatsen()       # nog vóór de reset: hoort bij de vórige resultatenlijst
         self._editor_actief = False
         self._sleep = None
         self.speler.bewerk_modus = False
@@ -3465,12 +3549,14 @@ class MainWindow(QMainWindow):
         self.btn_bewerken.setChecked(False)
         self.btn_bewerken.blockSignals(False)
         self.editor_balk.setVisible(False)
+        self._sluit_plaats_balk()
 
         # Capture heropenen, zoom resetten, besturing aan — toont nog géén frame.
         self.speler.laad(info, resultaten, self.input_pad)
 
         self._vul_tabel()
         self._vul_grafiek()
+        self._update_dekking()
         self.btn_export.setEnabled(bool(events))
         # Vergelijken kan alleen met een analyse die in de bibliotheek staat — de
         # vergelijkkant laadt hem daar opnieuw uit.
@@ -3599,10 +3685,16 @@ class MainWindow(QMainWindow):
     # ── Navigatie / weergave ─────────────────────────────────────────────
     def _speler_frame_getoond(self, idx):
         """Haak van de VideoSpeler: alles wat de analysepagina aan een frame ophangt."""
+        # Wegnavigeren tijdens een plaats-reeks sluit die eerst netjes af. De idx-toets is
+        # nodig omdat _herbereken() zelf hertekent en dus hier terugkomt op hetzelfde frame.
+        if self._plaats is not None and self._plaats['idx'] != idx:
+            self._stop_plaatsen()
         resultaat = self.resultaten[idx]
         self._update_grafiek_marker(resultaat.tijd)
         self._markeer_actieve_rij(idx)
         self._update_live_status(resultaat)
+        if self._editor_actief:
+            self._update_editor_knoppen()   # "Maak skelet" alleen op een frame zonder pose
 
     def _update_live_status(self, resultaat):
         if not resultaat.pose_gevonden:
@@ -3677,11 +3769,12 @@ class MainWindow(QMainWindow):
         gemarkeerd = self._handmatig.get(self.huidige_idx, set())
         sleep_j = (self._sleep['j'] if self._sleep and self._sleep['idx'] == self.huidige_idx
                    else None)
+        doel_j = self._plaats_doelpunt()
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         try:
             for j, lm in enumerate(r.lm):
-                if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS:
+                if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS and j != doel_j:
                     continue
                 # buiten de uitsnede valt de ring buiten [0,pw]; de painter clipt hem
                 middel = QPointF((lm.x - x0n) / wn * pw, (lm.y - y0n) / hn * ph)
@@ -3692,11 +3785,31 @@ class MainWindow(QMainWindow):
                 else:
                     painter.setPen(QPen(QColor(255, 255, 255), 1))   # gewoon
                 painter.drawEllipse(middel, straal, straal)
+                if j == doel_j:
+                    # Het punt dat nu gevraagd wordt: dikke oranje ring met kruisdraad op de
+                    # voorgevulde plek. De hint-tekst alleen laat de gebruiker zoeken; dit
+                    # zegt "ongeveer hier, corrigeer maar".
+                    painter.setPen(QPen(QColor(255, 150, 0), 3))
+                    buiten = straal * 1.8
+                    painter.drawEllipse(middel, buiten, buiten)
+                    painter.drawLine(QPointF(middel.x() - buiten * 1.5, middel.y()),
+                                     QPointF(middel.x() + buiten * 1.5, middel.y()))
+                    painter.drawLine(QPointF(middel.x(), middel.y() - buiten * 1.5),
+                                     QPointF(middel.x(), middel.y() + buiten * 1.5))
         finally:
             painter.end()
 
+    def _plaats_doelpunt(self):
+        """Het landmark dat de lopende plaats-reeks nu vraagt, of None."""
+        if not self._plaats or self._plaats['idx'] != self.huidige_idx:
+            return None
+        stap = self._plaats['stap']
+        return PLAATS_VOLGORDE[stap] if 0 <= stap < len(PLAATS_VOLGORDE) else None
+
     # ── Skelet-editor: bewerk-modus + slepen (fase 3) ────────────────────────
     def _toggle_bewerken(self, actief):
+        if not actief:
+            self._stop_plaatsen()           # nooit een halve reeks achterlaten
         self._editor_actief = actief
         self.speler.bewerk_modus = actief   # stuurt de pan-vs-editor-voorrang van de muis
         self.editor_balk.setVisible(actief)
@@ -3709,9 +3822,16 @@ class MainWindow(QMainWindow):
         self.speler.toon_huidig_frame()
 
     def _update_editor_knoppen(self):
-        self.btn_undo.setEnabled(bool(self._undo))
-        self.btn_redo.setEnabled(bool(self._redo))
-        self.btn_herstel.setEnabled(self.analyse_id is not None)
+        bezig = self._plaats is not None
+        self.btn_undo.setEnabled(bool(self._undo) and not bezig)
+        self.btn_redo.setEnabled(bool(self._redo) and not bezig)
+        self.btn_herstel.setEnabled(self.analyse_id is not None and not bezig)
+        self.btn_volgend_gat.setEnabled(not bezig)
+        # Alleen aanbieden waar het zin heeft: op een frame dat al een pose heeft is
+        # slepen het gereedschap, niet plaatsen.
+        self.btn_maak_skelet.setEnabled(
+            not bezig and 0 <= self.huidige_idx < len(self.resultaten)
+            and not self.resultaten[self.huidige_idx].pose_gevonden)
 
     def _frame_bewerkbaar(self, idx):
         """Een frame is bewerkbaar als het een pose heeft die als lijst van (muteerbare)
@@ -3773,6 +3893,12 @@ class MainWindow(QMainWindow):
     def _editor_muis_druk(self, event):
         if not self._editor_actief:
             return
+        # De plaats-reeks krijgt voorrang en slokt de klik altijd op: het frame ís tijdens
+        # de reeks bewerkbaar, dus zonder deze tak zou een klik een sleep starten op een
+        # voorgevuld punt in plaats van het gevraagde punt neer te zetten.
+        if self._plaats is not None:
+            self._plaats_klik(event)
+            return
         if not self._frame_bewerkbaar(self.huidige_idx):
             self.lbl_editor_hint.setText("Dit frame heeft geen bewerkbare pose.")
             return
@@ -3785,7 +3911,7 @@ class MainWindow(QMainWindow):
         self.speler.volgen_bevroren = True
 
     def _editor_muis_beweeg(self, event):
-        if not self._editor_actief:
+        if not self._editor_actief or self._plaats is not None:
             return
         if not self._sleep:
             # geen sleep bezig → toon bij hover het lichaamsdeel onder de cursor
@@ -3801,6 +3927,8 @@ class MainWindow(QMainWindow):
         self.speler.ga_naar(idx)
 
     def _editor_muis_los(self, event):
+        if self._plaats is not None:
+            return                          # de klik is al bij het indrukken afgehandeld
         if not (self._editor_actief and self._sleep):
             self.speler.volgen_bevroren = False
             return
@@ -3825,14 +3953,217 @@ class MainWindow(QMainWindow):
             self.resultaten[f].lm[j] = Landmark(lm.x + dx * gewicht, lm.y + dy * gewicht,
                                                 lm.z, vis)
         nieuw = {f: self.resultaten[f].lm[j] for f in frames}
-        self._undo.append({'j': j, 'oud': oud, 'nieuw': nieuw})
+        self._undo.append({'type': 'sleep', 'j': j, 'oud': oud, 'nieuw': nieuw})
         self._redo.clear()
         self._handmatig.setdefault(idx, set()).add(j)
         self._na_edit()
 
-    def _na_edit(self):
-        """Na een edit/undo/redo: afgeleiden + events her-berekenen (géén smoothing),
-        weergave verversen en auto-opslaan naar de bibliotheek (per drop)."""
+    # ── Skelet plaatsen op een frame zonder pose ─────────────────────────────
+    def _gat_positie(self, idx):
+        """(hoeveelste, totaal) van frame `idx` binnen zijn aaneengesloten reeks frames
+        zónder skelet. Voor de hint: een half gedicht gat verandert de tabel nog niet,
+        want `bepaal_afzet_uit_strek` breekt de stand-run op élk skeletloos frame af."""
+        if not (0 <= idx < len(self.resultaten)) or self.resultaten[idx].pose_gevonden:
+            return (0, 0)
+        start = idx
+        while start > 0 and not self.resultaten[start - 1].pose_gevonden:
+            start -= 1
+        eind = idx
+        while eind + 1 < len(self.resultaten) and not self.resultaten[eind + 1].pose_gevonden:
+            eind += 1
+        return (idx - start + 1, eind - start + 1)
+
+    def _ga_naar_volgend_gat(self):
+        """Springt naar het eerstvolgende frame zonder skelet; wrapt na het laatste."""
+        n = len(self.resultaten)
+        if not n:
+            return
+        volgorde = list(range(self.huidige_idx + 1, n)) + list(range(0, self.huidige_idx + 1))
+        doel = next((i for i in volgorde if not self.resultaten[i].pose_gevonden), None)
+        if doel is None:
+            self.lbl_editor_hint.setText("Elk frame heeft een skelet — niets meer te doen.")
+            return
+        self.speler.ga_naar(doel)
+        hoeveelste, totaal = self._gat_positie(doel)
+        self.lbl_editor_hint.setText(
+            f"Frame {doel} — {hoeveelste} van {totaal} zonder skelet in dit gat.")
+
+    def _start_plaatsen(self):
+        """"Maak skelet" op een frame zonder pose.
+
+        Twee wegen, en de eerste is verreweg de gewone: leveren de buurframes een bruikbare
+        voorvulling, dan komt dat skelet er meteen op en corrigeer je het met de normale
+        sleep-editor — dat is intuïtiever dan acht keer een naam lezen en klikken, en het
+        houdt één manier van werken voor álle frames. Alleen als er níets is om over te
+        nemen (nergens in de analyse een pose) valt er niets te verslepen en vraagt het
+        programma de punten één voor één op in een vaste volgorde."""
+        idx = self.huidige_idx
+        if self._plaats is not None or not (0 <= idx < len(self.resultaten)):
+            return
+        r = self.resultaten[idx]
+        if r.pose_gevonden:
+            self.lbl_editor_hint.setText(
+                "Dit frame heeft al een skelet — sleep de punten die niet kloppen.")
+            return
+        info = self.video_info
+        oud_lm, oud_pose = r.lm, r.pose_gevonden
+        voorvulling = maak_voorvulling(self.resultaten, idx, info.fps or 30.0)
+        bruikbaar = all(voorvulling[j].visibility >= HANDLE_MIN_VIS for j in PLAATS_VERPLICHT)
+
+        r.lm = voorvulling
+        r.pose_gevonden = True
+        # Het kader is berekend toen dit nog een gat was — op een gat > KADER_GAT_S staat de
+        # automatische zoom volledig uit, precies wanneer je nauwkeurig moet werken.
+        self.speler.herbereken_kader()
+
+        if bruikbaar:
+            # Het skelet staat er; vanaf hier is dit een doodgewoon bewerkbaar frame.
+            self._undo.append({'type': 'skelet', 'idx': idx,
+                               'oud_lm': oud_lm, 'oud_pose': oud_pose,
+                               'nieuw_lm': list(r.lm), 'nieuw_pose': True,
+                               'geklikt': set()})
+            self._redo.clear()
+            self._na_edit()      # doorrekenen + opslaan; het frame telt nu mee
+            self.lbl_editor_hint.setText(
+                "Skelet overgenomen van de buurframes — sleep de punten naar de juiste plek. "
+                f"(Uitvloeien staat op ±{self.spin_uitvloei.value()} frames.)")
+            return
+
+        # Niets om over te nemen: punt voor punt vragen. Doorrekenen moet hier al, want
+        # zonder lm_data/been/hoek loopt de eerstvolgende hertekening (teken_been_overlay,
+        # _update_live_status) stuk op een frame dat zegt een pose te hebben. Opslaan nog
+        # niet — de gebruiker kan de reeks nog afbreken.
+        self._plaats = {'idx': idx, 'stap': 0, 'geklikt': set(),
+                        'oud_lm': oud_lm, 'oud_pose': oud_pose}
+        self._herbereken()
+        self.speler.volgen_bevroren = True   # uitsnede mag niet verspringen tussen klikken
+        self.plaats_balk.setVisible(True)
+        self._toon_plaats_stap()
+
+    def _toon_plaats_stap(self):
+        """Hint + knopstatus voor de huidige stap; ververst ook het beeld (doelpunt-ring)."""
+        if self._plaats is None:
+            return
+        stap, n = self._plaats['stap'], len(PLAATS_VOLGORDE)
+        if stap < n:
+            naam = LANDMARK_NAMEN.get(PLAATS_VOLGORDE[stap], f"punt {PLAATS_VOLGORDE[stap]}")
+            self.lbl_plaats.setText(f"Klik: {naam}  ({stap + 1} van {n})")
+        else:
+            self.lbl_plaats.setText(f"Alle {n} punten gehad — leg het skelet vast.")
+        self.btn_plaats_vorige.setEnabled(stap > 0)
+        self.btn_plaats_over.setEnabled(stap < n)
+        self.btn_plaats_klaar.setEnabled(self._plaats_compleet())
+        hoeveelste, totaal = self._gat_positie(self._plaats['idx'])
+        rest = (f"  ·  frame {hoeveelste} van {totaal} in dit gat" if totaal > 1 else "")
+        self.lbl_editor_hint.setText(
+            "Rechts slepen = beeld verschuiven, muiswiel = zoomen." + rest)
+        self._update_editor_knoppen()
+        self.speler.toon_huidig_frame()
+
+    def _plaats_compleet(self):
+        """Mag het skelet vastgelegd worden? Alleen als elk meetpunt een zichtbare positie
+        heeft — anders belandt er een frame met heup, knie en enkel op één punt in de
+        tabel, en dat leest als een afzethoek van 0°."""
+        if self._plaats is None:
+            return False
+        lm = self.resultaten[self._plaats['idx']].lm
+        return all(lm[j].visibility >= HANDLE_MIN_VIS for j in PLAATS_VERPLICHT)
+
+    def _plaats_klik(self, event):
+        if self._plaats is None:
+            return
+        stap = self._plaats['stap']
+        if stap >= len(PLAATS_VOLGORDE):
+            self.lbl_plaats.setText("Alle punten gehad — klik op ✔ Klaar.")
+            return
+        norm = self.speler.widget_naar_norm(event.position())
+        if norm is None or not (0.0 <= norm[0] <= 1.0 and 0.0 <= norm[1] <= 1.0):
+            # Niet klemmen: dat zou de knie stilzwijgend op de beeldrand leggen.
+            self.lbl_editor_hint.setText("Klik binnen het beeld.")
+            return
+        j = PLAATS_VOLGORDE[stap]
+        self._zet_landmark(self._plaats['idx'], j, norm[0], norm[1], vis=1.0)
+        self._plaats['geklikt'].add(j)
+        self._handmatig.setdefault(self._plaats['idx'], set()).add(j)
+        self._plaats['stap'] = stap + 1
+        self._toon_plaats_stap()
+
+    def _plaats_vorige(self):
+        if self._plaats is not None and self._plaats['stap'] > 0:
+            self._plaats['stap'] -= 1
+            self._toon_plaats_stap()
+
+    def _plaats_overslaan(self):
+        if self._plaats is not None and self._plaats['stap'] < len(PLAATS_VOLGORDE):
+            self._plaats['stap'] += 1
+            self._toon_plaats_stap()
+
+    def _plaats_klaar(self):
+        if self._plaats is None:
+            return
+        if not self._plaats_compleet():
+            ontbreekt = ", ".join(
+                LANDMARK_NAMEN.get(j, str(j)) for j in PLAATS_VERPLICHT
+                if self.resultaten[self._plaats['idx']].lm[j].visibility < HANDLE_MIN_VIS)
+            self.lbl_editor_hint.setText(f"Nog aan te wijzen: {ontbreekt}.")
+            return
+        # Eerst de state loslaten: _na_edit hertekent, en dat vuurt _speler_frame_getoond
+        # weer terug hierheen — met een gevulde _plaats zou dat een lus worden.
+        plaats, self._plaats = self._plaats, None
+        idx = plaats['idx']
+        self._sluit_plaats_balk()
+        self._undo.append({'type': 'skelet', 'idx': idx,
+                           'oud_lm': plaats['oud_lm'], 'oud_pose': plaats['oud_pose'],
+                           'nieuw_lm': list(self.resultaten[idx].lm), 'nieuw_pose': True,
+                           'geklikt': set(plaats['geklikt'])})
+        self._redo.clear()
+        self.speler.herbereken_kader()
+        self._na_edit()
+
+    def _plaats_annuleren(self):
+        """Terug naar de toestand vóór het plaatsen — het frame is weer een gat."""
+        if self._plaats is None:
+            return
+        plaats, self._plaats = self._plaats, None
+        idx = plaats['idx']
+        r = self.resultaten[idx]
+        r.lm, r.pose_gevonden = plaats['oud_lm'], plaats['oud_pose']
+        self._handmatig.pop(idx, None)
+        self._sluit_plaats_balk()
+        self.speler.herbereken_kader()
+        self._herbereken()               # bewust niet opslaan: er is niets veranderd
+        self.lbl_editor_hint.setText("Skelet plaatsen geannuleerd.")
+
+    def _sluit_plaats_balk(self):
+        self.plaats_balk.setVisible(False)
+        self.lbl_plaats.setText("")
+        self.speler.volgen_bevroren = False
+
+    def _stop_plaatsen(self):
+        """Faalveilige uitgang voor elk pad dat de reeks kan onderbreken (wegnavigeren,
+        bewerk-modus uit, paginawissel, andere analyse, venster sluiten). Nooit een half
+        skelet laten staan.
+
+        Heeft de gebruiker punten aangewezen en is het skelet bruikbaar, dan blijft dat
+        werk behouden. Heeft hij nog niets aangeklikt, dan gaat het weg — anders zou per
+        ongeluk wegscrubben stilzwijgend een voorvulling als meting vastleggen (inclusief
+        `analyse.bewerkt = 1`) terwijl de gebruiker niets heeft besloten."""
+        if self._plaats is None:
+            return
+        if self._plaats['geklikt'] and self._plaats_compleet():
+            self._plaats_klaar()
+        else:
+            self._plaats_annuleren()
+
+    def _herbereken(self):
+        """Afgeleiden + events opnieuw uit de huidige landmarks halen (géén smoothing) en
+        de hele weergave bijwerken — zónder op te slaan.
+
+        Los van `_bewaar` omdat een handmatig skelet dat nog geplaatst wordt al wél
+        doorgerekend moet zijn (anders tekent de overlay op een lege `lm_data` en klapt
+        `teken_been_overlay`/`_update_live_status` eruit), maar nog niét opgeslagen mag
+        worden: `bewaar_bewerkte_landmarks` zet `analyse.bewerkt = 1` en legt de pristine
+        backup aan, en dat is onomkeerbaar als de gebruiker de reeks annuleert."""
         info = self.video_info
         verwerk_afgeleiden(self.resultaten, info.w, info.h, info.fps,
                            self.smooth_n, self.threshold)
@@ -3840,8 +4171,29 @@ class MainWindow(QMainWindow):
         self._vul_tabel()
         self._vul_grafiek()
         self.btn_export.setEnabled(bool(self.events))
+        self._update_dekking()
         self.speler.toon_huidig_frame()
         self._update_editor_knoppen()
+
+    def _update_dekking(self):
+        """Statusbalk-teller: hoeveel frames hebben een skelet? Frames zonder breken een
+        afzetmeting af, dus dit is de maat voor 'hoeveel werk ligt er nog'."""
+        if not self.resultaten:
+            self.lbl_dekking.setText("")
+            return
+        totaal = len(self.resultaten)
+        met = sum(1 for r in self.resultaten if r.pose_gevonden)
+        self.lbl_dekking.setText(f"Skelet: {met} van {totaal} frames")
+        kleur = "#888" if met == totaal else "#c80"
+        self.lbl_dekking.setStyleSheet(f"padding-right: 14px; color: {kleur};")
+
+    def _na_edit(self):
+        """Na een edit/undo/redo: herberekenen én auto-opslaan naar de bibliotheek."""
+        self._herbereken()
+        self._bewaar()
+
+    def _bewaar(self):
+        info = self.video_info
         if self.analyse_id is not None:
             try:
                 schaats_db.bewaar_bewerkte_landmarks(
@@ -3852,23 +4204,38 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_editor_hint.setText("Niet opgeslagen (geen bibliotheek-analyse).")
 
+    def _pas_edit_toe(self, edit, kant):
+        """Zet één undo-item terug of opnieuw; `kant` is 'oud' of 'nieuw'."""
+        if edit.get('type') == 'skelet':
+            idx = edit['idx']
+            lm, pose = edit[f'{kant}_lm'], edit[f'{kant}_pose']
+            r = self.resultaten[idx]
+            r.lm = list(lm) if lm is not None else None
+            r.pose_gevonden = pose
+            # De groene "handmatig"-markering hoort bij een skelet dat er staat.
+            if pose and lm is not None:
+                self._handmatig[idx] = set(edit.get('geklikt', ()))
+            else:
+                self._handmatig.pop(idx, None)
+            self.speler.herbereken_kader()   # de dekking veranderde, dus de auto-zoom ook
+            return
+        j = edit['j']
+        for f, lm in edit[kant].items():
+            self.resultaten[f].lm[j] = lm
+
     def _undo_edit(self):
-        if not (self._editor_actief and self._undo):
+        if not (self._editor_actief and self._undo) or self._plaats is not None:
             return
         edit = self._undo.pop()
-        j = edit['j']
-        for f, lm in edit['oud'].items():
-            self.resultaten[f].lm[j] = lm
+        self._pas_edit_toe(edit, 'oud')
         self._redo.append(edit)
         self._na_edit()
 
     def _redo_edit(self):
-        if not (self._editor_actief and self._redo):
+        if not (self._editor_actief and self._redo) or self._plaats is not None:
             return
         edit = self._redo.pop()
-        j = edit['j']
-        for f, lm in edit['nieuw'].items():
-            self.resultaten[f].lm[j] = lm
+        self._pas_edit_toe(edit, 'nieuw')
         self._undo.append(edit)
         self._na_edit()
 
@@ -4014,6 +4381,7 @@ class MainWindow(QMainWindow):
         if not self._stop_workers():
             event.ignore()
             return
+        self._stop_plaatsen()   # een lopende reeks nog vastleggen of terugdraaien
         self._pauzeer_alles()
         self.speler.sluit()
         self.kant_links.leeg()

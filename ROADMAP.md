@@ -197,7 +197,17 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 > **Afwijkingen van het plan hieronder:**
 > - Grijpradius schaalt met de torso-lengte op scherm (`GRIJP_MIN_PX`/`GRIJP_MAX_PX`) i.p.v. een vaste 12 px — leesbaar bij een verre schaatser en op elke zoomstand.
 > - Pixel-correct bewerken op elke zoomstand vroeg eerst de **crop-and-magnify-zoom** (los gebouwd, zelfde commit; zie CLAUDE.md `_toon_pixmap`/`_crop_norm`).
-> - Punten *plaatsen* op frames zónder pose: niet gedaan (conform de openstaande vraag: eerste versie alleen bestaande punten verslepen).
+> - Punten *plaatsen* op frames zónder pose: niet in de eerste versie — **alsnog gebouwd op 31 juli 2026**, zie hieronder.
+
+> **Aanvulling: skelet plaatsen op een frame zonder pose (31 juli 2026)** — headless rooktest (klikreeks, undo/redo, annuleren, wegnavigeren) + `python schaats_db.py` groen.
+>
+> **Waarom:** een frame zonder pose breekt in `bepaal_afzet_uit_strek` de stand-run af en levert `ONV_AFGEKAPT` — twee ontbrekende frames kosten zo een hele afzetmeting. Kan de trainer het gat met de hand dichten, dan komt de meting terug. Dat is de eigenlijke opbrengst; het skelet zelf is maar het middel.
+>
+> **Wat er staat:** in de bewerk-modus is op een gat-frame **"➕ Maak skelet"** actief. Normaal gesproken wordt het skelet dan **overgenomen van de buurframes** (`maak_voorvulling` in `schaats_analyse.py`: interpoleren bij een kort gat, kopiëren bij een lang gat) en corrigeer je het met de gewone sleep-editor — één manier van werken voor álle frames. Alleen als er níets over te nemen valt (nergens in de analyse een pose) is er ook niets te verslepen; dan vraagt het programma de punten één voor één in vaste volgorde (schouders, heupen, knieën, enkels — `PLAATS_VOLGORDE`, 8 klikken) met het gevraagde punt als oranje ring-met-kruisdraad in beeld. Zoomen en pannen blijven beschikbaar — muiswiel zoomt en **rechts-slepen pant** (nieuw in `VideoSpeler`, ook op de vergelijkpagina). Statusbalk-teller **"Skelet: 123 van 126 frames"** plus een knop **"⏭ Volgend gat"**. Undo/redo maakt een geplaatst skelet in één stap ongedaan. Zie CLAUDE.md voor de details.
+>
+> **Keuzes:** slepen boven klikken — een klikreeks van acht namen lezen is bewerkelijker dan een skelet bijstellen dat er al ongeveer goed staat, en het houdt de bediening gelijk aan die van elk ander frame. 8 punten en niet 33 in de klikreeks — precies wat de metingen gebruiken plus de torso waar grijpradius en auto-zoom op rekenen; hiel/teen blijven op visibility 0, net als bij de YOLO-backend zonder RTMPose. Een klikreeks vastleggen kan pas als heup/knie/enkel van beide benen staan (anders komt er een 0°-hoek in de tabel), en wegnavigeren zonder ook maar één klik annuleert i.p.v. de voorvulling stilzwijgend als meting vast te leggen.
+>
+> **Bewust niet:** geen "vul het hele gat in één keer"-knop (interpoleren over een gat is precies wat de detector al niet kon); geen persistente markering welk frame handmatig is (de groene ringen zijn per sessie).
 
 **Doel:** na een analyse kleine detectiefoutjes repareren door landmarkpunten te verslepen; werkt op elke uit de database geladen analyse.
 
@@ -345,7 +355,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
 | — | Batch-analyse (extra, buiten de fasering) | ✅ **af** (20 jul 2026) |
 | — | Vergelijk schaatsers + `VideoSpeler`-refactor (extra) | ✅ **af** (27 jul 2026) |
-| 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026) |
+| 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026; skelet plaatsen op gat-frames 31 jul 2026) |
 | 4 | Instellingen, gedeelde map, conflictafhandeling | ✅ **af** (20 jul 2026) |
 | 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
 | 6 | Sneller analyseren | gefaseerd: stappen 1+2+6 in 1 sessie; export/DirectML apart experiment |
@@ -355,7 +365,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 
 - ~~**Fase 1**: video altijd kopiëren?~~ **Besloten (jul 2026): altijd kopiëren, origineel laten staan.**
 - ~~**Fase 1**: oude "losse" analyses importeerbaar?~~ **Besloten (jul 2026): niet nodig.**
-- **Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)? Eerste versie: nee, alleen bestaande punten verslepen.
+- ~~**Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)?~~ **Gebouwd (31 jul 2026): ja** — begeleide klikreeks van 8 punten met voorvulling uit de buurframes, plus een dekkingsteller. Zie de aanvulling bij fase 3.
 - ~~**Fase 4**: welke cloudprovider gebruikt het team feitelijk?~~ **Besloten (jul 2026): Google Drive** (Mirror-modus, dus alle bestanden lokaal op schijf). Conflictdetectie is provider-agnostisch (elk `*.db` naast `schaats.db`).
 - **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?
 - **Fase 6**: hoeveel meetafwijking is acceptabel voor het "snel"-profiel? (Voorstel: events moeten identiek blijven, hoeken mogen ±1° verschillen.)

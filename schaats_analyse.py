@@ -1280,6 +1280,50 @@ def kader_reeks(resultaten, fps):
     return [(float(cx[i]), float(cy[i]), float(straal[i])) for i in range(len(resultaten))]
 
 
+def maak_voorvulling(resultaten, idx, fps, n_lm=33):
+    """
+    Een startskelet voor frame `idx`, dat zelf géén pose heeft: de GUI zet dit neer als
+    de gebruiker handmatig een skelet gaat plaatsen, zodat hij bestaande punten alleen
+    hoeft te corrigeren in plaats van alle acht opnieuw aan te wijzen.
+
+    Ligt het frame tússen twee pose-frames en is het gat kort (≤ `INTERP_MAX_S` — dezelfde
+    grens die `_begrens_interpolatie` in de smoothing hanteert), dan wordt er lineair
+    tussen die twee geïnterpoleerd. Over een langer gat is een blend van twee poses
+    anatomische onzin (de ledematen smelten door elkaar) en is de dichtstbijzijnde pose,
+    hoe verouderd ook, een eerlijker startpunt. Is er in de hele analyse geen enkele pose,
+    dan komt alles in het beeldmidden te staan met visibility 0 — onzichtbaar, zodat er
+    niets op het scherm staat dat er niet is.
+
+    Retourneert altijd een lijst van precies `n_lm` `Landmark`s (nooit None): de
+    serialisatie schrijft in een vaste (n, 33, 3)-array.
+    """
+    if not (0 <= idx < len(resultaten)):
+        return [Landmark(0.5, 0.5, 0.0, 0.0) for _ in range(n_lm)]
+
+    def _bruikbaar(i):
+        r = resultaten[i]
+        return r.pose_gevonden and isinstance(r.lm, (list, tuple)) and len(r.lm) >= n_lm
+
+    voor = next((i for i in range(idx - 1, -1, -1) if _bruikbaar(i)), None)
+    na = next((i for i in range(idx + 1, len(resultaten)) if _bruikbaar(i)), None)
+    if voor is None and na is None:
+        return [Landmark(0.5, 0.5, 0.0, 0.0) for _ in range(n_lm)]
+
+    max_gat = max(1, int(round(INTERP_MAX_S * (fps or 30.0))))
+    if voor is not None and na is not None and (na - voor - 1) <= max_gat:
+        t = (idx - voor) / (na - voor)
+        a, b = resultaten[voor].lm, resultaten[na].lm
+        return [Landmark(a[j].x + (b[j].x - a[j].x) * t,
+                         a[j].y + (b[j].y - a[j].y) * t,
+                         0.0,
+                         a[j].visibility + (b[j].visibility - a[j].visibility) * t)
+                for j in range(n_lm)]
+
+    bron = voor if na is None else (na if voor is None else
+                                    (voor if idx - voor <= na - idx else na))
+    return [Landmark(p.x, p.y, 0.0, p.visibility) for p in resultaten[bron].lm[:n_lm]]
+
+
 def wijs_afzetbeen_cyclus(resultaten, h, fps):
     """
     Wijst per pose-frame het afzetbeen (standbeen) toe op basis van de schaatscyclus
