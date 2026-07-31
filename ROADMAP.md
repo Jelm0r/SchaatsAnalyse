@@ -119,6 +119,22 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
+## Extra — Appversie per analyse + info-tabje
+
+**Doel:** tijdens het ontwikkelen wijzigt de trackinglogica (YOLO/RTMPose-backend, `schaats_analyse.py`-kern) regelmatig; van een opgeslagen analyse moet je achteraf kunnen zien met welke versie van de app hij is gemaakt, zodat een vreemde meting te verklaren is ("dit is met de oude L/R-fixer gedaan") en oude analyses eventueel herkenbaar zijn als "opnieuw analyseren met de huidige code kan andere resultaten geven".
+
+**Aanpak:**
+
+- **Versie vastleggen**: een `APP_VERSIE`-constante (of de `git rev-parse HEAD`-commit-hash + datum, als de repo aanwezig is — commit-hash is preciezer dan een handmatig opgehoogd nummer en kost geen discipline om te onthouden bij te werken) wordt bij `sla_analyse_op` in `instellingen_json` weggeschreven, samen met `backend_naam` (die er al in staat). Geen schemabump nodig — dit hangt al in het JSON-veld.
+- **Info-tabje/dialoog per analyse**: knop of menu-item op de weergavepagina ("Info..." naast "Bewerken"/"⇄ Vergelijk met...") toont een klein overzicht: appversie/commit, backend (yolo/mediapipe), analysedatum, `aangemaakt_door`, en de belangrijkste instellingen uit `instellingen_json` (smoothing, drempel, heavy-model, perspectief aan/uit). Puur informatief, geen invoerveld.
+- **Bibliotheeklijst**: optioneel de versie ook als tooltip op de analyse-rij (zelfde plek als de bestaande "Aangemaakt door …"-tooltip), zodat je niet per se hoeft te openen om te zien met welke versie iets gemaakt is.
+
+**Openstaande vraag:** commit-hash (nauwkeurig, maar onleesbaar voor een trainer) versus een handmatig bijgehouden mens-leesbaar versienummer (bv. "2026.07-yolo26") — mogelijk allebei: hash voor jezelf, kort label voor de trainer.
+
+**Klaar wanneer:** een analyse uit de bibliotheek openen en met één klik zien welke appversie/commit de tracking heeft gedraaid.
+
+---
+
 ## Extra — Batch-analyse ✅
 
 > **Af (20 juli 2026)** — buiten de fasering, bovenop de fase 1-flow. Meerdere video's in één keer analyseren.
