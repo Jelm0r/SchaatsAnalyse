@@ -20,7 +20,9 @@ import time
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPointF, QEventLoop
+from PySide6.QtCore import (
+    Qt, QTimer, QThread, Signal, QPointF, QEventLoop, QSize, QRect, QPoint, QMargins,
+)
 from PySide6.QtGui import (
     QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence,
 )
@@ -31,7 +33,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QToolBar, QStackedWidget, QSpinBox,
     QDoubleSpinBox, QDialog, QRadioButton, QComboBox, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QInputDialog,
-    QDialogButtonBox, QToolTip,
+    QDialogButtonBox, QToolTip, QLayout, QSizePolicy,
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
@@ -95,6 +97,10 @@ KADER_MARGE = 0.15
 SNELHEDEN = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25), ("⅛×", 0.125), ("1/16×", 0.0625)]
 SNELHEID_DEFAULT_IDX = 0
 
+# Breedte van de transportknoppen (⏮ ⏪ ▶ ⏩ ⏭): ze dragen één teken, dus de
+# Qt-standaardbreedte voor tekstknoppen is verspilde ruimte op een smal scherm.
+TRANSPORT_KNOP_BREEDTE = 46
+
 # Vergelijkpagina: interval van de masterklok die beide video's tegelijk aanstuurt. Dit is
 # alleen een bovengrens op de vloeiendheid — het doelframe volgt uit de wandkloktijd, dus
 # de klok corrigeert zichzelf en er ontstaat geen drift.
@@ -116,6 +122,189 @@ IS_YOLO = BACKEND_NAAM.startswith("YOLO")
 _MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 STANDAARD_MODEL = os.path.join(_MODEL_DIR, "pose_landmarker_full.task")
 HEAVY_MODEL = os.path.join(_MODEL_DIR, "pose_landmarker_heavy.task")
+
+
+# Ruimte die de vensterrand (titelbalk + kaders) buiten de inhoud inneemt. `resize()` stelt
+# de inhoudsmaat in, dus zonder deze marge steekt een venster op schermhoogte onderlangs weg
+# achter de taakbalk. Ruim genomen; het gaat om een ondergrens, niet om precisie.
+VENSTER_RAND = QMargins(8, 40, 8, 8)
+
+
+def zet_venstergrootte(venster, gewenste_breedte, gewenste_hoogte, maximaliseer=False):
+    """Past de venstergrootte aan het beschikbare scherm aan en centreert het venster.
+
+    Een vaste pixelmaat (1400x820 voor het hoofdvenster) valt op een kleiner laptopscherm
+    buiten beeld. Past de gewenste maat niet, dan gaat het hoofdvenster **gemaximaliseerd**
+    open (`maximaliseer=True`): dat vult de hoogte precies en scheelt de gebruiker het
+    handmatig goedzetten bij elke start. Dialogen worden alleen geklemd en gecentreerd.
+
+    Let op: `resize()` kan de layout niet overrulen — is de `minimumSizeHint` van de inhoud
+    breder dan het scherm, dan wordt het venster alsnog te groot. Daarom breken de brede
+    bedieningsbalken in `VideoSpeler` af met een `WrapBalk`; zie daar.
+    """
+    scherm = venster.screen() or QApplication.primaryScreen()
+    if scherm is None:
+        venster.resize(gewenste_breedte, gewenste_hoogte)
+        return
+    beschikbaar = scherm.availableGeometry()
+    if maximaliseer and (gewenste_breedte > beschikbaar.width()
+                         or gewenste_hoogte > beschikbaar.height()):
+        # setWindowState i.p.v. showMaximized(): het venster mag hier nog niet in beeld
+        # springen — de caller bepaalt wanneer er getoond wordt. Echt maximaliseren i.p.v.
+        # naar de schermmaat resizen, want `resize()` zet de *inhoud*: de titelbalk komt daar
+        # nog bovenop en zou de statusbalk onder de taakbalk schuiven.
+        venster.resize(beschikbaar.size().shrunkBy(VENSTER_RAND))
+        venster.setWindowState(venster.windowState() | Qt.WindowMaximized)
+        return
+    # Ruimte laten voor de vensterrand: `resize()` gaat over de inhoud, de titelbalk zit
+    # daarbuiten — zonder marge valt de onderrand achter de taakbalk.
+    breedte = min(gewenste_breedte, beschikbaar.width() - VENSTER_RAND.left()
+                  - VENSTER_RAND.right())
+    hoogte = min(gewenste_hoogte, beschikbaar.height() - VENSTER_RAND.top()
+                 - VENSTER_RAND.bottom())
+    venster.resize(breedte, hoogte)
+    x = beschikbaar.x() + (beschikbaar.width() - breedte) // 2
+    y = beschikbaar.y() + (beschikbaar.height() - hoogte) // 2
+    venster.move(x, y)
+
+
+class FlowLayout(QLayout):
+    """Layout die zijn items op een regel zet en **afbreekt** als de breedte niet meelukt.
+
+    Nodig omdat de bedieningsbalken van `VideoSpeler` (laag-toggles + zoomregelaars, samen
+    ~774 px) als `QHBoxLayout` een minimumbreedte van 774 px eisen. Twee spelers naast
+    elkaar op de vergelijkpagina maakten daar 1607 px van — breder dan een 1280 px
+    laptopscherm, en een `QMainWindow` kan niet kleiner dan zijn `minimumSizeHint`, dus
+    `resize()` werd domweg genegeerd. Afbrekend is de minimumbreedte die van het bréédste
+    losse item (~138 px) en past het venster op elk scherm; op een breed scherm blijft het
+    één regel en ziet het er precies zo uit als voorheen.
+    """
+
+    def __init__(self, parent=None, marge=0, tussenruimte=6, min_breedte=0):
+        super().__init__(parent)
+        self._items = []
+        self._tussenruimte = tussenruimte
+        self._min_breedte = min_breedte
+        self.setContentsMargins(marge, marge, marge, marge)
+
+    # ── QLayout-plichten ─────────────────────────────────────────────────
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addStretch(self, _factor=1):
+        """No-op: een afbrekende balk lijnt links uit, een rekstuk heeft geen betekenis.
+        Bestaat zodat aanroepers die van een QHBoxLayout komen niet hoeven te veranderen."""
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    # ── Hoogte volgt uit de breedte ──────────────────────────────────────
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, breedte):
+        return self._leg_uit(QRect(0, 0, breedte, 0), alleen_meten=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._leg_uit(rect, alleen_meten=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        # De breedte van het breedste item — daaronder past geen enkele regel meer.
+        maat = QSize()
+        for item in self._items:
+            maat = maat.expandedTo(item.minimumSize())
+        marges = self.contentsMargins()
+        maat = maat + QSize(marges.left() + marges.right(), marges.top() + marges.bottom())
+        # Deze breedte is niet alleen een ondergrens: Qt vraagt de minimumhóogte van een
+        # hoogte-volgt-breedte-item op door `heightForWidth()` hier op te roepen. Met de
+        # breedte van één item breekt de balk in elf regels af en groeit het venster-minimum
+        # met ~280 px in de hoogte. Vandaar een realistische ondergrens (zie WrapBalk).
+        return maat.expandedTo(QSize(self._min_breedte, 0))
+
+    def _leg_uit(self, rect, alleen_meten):
+        """Plaatst de items regel voor regel; retourneert de benodigde totale hoogte.
+
+        Twee doorgangen: eerst de regelindeling (en dus de hoogte van elke regel), daarna het
+        plaatsen. Dat is nodig om **verticaal te centreren** — een label van 16 px hoort niet
+        bovenaan een regel met vinkjes van 24 px te bungelen.
+        """
+        marges = self.contentsMargins()
+        vak = rect.adjusted(marges.left(), marges.top(), -marges.right(), -marges.bottom())
+
+        regels = []                       # [(items, regelhoogte)]
+        huidig, breedte, regelhoogte = [], 0, 0
+        for item in self._items:
+            maat = item.sizeHint()
+            erbij = maat.width() if not huidig else self._tussenruimte + maat.width()
+            if huidig and breedte + erbij > vak.width():
+                regels.append((huidig, regelhoogte))
+                huidig, breedte, regelhoogte = [], 0, 0
+                erbij = maat.width()
+            huidig.append(item)
+            breedte += erbij
+            regelhoogte = max(regelhoogte, maat.height())
+        if huidig:
+            regels.append((huidig, regelhoogte))
+
+        y = vak.y()
+        for items, hoogte in regels:
+            if not alleen_meten:
+                x = vak.x()
+                for item in items:
+                    maat = item.sizeHint()
+                    item.setGeometry(QRect(QPoint(x, y + (hoogte - maat.height()) // 2), maat))
+                    x += maat.width() + self._tussenruimte
+            y += hoogte + self._tussenruimte
+        totaal = (y - self._tussenruimte - vak.y()) if regels else 0
+        return totaal + marges.top() + marges.bottom()
+
+
+class WrapBalk(QWidget):
+    """Draagwidget voor een `FlowLayout`, zodat een QVBoxLayout de afbrekende balk als
+    gewoon item kan opnemen (en de hoogte-uit-breedte netjes doorgeeft)."""
+
+    # Ondergrens voor de breedte van de balk. Niet cosmetisch: een QVBoxLayout leidt de
+    # minimumhoogte van een hoogte-volgt-breedte-item af door `heightForWidth()` op te vragen
+    # bij de *minimale* breedte. Zonder ondergrens is dat de breedte van één item (138 px),
+    # waar de balk in acht regels afbreekt — 250 px hoogte die permanent in het
+    # venster-minimum gaat zitten en het venster boven de schermhoogte tilt. Bij 280 px zijn
+    # het drie regels (~90 px), en 280 blijft onder de 320/400 px die het videobeeld zelf al
+    # eist, dus deze grens kost geen enkele extra breedte.
+    MIN_BREEDTE = 280
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.flow = FlowLayout(self, min_breedte=self.MIN_BREEDTE)
+        beleid = self.sizePolicy()
+        beleid.setHeightForWidth(True)
+        beleid.setVerticalPolicy(QSizePolicy.Minimum)
+        self.setSizePolicy(beleid)
+        self.setMinimumWidth(self.MIN_BREEDTE)
+
+    def addWidget(self, w):
+        self.flow.addWidget(w)
+
+    def addStretch(self, factor=1):
+        self.flow.addStretch(factor)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, breedte):
+        return self.flow.heightForWidth(breedte)
 
 
 class DoelKiezer(QDialog):
@@ -146,7 +335,7 @@ class DoelKiezer(QDialog):
         knoppen.addWidget(btn_skip)
         v.addLayout(knoppen)
 
-        self.resize(900, 640)
+        zet_venstergrootte(self, 900, 640)
 
         h, w = frame_bgr.shape[:2]
         qimg = QImage(frame_bgr.data, w, h, frame_bgr.strides[0], QImage.Format_BGR888).copy()
@@ -229,7 +418,7 @@ class HorizonKiezer(QDialog):
         knoppen.addWidget(self.btn_ok)
         v.addLayout(knoppen)
 
-        self.resize(900, 680)
+        zet_venstergrootte(self, 900, 680)
 
         h, w = frame_bgr.shape[:2]
         self._orig_w, self._orig_h = w, h
@@ -451,7 +640,7 @@ class KalibratieKiezer(QDialog):
         paneel.setFixedWidth(340)
         hoofd.addWidget(paneel)
 
-        self.resize(1150, 700)
+        zet_venstergrootte(self, 1150, 700)
 
         h, w = frame_bgr.shape[:2]
         self._orig_w, self._orig_h = w, h
@@ -1237,6 +1426,10 @@ class VideoSpeler(QWidget):
 
         for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
                   self.btn_frame_verder, self.btn_eind):
+            # Eén teken breed: de Qt-standaardbreedte (81 px) is bedoeld voor knoppen mét
+            # tekst en eiste met vijf transportknoppen 405 px per speler — twee spelers naast
+            # elkaar op de vergelijkpagina paste daarmee niet op een smal laptopscherm.
+            w.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
             knoppen.addWidget(w)
 
         # Afspeelsnelheid (slow motion): factor waarmee de fps vermenigvuldigd wordt.
@@ -1263,7 +1456,10 @@ class VideoSpeler(QWidget):
         self.slider.valueChanged.connect(self.ga_naar)
         self._hoofd.addWidget(self.slider)
 
-        self._rij_toggles = QHBoxLayout()
+        # Afbrekende balk i.p.v. QHBoxLayout: deze rij is met al zijn regelaars te breed voor
+        # een laptopscherm (zeker twee spelers naast elkaar) en moet kunnen inklappen.
+        self._balk_toggles = WrapBalk()
+        self._rij_toggles = self._balk_toggles
         self.chk_skelet = QCheckBox("Skelet")
         self.chk_afzetbeen = QCheckBox("Afzetbeen")
         self.chk_hud = QCheckBox("HUD")
@@ -1286,24 +1482,30 @@ class VideoSpeler(QWidget):
             "muiswiel draaien neemt de zoom weer over.")
         self.chk_auto.toggled.connect(self._zet_zoom_auto)
         self._rij_toggles.addWidget(self.chk_auto)
-        self._rij_toggles.addWidget(QLabel("Zoom"))
+
+        # De zoomregelaars als één blok in de balk: zouden ze los meedoen, dan kan het
+        # label "Zoom" op de vorige regel achterblijven terwijl zijn schuif afbreekt.
+        zoom_blok = QWidget()
+        zoom_rij = QHBoxLayout(zoom_blok)
+        zoom_rij.setContentsMargins(0, 0, 0, 0)
+        zoom_rij.addWidget(QLabel("Zoom"))
         self.slider_zoom = QSlider(Qt.Horizontal)
         self.slider_zoom.setRange(100, int(ZOOM_MAX * 100))   # 100 = 1.0×
         self.slider_zoom.setValue(100)
         self.slider_zoom.setFixedWidth(120)
         self.slider_zoom.setToolTip("Zoomniveau. Muiswiel boven de video werkt ook.")
         self.slider_zoom.valueChanged.connect(lambda v: self._zet_zoom(v / 100.0))
-        self._rij_toggles.addWidget(self.slider_zoom)
+        zoom_rij.addWidget(self.slider_zoom)
         self.lbl_zoom = QLabel("1.0×")
         self.lbl_zoom.setFixedWidth(38)
-        self._rij_toggles.addWidget(self.lbl_zoom)
+        zoom_rij.addWidget(self.lbl_zoom)
         self.btn_zoom_reset = QPushButton("Passend")
         self.btn_zoom_reset.setToolTip("Zoom herstellen naar passend beeld.")
         self.btn_zoom_reset.clicked.connect(self._zoom_reset)
-        self._rij_toggles.addWidget(self.btn_zoom_reset)
+        zoom_rij.addWidget(self.btn_zoom_reset)
+        self._rij_toggles.addWidget(zoom_blok)
 
-        self._rij_toggles.addStretch(1)
-        self._hoofd.addLayout(self._rij_toggles)
+        self._hoofd.addWidget(self._balk_toggles)
 
         # Muis-events op het videolabel: pannen doet de speler zelf, de rest gaat naar de
         # haken van de eigenaar (de skelet-editor).
@@ -1905,7 +2107,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Schaats Analyse")
-        self.resize(1400, 820)
+        zet_venstergrootte(self, 1400, 820, maximaliseer=True)
 
         self.input_pad = None
         self.model_pad = STANDAARD_MODEL
@@ -2212,7 +2414,10 @@ class MainWindow(QMainWindow):
     def _bouw_videopaneel(self):
         """De gedeelde VideoSpeler plus de editor-onderdelen die alléén op de analysepagina
         horen (de vergelijkpagina gebruikt dezelfde speler, zonder editor)."""
-        self.speler = VideoSpeler(min_grootte=(480, 320))
+        # Bescheiden ondergrens: het beeld rekt toch mee met het venster, en een hoge
+        # ondergrens tilt het venster-minimum boven de beschikbare schermhoogte uit —
+        # dan negeert Qt de gevraagde venstergrootte (zie zet_venstergrootte).
+        self.speler = VideoSpeler(min_grootte=(400, 240))
         self.speler.op_frame_getoond = self._speler_frame_getoond
         self.speler.overlay_tekenaar = self._teken_handles
         self.speler.op_muis_druk = self._editor_muis_druk
