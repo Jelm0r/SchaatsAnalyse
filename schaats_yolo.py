@@ -50,7 +50,7 @@ except ImportError:
 from schaats_analyse import (
     FrameResultaat, Landmark, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
-    NUM_POSES_DEFAULT,
+    bocht_ratio, bepaal_bocht_reeks, NUM_POSES_DEFAULT, BOCHT_IN, BOCHT_UIT,
 )
 
 BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
@@ -64,6 +64,33 @@ STANDAARD_YOLO_MODEL = "yolo26x-pose.pt"
 
 # ── Detectie ────────────────────────────────────────────────────────────────────
 DETECT_IMGSZ = 1280       # inferentieresolutie detectiepass; 640 mist verre/blurry schaatsers
+
+# ── Bocht overslaan (tijdwinst) ─────────────────────────────────────────────────
+# De detectiepass is ~94% van de analysetijd, en in de bocht levert die tijd niets op:
+# daar is geen bruikbare frontale meting te doen. Zodra `_BochtWacht` zegt dat we in de
+# bocht zitten, draait er alleen nog elke `BOCHT_CHECK_S` inferentie om te kijken of het
+# rechte stuk alweer begonnen is — de rest van de frames wordt wél gelezen (decoderen is
+# verwaarloosbaar, en zo blijft de framenummering exact) maar niet geïnfereerd.
+#
+# Waarom dit veilig kan: de verfijningspass vult detectiegaten tot GAP_VUL_S (1,0 s) met
+# geïnterpoleerde bboxes en schat de pose daar alsnog top-down. De gaten die het
+# overslaan achterlaat zijn `BOCHT_CHECK_S` lang, dus ruim daarbinnen: hebben we ergens
+# ten onrechte overgeslagen, dan herstelt pass 2 die frames gewoon. Te weinig overslaan
+# kost tijd, te veel overslaan kost (bijna) geen dekking.
+BOCHT_CHECK_S    = 0.33   # hoe vaak er in de bocht nog geïnfereerd wordt (≈ elke 10 frames
+                          # bij 30 fps), maar dan fps-onafhankelijk
+BOCHT_START_S    = 0.5    # zolang moet er bochtbewijs zijn (iemand in beeld, maar gedraaid)
+                          # vóór we frames gaan overslaan
+BOCHT_STIL_S     = 3.0    # ... of zolang helemaal niemand meetbaar in beeld. Ruim boven het
+                          # langste detectiegat op een recht stuk in de bibliotheek (2,1 s),
+                          # zodat een blur-gat de analyse niet in de skip-stand duwt
+BOCHT_BEWEEG_VENSTER_S = 1.0  # venster waarover "beweegt deze persoon?" wordt gemeten
+BOCHT_MIN_BEWEGING = 0.10 # verplaatsing + groei van de bbox in dat venster, als fractie van
+                          # de eigen lichaamshoogte. Een omstander langs de boarding staat
+                          # frontaal in beeld en zou de analyse anders eindeloos op vol tempo
+                          # houden (zelfde motief als MIN_VERPLAATSING bij de doelkeuze). Een
+                          # schaatser die recht op de camera af komt verplaatst in beeld
+                          # nauwelijks maar gróeit ~18%/s — vandaar dat groei meetelt
 
 # ── Pakkleur (torso-HSV-histogram) ──────────────────────────────────────────────
 KLEUR_BINS      = (8, 4, 3)  # H, S, V — compact, robuust bij schaal/belichting
@@ -232,41 +259,164 @@ class Detectie:
         return self.hist if self.hist_masker else None
 
 
-def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callback=None):
+class _BochtWacht:
     """
-    Pass 1: YOLO-pose + ByteTrack over de hele video op hoge resolutie. Retourneert
-    per frame een lijst Detectie's (alle personen, met torso-kleurhistogram).
+    Beslist tijdens de detectiepass welk frame nog inferentie krijgt. De bocht is voor
+    deze tool onbruikbaar beeld, dus daar hoeft het dure model niet over elk frame — één
+    controle per `BOCHT_CHECK_S` volstaat om te merken dat het rechte stuk weer begint.
+
+    Toestand per geanalyseerd frame, uit de detecties van dát frame:
+    - **frontaal** — iemand met `bocht_ratio` ≥ `BOCHT_UIT` die ook echt bewéégt. Zet de
+      wacht meteen terug op vol tempo.
+    - **gedraaid** — iemand meetbaar in beeld, maar met `bocht_ratio` < `BOCHT_IN`: de
+      bocht. Na `BOCHT_START_S` overslaan.
+    - **niets** — niemand meetbaar. Kan de bocht zijn (schaatser te ver/te klein), maar
+      net zo goed een blur-gat op het rechte stuk; daarom pas na `BOCHT_STIL_S`.
+    - Zit iedereen tússen de twee drempels in (de hysterese-band), dan zegt dit frame
+      niets en blijven de tellers staan waar ze stonden — "onbeslist" is nadrukkelijk
+      niet hetzelfde als "niemand in beeld".
+
+    De bewegingseis houdt omstanders langs de boarding buiten de "frontaal"-stem — die
+    staan frontaal in beeld en zouden de analyse anders eindeloos op vol tempo houden.
+    Een spoor met te weinig historie krijgt het voordeel van de twijfel (telt als
+    bewegend), zodat we nooit gaan overslaan puur omdat we iemand nog niet lang genoeg
+    zien.
+    """
+
+    def __init__(self, fps, w, h, aan=True):
+        self.aan = aan
+        self.w, self.h = w, h
+        fps = fps or 30.0
+        self.check    = max(1, int(round(BOCHT_CHECK_S * fps)))
+        self.n_start  = max(1, int(round(BOCHT_START_S * fps)))
+        self.n_stil   = max(1, int(round(BOCHT_STIL_S * fps)))
+        self.venster  = max(2, int(round(BOCHT_BEWEEG_VENSTER_S * fps)))
+        self.skip     = False
+        self.bocht_n  = 0
+        self.stil_n   = 0
+        self.laatste  = None          # laatst geïnfereerde frame
+        self.sporen   = {}            # tid → deque van (frame, cx_px, cy_px, hoogte_px)
+
+    def analyseren(self, f):
+        """Krijgt frame `f` inferentie?"""
+        if not self.aan or not self.skip:
+            return True
+        return self.laatste is None or (f - self.laatste) >= self.check
+
+    def _beweegt(self, d):
+        """Verplaatsing + groei van deze persoon over het laatste venster, als fractie
+        van de eigen lichaamshoogte. Groei telt mee omdat een schaatser die recht op de
+        camera af komt in beeld nauwelijks van z'n plaats komt maar wél groeit."""
+        spoor = self.sporen.get(d.tid)
+        if d.tid is None or spoor is None or len(spoor) < 2:
+            return True                                   # te weinig historie: voordeel van de twijfel
+        f0, x0, y0, h0 = spoor[0]
+        f1, x1, y1, h1 = spoor[-1]
+        if (f1 - f0) < max(2, self.venster // 2) or h1 <= 0:
+            return True                                   # te kort stuk om iets te zeggen
+        # Verplaatsing + groei, geschaald naar "per seconde" (`venster` = 1 s aan frames)
+        # en uitgedrukt in de eigen lichaamshoogte, zodat afstand tot de camera wegvalt.
+        beweging = (np.hypot(x1 - x0, y1 - y0) + abs(h1 - h0)) / h1
+        return beweging * self.venster / (f1 - f0) >= BOCHT_MIN_BEWEGING
+
+    def voed(self, f, dets):
+        """Verwerk de detecties van een geïnfereerd frame."""
+        self.laatste = f
+        if not self.aan:
+            return
+        frontaal = gedraaid = gezien = False
+        for d in dets:
+            hoogte = (d.bbox[3] - d.bbox[1]) * self.h
+            if d.tid is not None:
+                spoor = self.sporen.setdefault(d.tid, deque(maxlen=self.venster))
+                spoor.append((f, d.centroid[0] * self.w, d.centroid[1] * self.h, hoogte))
+            ratio = bocht_ratio(d.lm, self.w, self.h)
+            if ratio is None:
+                continue
+            gezien = True
+            if ratio >= BOCHT_UIT and self._beweegt(d):
+                frontaal = True
+            elif ratio < BOCHT_IN:
+                gedraaid = True
+
+        # In de skip-stand staat er `check` frames tussen twee metingen; de tellers lopen
+        # in frames, dus tel dan ook de overgeslagen frames mee.
+        stap = self.check if self.skip else 1
+        if frontaal:
+            self.skip = False
+            self.bocht_n = self.stil_n = 0
+        elif gedraaid:
+            self.stil_n = 0
+            self.bocht_n += stap
+            if self.bocht_n >= self.n_start:
+                self.skip = True
+        elif not gezien:
+            self.bocht_n = 0
+            self.stil_n += stap
+            if self.stil_n >= self.n_stil:
+                self.skip = True
+
+
+def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callback=None,
+                     bocht=True):
+    """
+    Pass 1: YOLO-pose + ByteTrack over de video op hoge resolutie. Retourneert
+    `(frames, overgeslagen)`: per frame een lijst Detectie's (alle personen, met
+    torso-kleurhistogram) en per frame of de inferentie is overgeslagen.
+
+    De lus leest de frames zelf i.p.v. `model.track(source=pad, stream=True)` te laten
+    streamen — anders is er geen manier om een frame wél te lezen maar niet te
+    infereren, en dat is precies wat `_BochtWacht` in de bocht wil (zie daar). Elk frame
+    wordt gelezen, dus de framenummering blijft exact gelijk aan die van de video;
+    decoderen is verwaarloosbaar naast de ~2 s inferentie per frame.
     """
     w, h = info.w, info.h
-    frames = []
-    for res in model.track(source=input_pad, stream=True, persist=True, imgsz=imgsz,
-                           tracker='bytetrack.yaml', classes=[0], verbose=False):
-        dets = []
-        kps, boxes = res.keypoints, res.boxes
-        if kps is not None and boxes is not None and kps.xy is not None and len(boxes) > 0:
-            xy = kps.xy.cpu().numpy()                                # (N, 17, 2) pixels
-            conf = (kps.conf.cpu().numpy() if kps.conf is not None
-                    else np.ones(xy.shape[:2], dtype=float))
-            xywh = boxes.xywh.cpu().numpy()
-            ids = boxes.id.cpu().numpy().astype(int) if boxes.id is not None else None
-            for i in range(len(xy)):
-                cx, cy, bw, bh = xywh[i]
-                bbox_px = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
-                hist, uit_masker = _torso_hist(res.orig_img, xy[i], conf[i], bbox_px)
-                dets.append(Detectie(
-                    frame=len(frames),
-                    tid=int(ids[i]) if ids is not None else None,
-                    centroid=(cx / w, cy / h),
-                    bbox=(bbox_px[0] / w, bbox_px[1] / h, bbox_px[2] / w, bbox_px[3] / h),
-                    area=(bw * bh) / (w * h),
-                    lm=_coco_naar_landmarks(xy[i], conf[i], w, h),
-                    hist=hist,
-                    hist_masker=uit_masker,
-                ))
-        frames.append(dets)
+    frames, overgeslagen = [], []
+    wacht = _BochtWacht(info.fps, w, h, aan=bocht)
+    cap = cv2.VideoCapture(input_pad)
+    if not cap.isOpened():
+        raise IOError(f"Kan video niet openen: {input_pad}")
+    f = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if not wacht.analyseren(f):
+            frames.append([])
+            overgeslagen.append(True)
+        else:
+            res = model.track(frame, persist=True, imgsz=imgsz,
+                              tracker='bytetrack.yaml', classes=[0], verbose=False)[0]
+            dets = []
+            kps, boxes = res.keypoints, res.boxes
+            if kps is not None and boxes is not None and kps.xy is not None and len(boxes) > 0:
+                xy = kps.xy.cpu().numpy()                                # (N, 17, 2) pixels
+                conf = (kps.conf.cpu().numpy() if kps.conf is not None
+                        else np.ones(xy.shape[:2], dtype=float))
+                xywh = boxes.xywh.cpu().numpy()
+                ids = boxes.id.cpu().numpy().astype(int) if boxes.id is not None else None
+                for i in range(len(xy)):
+                    cx, cy, bw, bh = xywh[i]
+                    bbox_px = (cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2)
+                    hist, uit_masker = _torso_hist(frame, xy[i], conf[i], bbox_px)
+                    dets.append(Detectie(
+                        frame=f,
+                        tid=int(ids[i]) if ids is not None else None,
+                        centroid=(cx / w, cy / h),
+                        bbox=(bbox_px[0] / w, bbox_px[1] / h, bbox_px[2] / w, bbox_px[3] / h),
+                        area=(bw * bh) / (w * h),
+                        lm=_coco_naar_landmarks(xy[i], conf[i], w, h),
+                        hist=hist,
+                        hist_masker=uit_masker,
+                    ))
+            wacht.voed(f, dets)
+            frames.append(dets)
+            overgeslagen.append(False)
+        f += 1
         if progress_callback is not None:
-            progress_callback(len(frames), info.totaal)
-    return frames
+            progress_callback(f, info.totaal)
+    cap.release()
+    return frames, overgeslagen
 
 
 def _bouw_tracklets(frames):
@@ -509,11 +659,15 @@ def _stik_keten(seed, tracklets, fps):
 
 
 # ── Verfijningspass ─────────────────────────────────────────────────────────────
-def _interpoleer_doel(doel_per_frame, fps):
+def _interpoleer_doel(doel_per_frame, fps, bocht=None):
     """
     Vul detectiegaten ≤ GAP_VUL_S met lineair geïnterpoleerde bboxes, zodat de
     verfijningspass daar tóch een schatting kan proberen. Retourneert
     {frame: (bbox_norm_xyxy, echt)} — `echt` False voor geïnterpoleerde plekken.
+
+    `bocht` (per frame True/False) houdt de bochtstukken buiten die opvulling: daar zijn
+    de gaten met opzet gemaakt door de detectiepass, en ze alsnog laten verfijnen zou de
+    bespaarde tijd meteen weer opsouperen aan beeld waar toch niets te meten valt.
     """
     plan = {}
     frames = sorted(doel_per_frame)
@@ -526,6 +680,8 @@ def _interpoleer_doel(doel_per_frame, fps):
             ba = np.array(doel_per_frame[a].bbox)
             bb = np.array(doel_per_frame[b].bbox)
             for f in range(a + 1, b):
+                if bocht is not None and f < len(bocht) and bocht[f]:
+                    continue
                 t = (f - a) / g
                 plan[f] = (tuple(ba + t * (bb - ba)), False)
     return plan
@@ -539,7 +695,7 @@ def _maak_rtmpose():
 
 
 def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                       progress_callback=None, rtmpose=None):
+                       progress_callback=None, rtmpose=None, bocht=None):
     """
     Pass 2: lees de video opnieuw en schat per doel-frame de pose opnieuw, nu met de
     schaatser beeldvullend in het inferentiebeeld → aanzienlijk nauwkeurigere
@@ -548,8 +704,11 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
     vierkante crop door het YOLO-model. De pakkleur (referentie `ref`) bewaakt in
     beide routes dat nooit stilletjes een andere persoon wordt overgenomen.
     Retourneert {frame: lm} met verfijnde (of herstelde) landmarks.
+
+    `bocht` (per frame True/False) houdt de gat-opvulling weg uit de bochtstukken; zie
+    `_interpoleer_doel`.
     """
-    plan = _interpoleer_doel(doel_per_frame, info.fps)
+    plan = _interpoleer_doel(doel_per_frame, info.fps, bocht)
     w, h = info.w, info.h
     uit, devs = {}, {}
     cap = cv2.VideoCapture(input_pad)
@@ -757,7 +916,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, yolo_model=None, horizon_deg=0.0,
               auto_horizon=False, verfijn=True, perspectief=None,
-              waarschuwing_callback=None):
+              waarschuwing_callback=None, bocht=True):
     """
     Volledige analyse via YOLO-pose + ByteTrack + offline doelkeuze + crop-verfijning.
     Signatuur-compatibel met schaats_analyse.analyseer() (`model_pad` — het MediaPipe
@@ -771,6 +930,11 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     doelkeuze (nu: een muisklik die niemand raakte). Lukt de doelkeuze helemaal niet,
     dan is dat geen waarschuwing maar een fout — dan volgt een RuntimeError i.p.v. een
     lege analyse die er als een geldig resultaat uitziet.
+
+    Met `bocht` (default) slaat de detectiepass de bocht grotendeels over (`_BochtWacht`)
+    en leveren bochtframes geen afzetmeting. Dat is hier vooral een snelheidsmaatregel:
+    de detectiepass is het leeuwendeel van de analysetijd en in de bocht valt er niets te
+    meten. Met `bocht=False` wordt elk frame geïnfereerd en gemeten, zoals voorheen.
     """
     info = video_info(input_pad, force_fps)
     model = YOLO(yolo_model or STANDAARD_YOLO_MODEL)
@@ -785,8 +949,10 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     fase += 1 if verfijn else 0
     hor_cb = fase_voortgang(progress_callback, fase, n_fasen) if auto_horizon else None
 
-    # Pass 1: alle detecties verzamelen (hoge resolutie).
-    frames = _detecteer_alles(input_pad, model, info, progress_callback=det_cb)
+    # Pass 1: alle detecties verzamelen (hoge resolutie). In de bocht slaat de wacht
+    # frames over — die staan in `overgeslagen` en gaan zo de rest van de pijplijn in.
+    frames, overgeslagen = _detecteer_alles(input_pad, model, info,
+                                            progress_callback=det_cb, bocht=bocht)
     n_frames = len(frames)
 
     # Offline doelkeuze: tracklets → kleur-splits → seed → stitching.
@@ -811,30 +977,128 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     keten, ref = _stik_keten(seed, tracklets, info.fps)
     doel_per_frame = {d.frame: d for d in keten}
 
+    resultaten = []
+    for f in range(n_frames):
+        r = FrameResultaat(frame_nr=f, tijd=f / info.fps if info.fps > 0 else 0)
+        r.bocht = bool(overgeslagen[f])
+        if f in doel_per_frame:
+            r.lm = doel_per_frame[f].lm
+            r.pose_gevonden = True
+        resultaten.append(r)
+
+    # Bocht bepalen op de rúwe pass-1-landmarks, vóór de verfijning: dan hoeft die
+    # verfijning niet meer over de bocht. De controleframes die de detectiepass in de
+    # bocht wél heeft geïnfereerd geven daar het oordeel; heeft de wacht een stuk
+    # ónterecht overgeslagen, dan laten juist die frames een frontale schaatser zien en
+    # wordt het stuk hier alsnog vrijgegeven — waarna pass 2 de gaten gewoon opvult.
+    if bocht:
+        bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
+        bocht_per_frame = [r.bocht for r in resultaten]
+    else:
+        bocht_per_frame = None
+
     # Pass 2: verfijning (nauwkeurigere keypoints + gaten vullen), top-down met
     # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route.
     if verfijn and doel_per_frame:
         verfijnd, devs = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                                            progress_callback=ver_cb, rtmpose=_maak_rtmpose())
+                                            progress_callback=ver_cb, rtmpose=_maak_rtmpose(),
+                                            bocht=bocht_per_frame)
     else:
         verfijnd, devs = {}, {}
 
-    resultaten = []
-    for f in range(n_frames):
-        r = FrameResultaat(frame_nr=f, tijd=f / info.fps if info.fps > 0 else 0)
+    for f, r in enumerate(resultaten):
         lm = verfijnd.get(f)
-        if lm is None and f in doel_per_frame:
-            lm = doel_per_frame[f].lm
         if lm is not None:
             r.lm = lm
             r.pose_gevonden = True
             r.middellijn_dev = devs.get(f)
-        resultaten.append(r)
 
     if smooth_landmarks:
         smooth_landmarks_offline(resultaten, info.w, info.h, fps=info.fps)
+    if bocht:
+        # Nog eens, nu op de verfijnde landmarks: de frames die pass 2 erbij heeft
+        # gevonden krijgen zo alsnog hun eigen oordeel.
+        bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
     zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps, hor_cb,
                 perspectief=perspectief)
     verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, smooth_n, threshold,
                        perspectief=perspectief)
     return info, resultaten
+
+
+# ── Zelftest ────────────────────────────────────────────────────────────────────
+def _zelftest_bochtwacht():
+    """
+    Toetst de toestandsmachine van `_BochtWacht` op synthetische detecties — geen video,
+    geen model, dus in een seconde te draaien. Dit is het stuk waar een fout stil is: te
+    weinig overslaan kost alleen tijd, maar te véél overslaan haalt frames uit de meting.
+    Draaien met `python schaats_yolo.py`.
+    """
+    W, H, FPS = 1000, 1000, 30.0
+
+    def _pose(ratio, romp, cx):
+        """Landmark-lijst met precies deze heupbreedte/romplengte-verhouding."""
+        lm = [Landmark(0.0, 0.0, 0.0, 0.0) for _ in range(33)]
+        hb = ratio * romp
+        lm[11] = Landmark(cx - 0.05, 0.5 - romp / H / 2, 0, 1.0)
+        lm[12] = Landmark(cx + 0.05, 0.5 - romp / H / 2, 0, 1.0)
+        lm[23] = Landmark(cx - hb / W / 2, 0.5 + romp / H / 2, 0, 1.0)
+        lm[24] = Landmark(cx + hb / W / 2, 0.5 + romp / H / 2, 0, 1.0)
+        return lm
+
+    def _det(ratio, tid=1, cx=0.5, romp=100):
+        return Detectie(frame=0, tid=tid, centroid=(cx, 0.5),
+                        bbox=(cx - 0.05, 0.3, cx + 0.05, 0.7), area=0.04,
+                        lm=_pose(ratio, romp, cx))
+
+    def _loop(n, maak_dets, aan=True):
+        """Retourneert (aantal geanalyseerd, aantal overgeslagen, frame waarop het weer
+        op vol tempo ging na de laatste skip)."""
+        wacht = _BochtWacht(FPS, W, H, aan=aan)
+        geanalyseerd = overgeslagen = 0
+        for f in range(n):
+            if not wacht.analyseren(f):
+                overgeslagen += 1
+                continue
+            geanalyseerd += 1
+            wacht.voed(f, maak_dets(f))
+        return geanalyseerd, overgeslagen
+
+    # 1. Frontale, groeiende schaatser: nooit overslaan (hij komt recht op de camera af,
+    #    dus hij verplaatst in beeld nauwelijks — de groei moet hem redden).
+    _, over = _loop(200, lambda f: [_det(0.9, romp=100 + f * 0.6)])
+    assert over == 0, f"frontale schaatser werd {over} frames overgeslagen"
+
+    # 2. Bocht: het overgrote deel moet worden overgeslagen.
+    an, _ = _loop(300, lambda f: [_det(0.15)])
+    assert an < 60, f"bocht: nog {an} van 300 frames geanalyseerd"
+
+    # 3. Terug op het rechte stuk wordt binnen één controle-interval opgepakt.
+    wacht = _BochtWacht(FPS, W, H)
+    hervat = None
+    for f in range(400):
+        if not wacht.analyseren(f):
+            continue
+        wacht.voed(f, [_det(0.15 if f < 200 else 0.9, romp=100 + max(0, f - 200) * 0.6)])
+        if f >= 200 and hervat is None:
+            hervat = f
+    assert hervat is not None and hervat - 200 <= wacht.check, f"hervat pas op frame {hervat}"
+
+    # 4. Een stilstaande omstander staat frontaal in beeld, maar mag de bocht niet
+    #    openhouden.
+    an, _ = _loop(300, lambda f: [_det(0.9, tid=7, cx=0.2), _det(0.15, tid=1, cx=0.6)])
+    assert an < 120, f"omstander hield de analyse {an} van 300 frames op vol tempo"
+
+    # 5. Een blur-gat van 2 s op een recht stuk is géén bocht (BOCHT_STIL_S = 3 s).
+    _, over = _loop(300, lambda f: [] if 100 <= f < 160 else [_det(0.9, romp=100 + f * 0.6)])
+    assert over == 0, f"blur-gat leidde tot {over} overgeslagen frames"
+
+    # 6. Uitgezet = alles analyseren, ook in de bocht.
+    _, over = _loop(200, lambda f: [_det(0.1)], aan=False)
+    assert over == 0, f"met bocht=False werden er toch {over} frames overgeslagen"
+
+    print("Zelftest _BochtWacht OK")
+
+
+if __name__ == '__main__':
+    _zelftest_bochtwacht()

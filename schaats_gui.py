@@ -104,6 +104,18 @@ KADER_MAX_VERGROTING = 2.5   # max. schermpixels per videopixel bij automatische
 # ijzers er nog buiten steken — en een schaatser strak tegen de rand kijkt niet prettig.
 KADER_MARGE = 0.15
 
+# Bochtdetectie: uitleg bij de checkbox in beide analyse-dialogen (één tekst, twee plekken).
+BOCHT_TOOLTIP = (
+    "Herkent aan de stand van de heupen wanneer de schaatser niet frontaal in beeld is\n"
+    "(in de bocht staan ze achter elkaar i.p.v. naast elkaar).\n"
+    "\n"
+    "Die frames worden dan grotendeels niet meer door de detector gehaald — dat scheelt\n"
+    "flink in analysetijd — en ze leveren geen afzetmeting op. Elke ~0,3 s wordt gekeken\n"
+    "of het rechte stuk alweer begonnen is, dus een clip die ín de bocht begint pakt de\n"
+    "meting vanzelf op zodra de schaatser recht op de camera af komt.\n"
+    "\n"
+    "Uitzetten alleen om te zien wat er in de bocht gebeurt; die hoeken zijn niet bruikbaar.")
+
 # Afspeelsnelheden (slow motion): (label, factor op de fps). 1.0 = echte snelheid.
 SNELHEDEN = [("1×", 1.0), ("½×", 0.5), ("¼×", 0.25), ("⅛×", 0.125), ("1/16×", 0.0625)]
 SNELHEID_DEFAULT_IDX = 0
@@ -829,7 +841,7 @@ class AnalyseWorker(QThread):
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
                  perspectief=None, bieb=None, schaatser_id=None, titel=None,
-                 instellingen=None, backend=None, aangemaakt_door=""):
+                 instellingen=None, backend=None, aangemaakt_door="", bocht=True):
         super().__init__()
         self.input_pad = input_pad
         self.model_pad = model_pad
@@ -840,6 +852,7 @@ class AnalyseWorker(QThread):
         self.horizon_deg = horizon_deg
         self.auto_horizon = auto_horizon
         self.smooth_landmarks = smooth_landmarks
+        self.bocht = bocht
         self.perspectief = perspectief
         self.bieb = bieb
         self.schaatser_id = schaatser_id
@@ -866,7 +879,7 @@ class AnalyseWorker(QThread):
                 self.force_fps, doel_punt=self.doel_punt, progress_callback=toon_voortgang,
                 horizon_deg=self.horizon_deg, auto_horizon=self.auto_horizon,
                 smooth_landmarks=self.smooth_landmarks, perspectief=self.perspectief,
-                waarschuwing_callback=self.waarschuwing.emit,
+                waarschuwing_callback=self.waarschuwing.emit, bocht=self.bocht,
             )
             events = segmenteer_afzetten(resultaten)
         except AnalyseAfgebroken:
@@ -946,9 +959,14 @@ class BatchWorker(QThread):
                     progress_callback=self._voortgang,
                     horizon_deg=taak["horizon_deg"], auto_horizon=taak["auto_horizon"],
                     smooth_landmarks=taak["smooth_landmarks"], perspectief=None,
-                    waarschuwing_callback=_waarschuw,
+                    waarschuwing_callback=_waarschuw, bocht=taak.get("bocht", True),
                 )
                 events = segmenteer_afzetten(resultaten)
+                if resultaten and all(r.bocht for r in resultaten):
+                    # Anders staat deze clip straks als "0 afzetten" in de lijst zonder dat
+                    # iemand weet waarom.
+                    _waarschuw("De schaatser staat nergens frontaal in beeld; de hele video "
+                               "is als bocht aangemerkt en er is niets gemeten.")
                 if self.afbreken:
                     break                        # niet meer aan een lange videokopie beginnen
                 self.status.emit("Opslaan in bibliotheek...")
@@ -1072,6 +1090,11 @@ class NieuweAnalyseDialog(QDialog):
         self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
         self.chk_heavy.setVisible(not IS_YOLO)   # alleen relevant voor de MediaPipe-backend
         fv.addWidget(self.chk_heavy)
+
+        self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
+        self.chk_bocht.setChecked(True)
+        self.chk_bocht.setToolTip(BOCHT_TOOLTIP)
+        fv.addWidget(self.chk_bocht)
 
         self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (werkt niet)")
         self.chk_perspectief.setToolTip(
@@ -1198,6 +1221,11 @@ class BatchAnalyseDialog(QDialog):
         self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
         self.chk_heavy.setVisible(not IS_YOLO)   # alleen relevant voor de MediaPipe-backend
         fv.addWidget(self.chk_heavy)
+
+        self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
+        self.chk_bocht.setChecked(True)
+        self.chk_bocht.setToolTip(BOCHT_TOOLTIP)
+        fv.addWidget(self.chk_bocht)
 
         self.chk_geen_smoothing = QCheckBox("Geen landmark-smoothing (ruwe detecties)")
         fv.addWidget(self.chk_geen_smoothing)
@@ -2146,6 +2174,7 @@ class MainWindow(QMainWindow):
         self.auto_horizon = False
         self.perspectief = None
         self.geen_smoothing = False
+        self.bocht_overslaan = True   # bochtframes niet analyseren/meten (checkbox in de dialoog)
         # video_info / resultaten / huidige_idx wonen in self.speler (zie de properties
         # hieronder); die wordt in _bouw_ui() aangemaakt en niets vóór die aanroep leest ze.
         self.events = []
@@ -2504,7 +2533,8 @@ class MainWindow(QMainWindow):
         self.btn_volgend_gat = QPushButton("⏭ Volgend gat")
         self.btn_volgend_gat.setToolTip(
             "Spring naar het eerstvolgende frame zonder skelet.\n"
-            "Na het laatste gat begint de zoektocht weer vooraan.")
+            "Na het laatste gat begint de zoektocht weer vooraan.\n"
+            "Frames in de bocht worden overgeslagen — daar wordt toch niet gemeten.")
         self.btn_volgend_gat.clicked.connect(self._ga_naar_volgend_gat)
         self.editor_balk.addWidget(self.btn_volgend_gat)
         self.btn_maak_skelet = QPushButton("➕ Maak skelet")
@@ -2513,7 +2543,7 @@ class MainWindow(QMainWindow):
             "daarna sleep je de punten naar de juiste plek — net als op elk ander frame.\n"
             "Valt er niets over te nemen, dan vraagt het programma de punten\n"
             "één voor één (schouders, heupen, knieën, enkels).\n"
-            "Alleen beschikbaar op een frame zonder gedetecteerde pose.")
+            "Alleen beschikbaar op een frame zonder gedetecteerde pose dat niet in de bocht ligt.")
         self.btn_maak_skelet.clicked.connect(self._start_plaatsen)
         self.editor_balk.addWidget(self.btn_maak_skelet)
         self.btn_herstel = QPushButton("Herstel origineel")
@@ -2966,12 +2996,15 @@ class MainWindow(QMainWindow):
         self.smooth_n = dlg.spin_smooth.value()
         self.threshold = dlg.spin_threshold.value()
         self.geen_smoothing = dlg.chk_geen_smoothing.isChecked()
+        self.bocht_overslaan = dlg.chk_bocht.isChecked()
 
         # Wat het .npz níet bevat maar heropenen wél nodig heeft/wil documenteren.
+        # (De bocht-vlag per frame zit wél in het npz; dit is puur de instelling.)
         instellingen = {
             "smooth_n": self.smooth_n,
             "threshold": self.threshold,
             "smooth_landmarks": not self.geen_smoothing,
+            "bocht_overslaan": self.bocht_overslaan,
             "doel_punt": list(self.doel_punt) if self.doel_punt else None,
             "horizon_deg": self.horizon_deg,
             "auto_horizon": self.auto_horizon,
@@ -3281,7 +3314,8 @@ class MainWindow(QMainWindow):
                                     titel=opslag.get("titel"),
                                     instellingen=opslag.get("instellingen"),
                                     backend=BACKEND_NAAM,
-                                    aangemaakt_door=self.trainer_naam)
+                                    aangemaakt_door=self.trainer_naam,
+                                    bocht=self.bocht_overslaan)
         self.worker.voortgang.connect(self._analyse_voortgang)
         self.worker.status.connect(self._analyse_status)
         self.worker.opslag_fout.connect(self._opslag_fout)
@@ -3314,6 +3348,23 @@ class MainWindow(QMainWindow):
         if meldingen:
             QMessageBox.warning(self, "Let op bij deze analyse", "\n\n".join(meldingen))
 
+    def _meld_bocht(self, resultaten):
+        """Zeg hoeveel van de clip als bocht is overgeslagen. Is dat álles, dan is een
+        lege tabel geen meting maar een verkeerd gekozen clip (of een te strenge
+        drempel) — dat verdient een echte waarschuwing i.p.v. '0 afzetten'."""
+        n = len(resultaten)
+        if not n:
+            return
+        bocht = sum(1 for r in resultaten if r.bocht)
+        if bocht == n:
+            self._analyse_waarschuwingen.append(
+                "In deze video staat de schaatser nergens frontaal in beeld — hij is dus "
+                "volledig als 'bocht' aangemerkt en er zijn geen afzetten gemeten.\n"
+                "Klopt dat niet, analyseer de video dan opnieuw met 'Bocht overslaan' uit.")
+        elif bocht:
+            self.statusBar().showMessage(
+                f"{bocht} van {n} frames ({bocht / n:.0%}) overgeslagen: bocht.", 10000)
+
     def _opslag_fout(self, bericht):
         if self._afsluiten:
             return
@@ -3339,6 +3390,7 @@ class MainWindow(QMainWindow):
         self._zet_bezig(False)
         opslag = self._pending_opslag or {}
         self._pending_opslag = None
+        self._meld_bocht(resultaten)
         self._toon_analyse_waarschuwingen()
 
         if not self._auto_toon_klaar:
@@ -3397,6 +3449,7 @@ class MainWindow(QMainWindow):
 
         smooth_n, threshold = dlg.smooth_n, dlg.threshold
         geen_smoothing = dlg.geen_smoothing
+        bocht = dlg.chk_bocht.isChecked()
 
         # Verzamel-lus: per video het eerste frame + doelschaatser + horizon uitvragen.
         taken = []
@@ -3422,6 +3475,7 @@ class MainWindow(QMainWindow):
                 "smooth_n": smooth_n,
                 "threshold": threshold,
                 "smooth_landmarks": not geen_smoothing,
+                "bocht_overslaan": bocht,
                 "doel_punt": list(doel) if doel else None,
                 "horizon_deg": horizon_deg,
                 "auto_horizon": auto_horizon,
@@ -3434,6 +3488,7 @@ class MainWindow(QMainWindow):
                 "doel_punt": doel, "horizon_deg": horizon_deg, "auto_horizon": auto_horizon,
                 "smooth_landmarks": not geen_smoothing, "smooth_n": smooth_n,
                 "threshold": threshold, "model_pad": model_pad, "instellingen": instellingen,
+                "bocht": bocht,
             })
 
         if not taken:
@@ -3698,8 +3753,15 @@ class MainWindow(QMainWindow):
 
     def _update_live_status(self, resultaat):
         if not resultaat.pose_gevonden:
-            self.lbl_live.setText("Geen pose gedetecteerd")
+            tekst = "Bocht — niet geanalyseerd" if resultaat.bocht else "Geen pose gedetecteerd"
+            self.lbl_live.setText(tekst)
             self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px; color: #c33;")
+            return
+        if resultaat.bocht:
+            # Wel een skelet, maar geen afgeleiden: `verwerk_afgeleiden` slaat bochtframes
+            # over, dus been/hoek zijn hier None en er valt niets te tonen.
+            self.lbl_live.setText("Bocht — geen meting")
+            self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px; color: #c80;")
             return
 
         status = "GEWICHT OP BEEN" if resultaat.gewicht_erop else "AFZET VOLTOOID"
@@ -3828,10 +3890,8 @@ class MainWindow(QMainWindow):
         self.btn_herstel.setEnabled(self.analyse_id is not None and not bezig)
         self.btn_volgend_gat.setEnabled(not bezig)
         # Alleen aanbieden waar het zin heeft: op een frame dat al een pose heeft is
-        # slepen het gereedschap, niet plaatsen.
-        self.btn_maak_skelet.setEnabled(
-            not bezig and 0 <= self.huidige_idx < len(self.resultaten)
-            and not self.resultaten[self.huidige_idx].pose_gevonden)
+        # slepen het gereedschap, niet plaatsen — en in de bocht wordt er toch niet gemeten.
+        self.btn_maak_skelet.setEnabled(not bezig and self._is_gat(self.huidige_idx))
 
     def _frame_bewerkbaar(self, idx):
         """Een frame is bewerkbaar als het een pose heeft die als lijst van (muteerbare)
@@ -3959,17 +4019,26 @@ class MainWindow(QMainWindow):
         self._na_edit()
 
     # ── Skelet plaatsen op een frame zonder pose ─────────────────────────────
+    def _is_gat(self, idx):
+        """Een frame dat een skelet mist én waar een skelet iets oplevert. Bochtframes
+        vallen af: die leveren toch geen meting, dus ze met de hand dichten is werk voor
+        niets."""
+        if not (0 <= idx < len(self.resultaten)):
+            return False
+        r = self.resultaten[idx]
+        return not r.pose_gevonden and not r.bocht
+
     def _gat_positie(self, idx):
         """(hoeveelste, totaal) van frame `idx` binnen zijn aaneengesloten reeks frames
         zónder skelet. Voor de hint: een half gedicht gat verandert de tabel nog niet,
         want `bepaal_afzet_uit_strek` breekt de stand-run op élk skeletloos frame af."""
-        if not (0 <= idx < len(self.resultaten)) or self.resultaten[idx].pose_gevonden:
+        if not self._is_gat(idx):
             return (0, 0)
         start = idx
-        while start > 0 and not self.resultaten[start - 1].pose_gevonden:
+        while start > 0 and self._is_gat(start - 1):
             start -= 1
         eind = idx
-        while eind + 1 < len(self.resultaten) and not self.resultaten[eind + 1].pose_gevonden:
+        while self._is_gat(eind + 1):
             eind += 1
         return (idx - start + 1, eind - start + 1)
 
@@ -3979,7 +4048,7 @@ class MainWindow(QMainWindow):
         if not n:
             return
         volgorde = list(range(self.huidige_idx + 1, n)) + list(range(0, self.huidige_idx + 1))
-        doel = next((i for i in volgorde if not self.resultaten[i].pose_gevonden), None)
+        doel = next((i for i in volgorde if self._is_gat(i)), None)
         if doel is None:
             self.lbl_editor_hint.setText("Elk frame heeft een skelet — niets meer te doen.")
             return
@@ -4177,13 +4246,20 @@ class MainWindow(QMainWindow):
 
     def _update_dekking(self):
         """Statusbalk-teller: hoeveel frames hebben een skelet? Frames zonder breken een
-        afzetmeting af, dus dit is de maat voor 'hoeveel werk ligt er nog'."""
+        afzetmeting af, dus dit is de maat voor 'hoeveel werk ligt er nog'.
+
+        Bochtframes tellen niet mee — daar valt sowieso niets te meten, dus ze horen niet
+        als openstaand werk in de noemer te staan."""
         if not self.resultaten:
             self.lbl_dekking.setText("")
             return
-        totaal = len(self.resultaten)
-        met = sum(1 for r in self.resultaten if r.pose_gevonden)
-        self.lbl_dekking.setText(f"Skelet: {met} van {totaal} frames")
+        bocht = sum(1 for r in self.resultaten if r.bocht)
+        totaal = len(self.resultaten) - bocht
+        met = sum(1 for r in self.resultaten if r.pose_gevonden and not r.bocht)
+        tekst = f"Skelet: {met} van {totaal} frames"
+        if bocht:
+            tekst += f" · {bocht} in de bocht"
+        self.lbl_dekking.setText(tekst)
         kleur = "#888" if met == totaal else "#c80"
         self.lbl_dekking.setStyleSheet(f"padding-right: 14px; color: {kleur};")
 

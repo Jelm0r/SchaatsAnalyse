@@ -17,6 +17,9 @@ Gebruik (werkt in beide venvs; alleen numpy + cv2 + schaats_analyse):
     # Gouden referentie aanmaken: in N verspreide frames knieën + enkels aanklikken
     python schaats_eval.py annoteer video.mp4 --uit goud.json [--n 15]
 
+    # Bochtsignaal nakijken (drempels ijken op nieuw materiaal)
+    python schaats_eval.py bocht analyse.npz [--stap 10]
+
 De proxy-metrics:
 - **dekking** — fractie frames met pose.
 - **botlengte-CV** — variatiecoëfficiënt (std/gemiddelde) van de tibia- en
@@ -43,6 +46,7 @@ import numpy as np
 
 from schaats_analyse import (
     laad_landmarks, verwerk_afgeleiden, segmenteer_afzetten, bereken_hoek_tov_ijs,
+    bocht_ratio, bepaal_bocht_reeks, BOCHT_IN, BOCHT_UIT,
     VIS_MIN, L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE, _savgol,
 )
 
@@ -372,6 +376,52 @@ def annoteer(video_pad, uit_pad, n_frames=15):
     print(f"{len(frames_uit)} frames geannoteerd → {uit_pad}")
 
 
+# ── Bochtsignaal ────────────────────────────────────────────────────────────────
+def bocht_rapport(pad, stap=None):
+    """
+    Print het bochtsignaal van een analyse: per frame de ruwe `bocht_ratio`
+    (heupbreedte / romplengte) plus de segmenten die `bepaal_bocht_reeks` eruit haalt.
+    Hiermee is de drempel op nieuw materiaal na te rekenen zonder de GUI — nodig omdat
+    BOCHT_IN/BOCHT_UIT nu geijkt zijn op de clips die tóevallig in de bibliotheek staan.
+    """
+    info, resultaten = laad_landmarks(pad)
+    w, h, fps = info.w, info.h, info.fps
+    ruw = [bocht_ratio(r.lm, w, h) if (r.pose_gevonden and r.lm is not None) else None
+           for r in resultaten]
+    bepaal_bocht_reeks(resultaten, w, h, fps)
+
+    gemeten = [v for v in ruw if v is not None]
+    print(f"{os.path.basename(pad)}: {len(resultaten)} frames @ {fps:.1f} fps, "
+          f"{len(gemeten)} meetbaar")
+    if gemeten:
+        q = np.percentile(gemeten, [5, 50, 95])
+        print(f"  ratio  min={min(gemeten):.2f}  p05={q[0]:.2f}  mediaan={q[1]:.2f}  "
+              f"p95={q[2]:.2f}  max={max(gemeten):.2f}   (drempels: "
+              f"bocht < {BOCHT_IN}, recht stuk > {BOCHT_UIT})")
+
+    segmenten, start = [], None
+    for i, r in enumerate(resultaten):
+        if r.bocht and start is None:
+            start = i
+        elif not r.bocht and start is not None:
+            segmenten.append((start, i - 1)); start = None
+    if start is not None:
+        segmenten.append((start, len(resultaten) - 1))
+    n_bocht = sum(1 for r in resultaten if r.bocht)
+    print(f"  bocht: {n_bocht} frames ({n_bocht / max(1, len(resultaten)):.0%}) "
+          f"in {len(segmenten)} segment(en)")
+    for a, b in segmenten:
+        print(f"    frames {a}-{b}  ({a / fps:.1f}-{b / fps:.1f} s, {(b - a + 1) / fps:.1f} s)")
+
+    # Bewust ASCII: de Windows-console draait hier op cp1252 en slikt geen blokjes.
+    stap = stap or max(1, len(resultaten) // 60)
+    print(f"  verloop (elke {stap} frames; . = geen pose, # = bocht):")
+    for i in range(0, len(resultaten), stap):
+        v = ruw[i]
+        balk = "#" if resultaten[i].bocht else " "
+        print(f"    f{i:5d} {i / fps:6.1f}s  {'  . ' if v is None else f'{v:4.2f}'} {balk}")
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[1])
@@ -391,6 +441,11 @@ def main():
     pa.add_argument('--uit', required=True, help='uitvoer-json')
     pa.add_argument('--n', type=int, default=15, help='aantal frames (default 15)')
 
+    pb = sub.add_parser('bocht', help='bochtsignaal + gevonden bochtsegmenten')
+    pb.add_argument('npz')
+    pb.add_argument('--stap', type=int, default=None,
+                    help='om de hoeveel frames het verloop wordt geprint')
+
     args = p.parse_args()
     if args.cmd == 'metrics':
         print_metrics(bereken_metrics(args.npz, args.golden))
@@ -398,6 +453,8 @@ def main():
         vergelijk(args.npz_oud, args.npz_nieuw, args.golden)
     elif args.cmd == 'annoteer':
         annoteer(args.video, args.uit, args.n)
+    elif args.cmd == 'bocht':
+        bocht_rapport(args.npz, args.stap)
 
 
 if __name__ == '__main__':

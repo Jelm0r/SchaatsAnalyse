@@ -181,6 +181,24 @@ STREK_MIN_HELLING_DEG = 20.0 # minimale helling van het onderbeen t.o.v. de vert
 ONV_AFGEKAPT  = "afgekapt"              # run loopt door tot het einde van video/pose-segment
 ONV_GEEN_PUSH = "geen volledige push"   # plateau beslaat alleen het rechtop-komen
 
+# ── Bochtdetectie ───────────────────────────────────────────────────────────────
+# In de bocht draait het lichaam om de verticale as: de heupen staan niet langer naast
+# elkaar maar achter elkaar, dus hun horizontale afstand in beeld stort in terwijl de
+# romp even lang blijft. `bocht_ratio` = heupbreedte / romplengte is daarmee een
+# schaalvrij "sta ik frontaal in beeld"-signaal (zelfde principe als `_strek_ratio`):
+# onafhankelijk van de afstand tot de camera, en juist gevoelig voor precies de rotatie
+# die de bocht maakt. Gemeten over de 22 analyses in de bibliotheek:
+#   - 16 frontale clips (recht stuk): mediaan 0,75–1,20, laagste 0,5 s-mediaan 0,57
+#   - bochtdeel van vier lange clips: mediaan 0,21–0,24, laagste 0,05
+# Marge dus ruim 3×. Alternatieve noemers (femur, heel been, schouderbreedte) gaven
+# allemaal minder scheiding (1,7–2,7×).
+BOCHT_IN        = 0.40   # onder deze (gesmoothte) ratio: bocht — ruim onder 0,57
+BOCHT_UIT       = 0.50   # boven deze ratio weer recht stuk (hysterese, zoals STANCE_BAND_FRAC)
+BOCHT_SMOOTH_S  = 0.5    # smoothing-venster (s); de ratio golft licht mee met de slag
+BOCHT_MIN_S     = 0.6    # korter dan dit is geen bocht maar ruis → laten staan
+BOCHT_MIN_TORSO_PX = 12  # onder deze romplengte is de ratio pixelruis (de verste schaatser
+                         # in de bibliotheek meet 25–35 px)
+
 # ── Perspectiefcorrectie (fase 7) ───────────────────────────────────────────────
 # De 3D-reconstructie zelf zit in schaats_perspectief.py; hier alleen de koppeling.
 ENKEL_HOOGTE_M       = 0.10   # enkel-landmark ligt op malleolus + schaats, niet óp het ijs
@@ -188,6 +206,7 @@ RIJRICHTING_VENSTER_S = 0.4   # venster (s) voor de traject-richting uit wereldp
 RIJRICHTING_MIN_M     = 0.15  # minimale verplaatsing in het venster om de richting te vertrouwen
 
 # ── Landmark indices (MediaPipe Pose) ──────────────────────────────────────────
+L_SHOULDER, R_SHOULDER = 11, 12
 L_HIP, R_HIP     = 23, 24
 L_KNEE, R_KNEE   = 25, 26
 L_ANKLE, R_ANKLE = 27, 28
@@ -231,6 +250,10 @@ class FrameResultaat:
                                   # van deze stand-run niet als meting telt (ONV_AFGEKAPT /
                                   # ONV_GEEN_PUSH) — beide leveren een te steile hoek
     pose_gevonden: bool = False
+    bocht: bool = False         # de schaatser staat hier niet frontaal in beeld (bocht) — er
+                                # worden geen afgeleiden berekend, dus dit frame levert geen
+                                # afzetmeting. Bij de YOLO-backend zijn dit tevens de frames
+                                # waarvan de detectiepass de inferentie heeft overgeslagen.
     horizon_deg: float = 0.0    # camerakanteling t.o.v. het ijs bij dit frame (per-frame bij auto)
     # Kwaliteitsvlag uit de verfijningspass (alleen YOLO+RTMPose-backend): horizontale
     # afwijking (px) van het kniepunt t.o.v. de middellijn van het been in het pak-
@@ -468,6 +491,8 @@ def detecteer_gewicht_op_been(been, lm_data, enkel_history, heup_history, w, h, 
 
 def teken_been_overlay(frame, lm_data, been, hoek, gewicht_erop, kniehoek, horizon_deg=0.0):
     """Teken de been-overlay met hoek en kleurcodering."""
+    if lm_data is None or been not in ('links', 'rechts'):
+        return                        # bochtframe of nog niet doorgerekend: niets te tekenen
     kleur = GROEN if gewicht_erop else ROOD
 
     if been == 'links':
@@ -593,6 +618,13 @@ def teken_overlay_op_frame(frame, resultaat, fps, toon_skelet=True, toon_afzetbe
     if toon_skelet:
         teken_alle_landmarks(frame, resultaat.lm, w, h)
 
+    if resultaat.bocht:
+        # Het skelet blijft staan (je wilt zien dát daar iemand rijdt), maar er is hier
+        # niets gemeten — zeg dat er dan ook bij i.p.v. een lege HUD te tonen.
+        cv2.putText(frame, "BOCHT - niet gemeten", (20, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, GEEL, 2)
+        return
+
     if toon_afzetbeen:
         teken_been_overlay(frame, resultaat.lm_data, resultaat.been, resultaat.hoek,
                             resultaat.gewicht_erop, resultaat.kniehoek, resultaat.horizon_deg)
@@ -623,6 +655,33 @@ def torso_centroid(lm):
         return None
     xs, ys = zip(*pts)
     return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+
+def bocht_ratio(lm, w, h, min_vis=VIS_MIN):
+    """
+    "Sta ik frontaal in beeld?" als schaalvrij getal: heupbreedte gedeeld door de
+    romplengte (schoudermidden → heupmidden), beide in pixels. Frontaal staan de heupen
+    naast elkaar (~0,6–1,3); draait het lichaam de bocht in, dan komen ze achter elkaar
+    te staan en stort de breedte in (~0,2) terwijl de romp even lang blijft.
+
+    Beide maten in pixels (níet genormaliseerd), anders zou de beeldverhouding de ratio
+    scheeftrekken. None als de vier landmarks niet zichtbaar zijn of de romp te klein is
+    om nog iets te kunnen zeggen (`BOCHT_MIN_TORSO_PX`) — op die afstand is de breedte
+    pixelruis. Werkt op elke lijst van landmark-objecten met .x/.y/.visibility, dus ook
+    op een YOLO-`Detectie.lm` tijdens de detectiepass.
+    """
+    try:
+        sl, sr, hl, hr = (lm[L_SHOULDER], lm[R_SHOULDER], lm[L_HIP], lm[R_HIP])
+    except (TypeError, IndexError):
+        return None
+    if min(p.visibility for p in (sl, sr, hl, hr)) < min_vis:
+        return None
+    heup_b = abs(hl.x - hr.x) * w
+    romp = float(np.hypot(((sl.x + sr.x) - (hl.x + hr.x)) / 2 * w,
+                          ((sl.y + sr.y) - (hl.y + hr.y)) / 2 * h))
+    if romp < BOCHT_MIN_TORSO_PX:
+        return None
+    return heup_b / romp
 
 
 def _bbox(lm):
@@ -1280,6 +1339,90 @@ def kader_reeks(resultaten, fps):
     return [(float(cx[i]), float(cy[i]), float(straal[i])) for i in range(len(resultaten))]
 
 
+def bepaal_bocht_reeks(resultaten, w, h, fps):
+    """
+    Markeert per frame of de schaatser in de bocht rijdt (`FrameResultaat.bocht`), zodat
+    die frames geen afzetmeting meer opleveren. Recept van `bepaal_horizon_reeks` /
+    `kader_reeks`: ruw signaal → uitschieters eruit → smoothen → beslissen.
+
+    1. `bocht_ratio` per frame met een pose (heupbreedte / romplengte).
+    2. Hampel-uitschieters weg (een frame waarin een heup kort verspringt) en gaten
+       lineair overbruggen, daarna Savitzky–Golay over `BOCHT_SMOOTH_S` — de ratio golft
+       licht mee met de slag en moet niet per frame kunnen omslaan.
+    3. Hysterese: onder `BOCHT_IN` de bocht in, pas boven `BOCHT_UIT` er weer uit
+       (hetzelfde patroon als de stand-toewijzing in `wijs_afzetbeen_cyclus`).
+    4. Bochtstukken korter dan `BOCHT_MIN_S` zijn ruis en vervallen.
+
+    Frames **zonder** pose kunnen niet gemeten worden: die erven de lopende toestand, en
+    een `bocht`-vlag die er al op stond blijft staan (bij de YOLO-backend zijn dat de
+    frames die de detectiepass heeft overgeslagen — daar is niets te meten en dat blijft
+    zo). Frames **mét** pose worden op hun eigen ratio beoordeeld en kunnen een al gezette
+    vlag dus ook weer **wissen**: precies wat er moet gebeuren als de detectiepass een
+    stuk onterecht heeft overgeslagen maar de controleframes daarbinnen een keurig
+    frontale schaatser laten zien.
+    """
+    n = len(resultaten)
+    if n == 0:
+        return
+
+    def _ratio(r):
+        if not (r.pose_gevonden and r.lm is not None):
+            return np.nan
+        v = bocht_ratio(r.lm, w, h)
+        return np.nan if v is None else v
+
+    ruw = np.array([_ratio(r) for r in resultaten], dtype=float)
+    meetbaar = ~np.isnan(ruw)
+    if not meetbaar.any():
+        return                       # geen enkel oordeel mogelijk — laat de vlaggen staan
+    y = _interpoleer_onbetrouwbaar(ruw, meetbaar)
+    betr = meetbaar & ~_hampel_uitschieters(y)
+    if betr.any():
+        y = _interpoleer_onbetrouwbaar(y, betr)
+    win = max(SMOOTH_POLY + 2, int(round(BOCHT_SMOOTH_S * fps)))
+    if win % 2 == 0:
+        win += 1
+    y = _savgol(y, win, SMOOTH_POLY) if n >= win else y
+
+    # Hysterese. De starttoestand komt van het eerste meetbare frame, zodat een clip die
+    # ín de bocht begint meteen goed staat (i.p.v. pas na de eerste onderschrijding).
+    eerste = int(np.argmax(meetbaar))
+    staat = bool(y[eerste] < BOCHT_IN)
+    vlag = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if meetbaar[i]:
+            if y[i] < BOCHT_IN:
+                staat = True
+            elif y[i] > BOCHT_UIT:
+                staat = False
+            vlag[i] = staat
+        else:
+            vlag[i] = staat or resultaten[i].bocht
+
+    # Te korte bochtjes zijn ruis. Andersom geldt hetzelfde: een paar frames "recht stuk"
+    # midden in de bocht is geen recht stuk, en zou een schijnmeting kunnen opleveren.
+    min_len = max(1, int(round(BOCHT_MIN_S * fps)))
+    _wis_korte_runs(vlag, min_len)
+
+    for r, b in zip(resultaten, vlag):
+        r.bocht = bool(b)
+
+
+def _wis_korte_runs(vlag, min_len):
+    """Zet aaneengesloten runs korter dan `min_len` op de waarde van hun buren (in place).
+    Runs aan de rand tellen alleen mee als ze aan hun ene buur-run grenzen."""
+    n = len(vlag)
+    i = 0
+    while i < n:
+        j = i
+        while j < n and vlag[j] == vlag[i]:
+            j += 1
+        if (j - i) < min_len and not (i == 0 and j == n):
+            buur = vlag[i - 1] if i > 0 else vlag[j]
+            vlag[i:j] = buur
+        i = j
+
+
 def maak_voorvulling(resultaten, idx, fps, n_lm=33):
     """
     Een startskelet voor frame `idx`, dat zelf géén pose heeft: de GUI zet dit neer als
@@ -1638,8 +1781,15 @@ def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclu
     # Pass 1: pixelcoördinaten voor alle pose-frames. De onvolledig-vlag hoort bij de
     # been-runs van déze doorrekening (na een skelet-edit kunnen die verschuiven), dus
     # eerst schoon.
+    #
+    # Een bochtframe krijgt bewust géén `lm_data`: dáár zit de hele uitsluiting. De
+    # been-toewijzing, de afzet-voltooiing en de event-segmentatie bouwen hun segmenten
+    # allemaal op "pose én lm_data", dus zij zien de bocht vanzelf als een detectiegat —
+    # zonder dat er ook maar iets aan de meetlogica verandert. Het skelet blijft wél
+    # getekend (dat leest `r.lm`), zodat je in de weergave ziet wat er gebeurde.
     for r in resultaten:
-        r.lm_data = get_landmarks(r.lm, w, h) if (r.pose_gevonden and r.lm is not None) else None
+        bruikbaar = r.pose_gevonden and r.lm is not None and not r.bocht
+        r.lm_data = get_landmarks(r.lm, w, h) if bruikbaar else None
         r.afzet_onvolledig = None
 
     # Been-toewijzing (globaal, cyclus-bewust) vóór de per-frame afgeleiden.
@@ -1722,11 +1872,15 @@ def fase_voortgang(progress_callback, fase, n_fasen):
 def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, horizon_deg=0.0, auto_horizon=False,
-              perspectief=None, waarschuwing_callback=None):
+              perspectief=None, waarschuwing_callback=None, bocht=True):
     """
     Volledige analyse-pijplijn: multi-pose detectie + doel-tracking (streaming),
     daarna offline landmark-smoothing en het berekenen van de afgeleide grootheden.
     Retourneert (VideoInfo, lijst[FrameResultaat]).
+
+    Met `bocht` (default) worden bochtframes gemarkeerd (`bepaal_bocht_reeks`) en leveren
+    ze geen afzetmeting. Deze backend detecteert streaming per frame en slaat — anders
+    dan de YOLO-backend — geen frames over; hier is het dus puur een meetfilter.
 
     `waarschuwing_callback(tekst)` bestaat voor signatuur-compatibiliteit met de YOLO-
     backend (die meldt er stille terugvallen in de doelkeuze mee). Deze backend kiest
@@ -1755,6 +1909,9 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
 
     if smooth_landmarks:
         smooth_landmarks_offline(resultaten, info.w, info.h, fps=info.fps)
+
+    if bocht:
+        bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
 
     zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps, hor_cb,
                 perspectief=perspectief)
@@ -1872,9 +2029,11 @@ def resultaten_naar_arrays(resultaten, info):
     pose_gevonden = np.zeros(n, dtype=bool)
     horizon       = np.zeros(n, dtype=np.float32)
     middellijn    = np.full((n, 2), np.nan, dtype=np.float32)  # dev l_knie, r_knie (px)
+    bocht         = np.zeros(n, dtype=bool)
     for i, r in enumerate(resultaten):
         pose_gevonden[i] = r.pose_gevonden
         horizon[i]       = r.horizon_deg
+        bocht[i]         = r.bocht
         if r.middellijn_dev:
             for k, naam in enumerate(('l_knie', 'r_knie')):
                 if r.middellijn_dev.get(naam) is not None:
@@ -1889,6 +2048,10 @@ def resultaten_naar_arrays(resultaten, info):
         'pose_gevonden': pose_gevonden,
         'horizon_deg':   horizon,
         'middellijn_dev': middellijn,
+        # De bocht-vlag is géén afgeleide: bij de YOLO-backend markeert hij ook de frames
+        # waarvan de detectiepass de inferentie heeft overgeslagen, en dat valt uit de
+        # landmarks niet te herleiden (die zijn er juist niet). Dus opslaan.
+        'bocht':         bocht,
         'w':      np.int32(info.w),
         'h':      np.int32(info.h),
         'fps':    np.float32(info.fps),
@@ -1907,6 +2070,7 @@ def arrays_naar_resultaten(arrays):
     pose_gevonden = arrays['pose_gevonden']
     horizon       = arrays['horizon_deg']
     middellijn    = arrays['middellijn_dev'] if 'middellijn_dev' in arrays else None
+    bocht         = arrays['bocht'] if 'bocht' in arrays else None   # ontbreekt in oude npz's
     info = VideoInfo(int(arrays['w']), int(arrays['h']),
                      float(arrays['fps']), int(arrays['totaal']))
     fps = info.fps
@@ -1915,6 +2079,7 @@ def arrays_naar_resultaten(arrays):
         r = FrameResultaat(frame_nr=i, tijd=i / fps if fps > 0 else 0.0)
         r.pose_gevonden = bool(pose_gevonden[i])
         r.horizon_deg   = float(horizon[i])
+        r.bocht         = bool(bocht[i]) if bocht is not None else False
         if middellijn is not None and not np.all(np.isnan(middellijn[i])):
             r.middellijn_dev = {
                 naam: (float(middellijn[i, k]) if not np.isnan(middellijn[i, k]) else None)
@@ -2014,7 +2179,8 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
 
 def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                     num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
-                    horizon_deg=0.0, auto_horizon=False, save_npz=None, from_npz=None):
+                    horizon_deg=0.0, auto_horizon=False, save_npz=None, from_npz=None,
+                    bocht=True):
     """
     CLI-analyse in twee passes: eerst detecteren/tracken/smoothen (nodig omdat de
     offline smoothing álle frames vereist), daarna de video opnieuw lezen en de
@@ -2042,7 +2208,12 @@ def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.01
         info, resultaten = analyseer(
             input_pad, model_pad, smooth_n, threshold, force_fps,
             num_poses=num_poses, doel_punt=doel_punt, smooth_landmarks=smooth_landmarks,
-            progress_callback=toon_voortgang, horizon_deg=horizon_deg, auto_horizon=auto_horizon)
+            progress_callback=toon_voortgang, horizon_deg=horizon_deg, auto_horizon=auto_horizon,
+            bocht=bocht)
+        n_bocht = sum(1 for r in resultaten if r.bocht)
+        if n_bocht:
+            print(f"[INFO] {n_bocht} van {len(resultaten)} frames als bocht gemarkeerd "
+                  f"(geen meting)")
         if save_npz:
             sla_landmarks_op(save_npz, resultaten, info)
             print(f"[INFO] Landmarks opgeslagen: {save_npz}")
@@ -2099,6 +2270,9 @@ if __name__ == "__main__":
     parser.add_argument("--auto-horizon", action="store_true",
                         help="Detecteer de ijslijn-kanteling automatisch, per frame (voor een "
                              "schommelende camera); overschrijft --horizon.")
+    parser.add_argument("--no-bocht", action="store_true",
+                        help="Bochtdetectie uitzetten; ook bochtframes leveren dan (onbruikbare) "
+                             "afzetmetingen op.")
     parser.add_argument("--save-npz", default=None, metavar="PAD",
                         help="Schrijf na de analyse de landmarks weg naar dit .npz (fase 0).")
     parser.add_argument("--from-npz", default=None, metavar="PAD",
@@ -2149,4 +2323,5 @@ if __name__ == "__main__":
         auto_horizon=args.auto_horizon,
         save_npz=args.save_npz,
         from_npz=args.from_npz,
+        bocht=not args.no_bocht,
     )

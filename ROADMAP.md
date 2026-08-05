@@ -135,6 +135,51 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 
 ---
 
+## Extra — Bibliotheeklijst: videoduur i.p.v. afzetten/hoek
+
+**Doel:** de analysetabel op de startpagina (`tabel_analyses`) toont nu "aantal afzetten" en "gem. hoek" per rij. Die twee kolommen zijn niet waar de trainer op eerste oogopslag naar kijkt; bruikbaarder is **hoe lang de video duurt** (seconden), en de gemiddelde hoek mag helemaal weg.
+
+**Aanpak:**
+
+- **Duur i.p.v. aantal afzetten**: de duur (`totaal_frames / fps`) staat al in de `analyse`-tabel (fase 1-schema, kolommen `totaal_frames`+`fps`), dus dit is een pure weergavewijziging in `lijst_analyses()` (`schaats_db.py`) + de kolomopbouw in `schaats_gui.py` — geen schemabump, geen nieuwe berekening. Formatteren als `m:ss` (of `s` bij korte clips).
+- **Gem. hoek-kolom weghalen**: kolom uit `tabel_analyses` schrappen. De onderliggende berekening (`AVG(hoek)` met de `ONVOLLEDIG_MARKERS`-filtering in `lijst_analyses`) mag blijven bestaan voor fase 2's voortgangsgrafiek — alleen de kolom in déze tabel verdwijnt.
+- **Aantal afzetten**: blijft eventueel bruikbaar elders (bv. als tooltip), maar is als kolom niet meer nodig zodra duur er staat — te beslissen of hij helemaal weg mag of blijft staan naast de duur.
+
+**Klaar wanneer:** de bibliotheektabel toont per analyse titel/datum/duur (en evt. aantal afzetten), zonder de gemiddelde-hoek-kolom.
+
+---
+
+## Extra — Bochtdetectie: de bocht wordt niet meer geanalyseerd ✅
+
+> **Af (5 augustus 2026)** — buiten de fasering. De bocht kostte analysetijd zonder ooit een bruikbare meting op te leveren; dat is nu beide opgelost.
+>
+> **Wat het signaal is:** `bocht_ratio` in `schaats_analyse.py` = **heupbreedte / romplengte** (schoudermidden→heupmidden), in pixels. Schaalvrij, net als `_strek_ratio` — en juist gevoelig voor de rotatie om de verticale as die de bocht maakt: frontaal staan de heupen naast elkaar, in de bocht achter elkaar terwijl de romp even lang blijft. **Gemeten over alle 22 analyses in de bibliotheek:** 18 frontale clips komen nooit onder 0,57 (mediaan 0,75–1,20); het bochtdeel van vier lange clips zit op 0,21–0,24. Marge ruim 3×. Vier alternatieve noemers (femur, heel been, schouderbreedte, combinaties) gaven allemaal minder scheiding (1,7–2,7×). De classificatie (`bepaal_bocht_reeks`, recept van `bepaal_horizon_reeks`: Hampel → Savitzky–Golay → hysterese 0,40 in / 0,50 uit → runs < 0,6 s weg) markeert op die 18 frontale clips **nul** frames als bocht.
+>
+> **Waar de tijdwinst zit:** `_BochtWacht` in `schaats_yolo.py`. De detectiepass is ~94% van de analysetijd, dus die moest de bocht overslaan — en dat kon niet met `model.track(source=pad, stream=True)`, want ultralytics leest en infereert daar zelf elk frame. De lus leest de frames nu zelf (decoderen is verwaarloosbaar, en zo blijft de framenummering exact) en infereert in de bocht nog maar elke ~0,3 s, precies zoals voorgesteld. De wacht gaat overslaan na 0,5 s bochtbewijs (iemand in beeld, maar gedraaid) of 3 s zonder enige meetbare persoon — die 3 s ligt bewust boven het langste detectiegat op een recht stuk in de bibliotheek (2,1 s, IMG_9001). Omstanders langs de boarding staan frontaal in beeld en zouden de analyse eeuwig op vol tempo houden; daarom telt alleen een persoon die beweegt **of groeit** (een schaatser die recht op de camera af komt verplaatst in beeld nauwelijks maar wordt ~18%/s groter).
+>
+> **Waarom het overslaan veilig is:** de verfijningspass vult detectiegaten tot `GAP_VUL_S` (1,0 s) met geïnterpoleerde bboxes en schat de pose daar alsnog top-down. De gaten die het overslaan achterlaat zijn 0,33 s, dus ruim daarbinnen. De bocht wordt daarom **bepaald op de ruwe pass-1-landmarks, vóór de verfijning**: heeft de wacht een stuk ónterecht overgeslagen, dan laten juist de controleframes daarbinnen een frontale schaatser zien, wordt het stuk vrijgegeven en vult pass 2 de gaten alsnog. Te weinig overslaan kost tijd, te veel overslaan kost (bijna) geen dekking.
+>
+> **Gemeten (5 aug 2026):**
+>
+> | | | |
+> |---|---|---|
+> | **"Kim tempo"** (888 frames, 52% bocht) | 2266 s → **1253 s** | **45% sneller** (1,8×) |
+> | ... afzetten | 32 → 16 | de vijf hoeken van 74–87° aan het eind (de bocht) zijn weg |
+> | ... rechte stuk (frame 0–427) | landmarks **identiek** (mediaan 0,00 px) | alleen de laatste 7 frames vóór de bocht wijken af |
+> | **"Schaats frontaal"** (kruisende schaatsers) | bocht aan vs. uit: **byte-identiek** | 0 frames als bocht gemarkeerd |
+> | **"7e ronde"** (staand telefoonbeeld) | 0 bocht, dekking 100%, zelfde 5 afzetten | geen rotatieprobleem door de eigen leeslus |
+> | **De eigen leeslus zelf** | met bocht uit: **byte-identiek aan de opgeslagen analyse** | `model.track(source=...)` vervangen verandert niets |
+>
+> De hoekverschillen die op het rechte stuk van Kim tempo overblijven (tot 3,8°, één afzet minder) komen **niet** uit de detectie maar uit de meetlogica: de geschatte slagperiode (`STREK_MIN_SLAG_FRAC`) en de L/R-alternatiecontrole liepen voorheen mede over bochtruis. Zet je de bochtvlag op de ópgeslagen landmarks, dan komt er exact dezelfde eventlijst uit — dus dit is winst, geen afwijking.
+>
+> **Wat "bocht" betekent voor de meting:** één regel in `verwerk_afgeleiden` — een bochtframe krijgt geen `lm_data`. Been-toewijzing, afzet-voltooiing en event-segmentatie bouwen hun segmenten allemaal op "pose én lm_data", dus zij zien de bocht vanzelf als een detectiegat; aan de meetlogica is niets veranderd. Het skelet blijft wél getekend, met "BOCHT — niet gemeten" in beeld. Dat markeren i.p.v. hard afkappen is nodig omdat sommige clips juist ín de bocht beginnen (laatste slagen van de vorige ronde) en omdat een video met meerdere rondjes zo elk recht stuk blijft opleveren.
+>
+> **Verder:** `FrameResultaat.bocht` gaat mee in het npz (oude npz's laden ongewijzigd — de runtime-skip valt niet uit landmarks te herleiden, dus die moet bewaard); checkbox **"Bocht overslaan (sneller)"** (standaard aan) in beide analyse-dialogen; de dekkingsteller telt bochtframes niet als openstaand werk en "⏭ Volgend gat" springt er niet in; `python schaats_eval.py bocht analyse.npz` print het signaal + de gevonden segmenten. CLI: `--no-bocht`.
+>
+> **Nog open:** de drempels zijn geijkt op vier TV-clips die in de bocht eindigen. Er is nog **geen clip uit de eigen opstelling die ín de bocht begint** — zodra die er is, met `schaats_eval.py bocht` narekenen en `BOCHT_IN`/`BOCHT_UIT` zo nodig bijstellen. `BOCHT_MIN_BEWEGING` (de omstander-filter) is het meest waarschijnlijke tweede afstelpunt.
+
+---
+
 ## Extra — Batch-analyse ✅
 
 > **Af (20 juli 2026)** — buiten de fasering, bovenop de fase 1-flow. Meerdere video's in één keer analyseren.
@@ -305,7 +350,9 @@ SQLite is niet ontworpen voor gelijktijdig schrijven via cloudsync. Op teamschaa
 In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste testvideo (zie meetprotocol hieronder):
 
 1. **Batch-inference in de verfijningspass** (`_verfijn_landmarks`): de crops worden nu één voor één door `model.predict()` gehaald; ultralytics accepteert een lijst beelden. Crops verzamelen en in batches van bv. 8–16 voorspellen → minder overhead per frame, betere corebenutting. Weinig code, geen kwaliteitsverlies.
-2. **Prefetch-thread voor het videolezen**: `cv2.VideoCapture.read()` + resize in een aparte thread met een kleine queue, zodat decoderen en inference elkaar overlappen i.p.v. afwisselen. Geldt voor alle passes (detectie, verfijning, auto-horizon).
+2. **Prefetch-thread voor het videolezen**: `cv2.VideoCapture.read()` + resize in een aparte thread met een kleine queue, zodat decoderen en inference elkaar overlappen i.p.v. afwisselen. Geldt voor alle passes (detectie, verfijning, auto-horizon). *Sinds de bochtdetectie (aug 2026) leest `_detecteer_alles` de frames zelf i.p.v. via `model.track(source=...)`, dus deze stap kan nu ook op de detectiepass.*
+
+   **Aanpalende kans, gemeten bij de bochtdetectie:** de verfijningspass vult detectiegaten tot `GAP_VUL_S` (1,0 s) met geïnterpoleerde bboxes en herstelt daar de pose. Op het rechte stuk 1 op de N frames overslaan in pass 1 zou dus grotendeels door pass 2 opgevangen worden — de bocht-wacht doet precies dat al in de bocht. Alleen te doen mét het meetprotocol ernaast: hier gaat het wél om frames waarop gemeten wordt.
 3. **Lichter model voor de detectiepass, x voor de verfijning**: pass 1 hoeft alleen bboxes/track-IDs en globale keypoints te leveren; de nauwkeurige hoeken komen uit de crop-pass. `yolo26m-pose` (of zelfs `s`) op 1280 voor pass 1 + `yolo26x-pose` voor de crops kan een flink deel van de looptijd schelen. **Wel valideren** dat pass 1 de verre/bewegingsonscherpe schaatser nog vindt (dat was de reden voor 1280 × x) — op de testvideo controleren dat de dekking 100% blijft en de events identiek.
 4. **Geëxporteerd model i.p.v. PyTorch**: `model.export(format=...)` van ultralytics en dan inferen met:
    - **OpenVINO** (`format="openvino"`): geoptimaliseerde CPU-runtime, werkt ook op AMD-CPU's; typisch 1.5–3× sneller dan torch-CPU, zelfde gewichten dus zelfde output (kleine numerieke afwijkingen).
@@ -355,6 +402,7 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 | 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie |
 | — | Batch-analyse (extra, buiten de fasering) | ✅ **af** (20 jul 2026) |
 | — | Vergelijk schaatsers + `VideoSpeler`-refactor (extra) | ✅ **af** (27 jul 2026) |
+| — | Bochtdetectie: bocht niet meer analyseren (extra) | ✅ **af** (5 aug 2026) |
 | 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026; skelet plaatsen op gat-frames 31 jul 2026) |
 | 4 | Instellingen, gedeelde map, conflictafhandeling | ✅ **af** (20 jul 2026) |
 | 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
@@ -369,4 +417,5 @@ In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste
 - ~~**Fase 4**: welke cloudprovider gebruikt het team feitelijk?~~ **Besloten (jul 2026): Google Drive** (Mirror-modus, dus alle bestanden lokaal op schijf). Conflictdetectie is provider-agnostisch (elk `*.db` naast `schaats.db`).
 - **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?
 - **Fase 6**: hoeveel meetafwijking is acceptabel voor het "snel"-profiel? (Voorstel: events moeten identiek blijven, hoeken mogen ±1° verschillen.)
+- **Bochtdetectie**: er is nog geen clip uit de eigen opstelling die **ín de bocht begint**; de drempels (`BOCHT_IN`/`BOCHT_UIT`) staan nu op de marge uit vier TV-clips die in de bocht éindigen. Zodra zo'n clip er is: `python schaats_eval.py bocht analyse.npz` en zo nodig bijstellen.
 - **Fase 7** *(nice-to-have, niet nu)*: onder de huidige aanname (frontaal, horizontaal) is de perspectiefvertekening klein en deze fase geen prioriteit. Wordt pas relevant bij een schuin geplaatste camera; dán ook: welke baanlijnen zijn scherp genoeg om na te trekken en is hun onderlinge afstand bekend (schaal in meters — zonder schaal werkt de hoekcorrectie ook, alleen snelheid/slaglengte niet)? En staat de camera dan op statief, of moet het lijn-tracken uit fase 5 mee?
