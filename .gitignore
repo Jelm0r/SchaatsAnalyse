@@ -11,6 +11,9 @@ __pycache__/
 # Modelgewichten (herdownloadbaar, te groot voor GitHub)
 *.pt
 *.task
+# ONNX-export voor de DirectML-route: wordt per machine uit het .pt-bestand gemaakt
+# (zie GPU.md) en is met ~220 MB sowieso te groot voor GitHub.
+*.onnx
 
 # Logs
 *.log

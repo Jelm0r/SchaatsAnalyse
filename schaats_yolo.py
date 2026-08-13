@@ -39,16 +39,30 @@ visibility 0; RTMPose-26 levert ze wél echt (Halpe26 → MediaPipe 29–32).
 """
 import os
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 import cv2
 import numpy as np
+
+# Vóór de ultralytics-import: de ONNX-backend van ultralytics doet
+# `check_requirements("onnxruntime")` en zou daarmee ongevraagd de CPU-build van
+# ONNXRuntime installeren — precies over `onnxruntime-directml` heen, het pakket waar de
+# iGPU-route hieronder op steunt. Auto-installeren staat daarom uit; de afhankelijkheden
+# van dit project worden met de hand beheerd (zie GPU.md).
+os.environ.setdefault('YOLO_AUTOINSTALL', 'false')
+
 from ultralytics import YOLO   # op moduleniveau: zo faalt de import meteen als torch/
                                # ultralytics ontbreekt, en kiest de GUI netjes MediaPipe.
 
 try:                           # optioneel: RTMPose-verfijning (pip install rtmlib onnxruntime)
     from rtmlib.tools.pose_estimation import RTMPose as _RTMPose
+    from rtmlib.tools.base import RTMLIB_SETTINGS as _RTMLIB_SETTINGS
+    # rtmlib kent van huis uit alleen cpu/cuda/rocm/mps; DirectML — de GPU-route op een
+    # Windows-machine zónder NVIDIA — ontbreekt in die tabel. Eén regel eraan toevoegen
+    # volstaat: rtmlib zoekt de provider verder gewoon op naam op.
+    _RTMLIB_SETTINGS['onnxruntime'].setdefault('dml', 'DmlExecutionProvider')
     IS_RTMPOSE = True
 except ImportError:
     IS_RTMPOSE = False
@@ -99,23 +113,51 @@ def yolo_device():
 
 
 @lru_cache(maxsize=1)
+def _ort_providers():
+    """De ONNXRuntime-providers van deze installatie, of een lege verzameling."""
+    try:
+        import onnxruntime as ort
+        return frozenset(ort.get_available_providers())
+    except Exception:
+        return frozenset()
+
+
+@lru_cache(maxsize=1)
 def rtmpose_device():
     """
     Apparaat voor de RTMPose-verfijning: 'cuda' als ONNXRuntime een CUDA-provider heeft,
-    anders 'cpu'. Dat is een ándere vraag dan `yolo_device()` — deze pass draait niet op
-    torch, dus een CUDA-torch zegt niets over wat ONNXRuntime kan. Staat alleen het
-    gewone `onnxruntime` geïnstalleerd (zonder `onnxruntime-gpu`), dan is er wél een GPU
-    maar kan deze pass er niet bij, en blijft hij stilletjes op de CPU.
+    'dml' als het er een DirectML-provider heeft, anders 'cpu'. Dat is een ándere vraag
+    dan `yolo_device()` — deze pass draait niet op torch, dus een CUDA-torch zegt niets
+    over wat ONNXRuntime kan. Staat alleen het gewone `onnxruntime` geïnstalleerd (zonder
+    `onnxruntime-gpu`/`onnxruntime-directml`), dan is er wél een GPU maar kan deze pass er
+    niet bij, en blijft hij stilletjes op de CPU.
     """
     if _cpu_afgedwongen():
         return 'cpu'
-    try:
-        import onnxruntime as ort
-        if 'CUDAExecutionProvider' in ort.get_available_providers():
-            return 'cuda'
-    except Exception:
-        pass
+    providers = _ort_providers()
+    if 'CUDAExecutionProvider' in providers:
+        return 'cuda'
+    if 'DmlExecutionProvider' in providers:
+        return 'dml'
     return 'cpu'
+
+
+@lru_cache(maxsize=1)
+def yolo_dml():
+    """
+    True als de **detectiepass** via DirectML op de GPU kan — de route voor een machine
+    zonder NVIDIA-kaart (integrated Intel/AMD-GPU), waar `yolo_device()` altijd 'cpu'
+    zegt omdat CUDA daar principieel niets doet.
+
+    DirectML is geen torch-apparaat: het bestaat alleen binnen ONNXRuntime. De weg loopt
+    dus niet via `device=`, maar via het **geëxporteerde ONNX-model** dat ultralytics ook
+    kan laden (zie `_laad_yolo`). CUDA gaat vóór: heeft deze machine een bruikbare
+    NVIDIA-GPU, dan is de gewone torch-route sneller én dichter bij de referentiemeting
+    in GPU.md.
+    """
+    if _cpu_afgedwongen() or yolo_device() == 'cuda':
+        return False
+    return 'DmlExecutionProvider' in _ort_providers()
 
 
 _gpu_uitgevallen = False   # na een CUDA-OOM: de rest van deze run draait op de CPU
@@ -163,6 +205,149 @@ STANDAARD_YOLO_MODEL = "yolo26x-pose.pt"
 
 # ── Detectie ────────────────────────────────────────────────────────────────────
 DETECT_IMGSZ = 1280       # inferentieresolutie detectiepass; 640 mist verre/blurry schaatsers
+
+# opset 17 voor de ONNX-export: hoger levert operatoren op die de DirectML-provider niet
+# allemaal kent en die dan stilletjes op de CPU worden uitgevoerd — precies de winst die
+# we hier komen halen.
+ONNX_OPSET = 17
+
+
+def _onnx_pad(pt_pad):
+    """Pad van het DirectML-model naast het .pt-bestand."""
+    stam, _ = os.path.splitext(pt_pad)
+    return f"{stam}-dml.onnx"
+
+
+@contextmanager
+def _dml_sessies():
+    """
+    Laat ONNXRuntime-sessies die binnen dit blok worden opgebouwd op DirectML draaien.
+
+    Ultralytics kiest zijn eigen provider en kent er precies drie: CUDA, CoreML en CPU
+    (`ultralytics/nn/backends/onnx.py`). DirectML zit daar niet bij, en er is geen knop
+    om het mee te geven — dus wordt `InferenceSession` hier tijdelijk vervangen door een
+    variant die de DirectML-provider vooraan zet. Alleen een aanvraag die het bij de CPU
+    zou laten wordt omgeleid; vraagt de aanroeper zelf al om een provider (rtmlib doet
+    dat), dan blijft die keuze staan.
+    """
+    import onnxruntime as ort
+    origineel = ort.InferenceSession
+
+    def maak(pad, sess_options=None, providers=None, **kw):
+        if not providers or list(providers) == ['CPUExecutionProvider']:
+            providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+        return origineel(pad, sess_options, providers=providers, **kw)
+
+    ort.InferenceSession = maak
+    try:
+        yield
+    finally:
+        ort.InferenceSession = origineel
+
+
+class _DmlYolo:
+    """
+    Het YOLO-detectiemodel op DirectML, met het gewone .pt-model op de CPU als vangnet.
+
+    Naar buiten toe een gewoon YOLO-model: `track()` en `predict()` gaan ongewijzigd door.
+    Twee dingen doet deze schil wél zelf:
+
+    - **De sessie binnen de patch opbouwen.** Ultralytics maakt de ONNXRuntime-sessie pas
+      bij de eerste inferentie aan, dus alleen het model laden binnen `_dml_sessies()` is
+      niet genoeg — er gaat één dummy-frame doorheen zolang de patch actief is. Daarna
+      hergebruikt `track()` diezelfde predictor en dus dezelfde sessie.
+    - **Terugvallen op de CPU** als DirectML halverwege afhaakt (geheugen vol, een
+      driver die de sessie loslaat). Zelfde afweging als bij de CUDA-OOM in `_infereer`:
+      een analyse van tien minuten hoort niet te sneuvelen op een apparaatprobleem.
+      ByteTrack begint na zo'n wissel met nieuwe ID's, maar de doelkeuze is offline en
+      rijgt tracklets aaneen op pakkleur en rijrichting — daar is een ID-breuk het
+      normale geval, geen uitzondering.
+    """
+
+    def __init__(self, onnx_pad, pt_pad, waarschuwing_callback=None):
+        self._pt_pad = pt_pad
+        self._waarschuwing = waarschuwing_callback
+        self._dml = True
+        with _dml_sessies():
+            self._model = YOLO(onnx_pad, task='pose')
+            # Op de volle DETECT_IMGSZ, ook al is dit maar een dummy: het model is
+            # dynamisch, maar de end2end-kop doet een TopK over `max_det` (300) posities
+            # en die zijn er op een klein beeld niet — op 64 px klapt de DirectML-sessie
+            # er meteen op stuk. Kost één extra graafopbouw (de echte frames worden
+            # rechthoekig geletterboxt), en dat is een paar seconden per analyse.
+            self._model.predict(np.zeros((DETECT_IMGSZ, DETECT_IMGSZ, 3), np.uint8),
+                                imgsz=DETECT_IMGSZ, verbose=False, device='cpu')
+
+    def track(self, *args, **kw):
+        return self._roep('track', *args, **kw)
+
+    def predict(self, *args, **kw):
+        return self._roep('predict', *args, **kw)
+
+    def _roep(self, naam, *args, **kw):
+        try:
+            return getattr(self._model, naam)(*args, **kw)
+        except Exception as exc:
+            if not self._dml:
+                raise
+            self._dml = False
+            self._model = YOLO(self._pt_pad)
+            _meld(self._waarschuwing,
+                  f"De GPU (DirectML) haakte af ({exc}); de analyse gaat verder op de "
+                  "CPU en duurt daardoor langer.")
+            return getattr(self._model, naam)(*args, **kw)
+
+
+def _meld(waarschuwing_callback, tekst):
+    """Een stille terugval hoort de gebruiker te bereiken — in de GUI via de callback,
+    op de CLI via de uitvoer."""
+    if waarschuwing_callback:
+        waarschuwing_callback(tekst)
+    else:
+        print(tekst)
+
+
+def _laad_yolo(pt_pad, waarschuwing_callback=None):
+    """
+    Het detectiemodel, op het snelste apparaat dat deze machine biedt.
+
+    Zonder DirectML-route (NVIDIA-machine, of geen `onnxruntime-directml`) is dit gewoon
+    `YOLO(pt_pad)`: torch kiest zelf CPU of CUDA via `yolo_device()`. Mét DirectML gaat
+    het via een ONNX-export van dezelfde gewichten, die één keer per model wordt gemaakt
+    (~15 s) en daarna naast het .pt-bestand blijft staan.
+
+    **`dynamic=True` is geen detail maar de kern van de meetgelijkheid.** Ultralytics
+    letterboxt een .pt-model *rechthoekig* (alleen tot een veelvoud van de stride), maar
+    een ONNX-model met een vaste invoervorm krijgt het beeld in een **vierkant** van
+    `DETECT_IMGSZ` geplakt — dus met een brede grijze rand erbij. Het net ziet dan een
+    ander plaatje, en dat is op deze clip geen theoretisch verschil: gemeten zakte de
+    dekking van 100/103 naar 89/103, verschoven de eventgrenzen en veranderden twee
+    afzethoeken met 18°. Met een dynamische invoervorm valt ultralytics terug op precies
+    dezelfde rechthoekige letterbox als bij het .pt-model, en is de meting weer gelijk
+    (0,0 px mediaan verschil, dezelfde acht afzetten met dezelfde hoeken — zie GPU.md).
+    Het scheelt bovendien niets in snelheid: alle frames van één video hebben dezelfde
+    vorm, dus DirectML bouwt zijn graaf één keer op.
+
+    Elke stap kan mislukken — geen `onnx`/`onnxslim` voor de export, een sessie die niet
+    opbouwt — en dan is het antwoord steeds hetzelfde: melden en op de CPU verder. Een
+    tragere analyse is beter dan geen analyse.
+    """
+    if not yolo_dml():
+        return YOLO(pt_pad)
+    onnx_pad = _onnx_pad(pt_pad)
+    try:
+        if not os.path.exists(onnx_pad):
+            _meld(waarschuwing_callback,
+                  f"Eenmalig het model exporteren voor de GPU ({os.path.basename(onnx_pad)})...")
+            uit = YOLO(pt_pad).export(format='onnx', imgsz=DETECT_IMGSZ,
+                                      opset=ONNX_OPSET, dynamic=True)
+            os.replace(uit, onnx_pad)
+        return _DmlYolo(onnx_pad, pt_pad, waarschuwing_callback)
+    except Exception as exc:
+        _meld(waarschuwing_callback,
+              f"De GPU-route (DirectML) kon niet worden opgezet ({exc}); de analyse "
+              "draait op de CPU.")
+        return YOLO(pt_pad)
 
 # ── Bocht overslaan (tijdwinst) ─────────────────────────────────────────────────
 # De detectiepass is ~94% van de analysetijd, en in de bocht levert die tijd niets op:
@@ -802,8 +987,8 @@ def _maak_rtmpose(waarschuwing_callback=None):
     RTMPose-26-model voor de verfijningspass, of None zonder rtmlib.
 
     De CPU-terugval is hier geen luxe: `rtmpose_device()` leest af of ONNXRuntime een
-    CUDA-provider heeft **meegecompileerd**, wat iets anders is dan of de bijbehorende
-    CUDA/cuDNN-DLL's op deze machine ook echt laden. Blijkt dat laatste niet zo, dan
+    CUDA- of DirectML-provider heeft **meegecompileerd**, wat iets anders is dan of de
+    bijbehorende DLL's op deze machine ook echt laden. Blijkt dat laatste niet zo, dan
     faalt pas het opbouwen van de sessie — en dat mag geen analyse kosten die verder
     prima op de CPU had gekund.
     """
@@ -816,12 +1001,9 @@ def _maak_rtmpose(waarschuwing_callback=None):
     except Exception as exc:
         if device == 'cpu':
             raise
-        melding = (f"RTMPose kon niet op de GPU starten ({exc}); de verfijningspass "
-                   "draait op de CPU.")
-        if waarschuwing_callback:
-            waarschuwing_callback(melding)
-        else:
-            print(melding)
+        _meld(waarschuwing_callback,
+              f"RTMPose kon niet op de GPU starten ({exc}); de verfijningspass "
+              "draait op de CPU.")
         return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT,
                         backend='onnxruntime', device='cpu')
 
@@ -1094,7 +1276,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     meten. Met `bocht=False` wordt elk frame geïnfereerd en gemeten, zoals voorheen.
     """
     info = video_info(input_pad, force_fps)
-    model = YOLO(yolo_model or STANDAARD_YOLO_MODEL)
+    model = _laad_yolo(yolo_model or STANDAARD_YOLO_MODEL, waarschuwing_callback)
     if perspectief is not None:
         auto_horizon = False     # vaste camera per aanname; kalibratie kent de kanteling al
 
