@@ -26,6 +26,11 @@ elk frame de doelschaatser is. Dat is veel robuuster dan per frame streaming kie
    de verfijning nooit stiekem de andere schaatser pakt. Is rtmlib niet
    geïnstalleerd, dan valt de pass terug op de oude vierkante-crop + yolo26x-route.
 
+Beide zware passes draaien **op de GPU zodra die er is** en anders gewoon op de CPU;
+zie `yolo_device()`/`rtmpose_device()` verderop voor hoe dat per pass wordt bepaald.
+Aan de metingen verandert dat niets — dezelfde gewichten in dezelfde fp32-precisie —
+alleen aan de looptijd.
+
 De rest van de pijplijn (offline smoothing, afgeleiden, tekenen, GUI) uit
 `schaats_analyse.py` wordt ongewijzigd hergebruikt. Vereist torch/ultralytics
 (zie .venv-yolo). YOLO levert COCO-17 keypoints; die mappen we in de MediaPipe-33-
@@ -35,6 +40,7 @@ visibility 0; RTMPose-26 levert ze wél echt (Halpe26 → MediaPipe 29–32).
 import os
 from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -55,6 +61,99 @@ from schaats_analyse import (
 
 BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
                 else "YOLO-pose + ByteTrack")
+
+
+# ── Rekenapparaat: GPU waar die er is, anders CPU ───────────────────────────────
+# De twee zware passes draaien op verschillende motoren — de detectiepass op
+# torch/CUDA (ultralytics), de RTMPose-verfijning op ONNXRuntime — en die halen hun
+# GPU-ondersteuning uit verschillende pakketten (een CUDA-build van torch, resp.
+# `onnxruntime-gpu`). Een machine kan dus prima de ene wél en de andere niet hebben,
+# en daarom wordt het apparaat per pass apart vastgesteld en valt elke pass los van de
+# andere terug op de CPU. Aan de uitkomst verandert dat niets: dezelfde gewichten in
+# dezelfde fp32-precisie, alleen sneller. (Half precision zou nóg sneller zijn, maar
+# verandert de keypoints in de laatste decimalen en daarmee de gemeten hoeken — dat is
+# een meetwijziging en hoort niet als bijvangst van een snelheidsmaatregel.)
+def _cpu_afgedwongen():
+    """`SCHAATSANALYSE_CPU=1` dwingt beide passes naar de CPU — nodig om een analyse op
+    GPU tegen een analyse op CPU af te zetten zonder de omgeving te moeten slopen."""
+    return bool(os.environ.get('SCHAATSANALYSE_CPU'))
+
+
+@lru_cache(maxsize=1)
+def yolo_device():
+    """
+    Apparaat voor de YOLO-passes in ultralytics-notatie: 'cuda' als torch een bruikbare
+    GPU ziet, anders 'cpu'. Torch wordt hier **lokaal** geïmporteerd (ultralytics heeft
+    het al binnengehaald) en de uitkomst wordt per proces gecacht: `cuda.is_available()`
+    initialiseert de CUDA-driver, en dat hoeft niet bij elk frame opnieuw.
+    """
+    if _cpu_afgedwongen():
+        return 'cpu'
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return 'cuda'
+    except Exception:
+        pass
+    return 'cpu'
+
+
+@lru_cache(maxsize=1)
+def rtmpose_device():
+    """
+    Apparaat voor de RTMPose-verfijning: 'cuda' als ONNXRuntime een CUDA-provider heeft,
+    anders 'cpu'. Dat is een ándere vraag dan `yolo_device()` — deze pass draait niet op
+    torch, dus een CUDA-torch zegt niets over wat ONNXRuntime kan. Staat alleen het
+    gewone `onnxruntime` geïnstalleerd (zonder `onnxruntime-gpu`), dan is er wél een GPU
+    maar kan deze pass er niet bij, en blijft hij stilletjes op de CPU.
+    """
+    if _cpu_afgedwongen():
+        return 'cpu'
+    try:
+        import onnxruntime as ort
+        if 'CUDAExecutionProvider' in ort.get_available_providers():
+            return 'cuda'
+    except Exception:
+        pass
+    return 'cpu'
+
+
+_gpu_uitgevallen = False   # na een CUDA-OOM: de rest van deze run draait op de CPU
+
+
+def _infereer(aanroep, waarschuwing_callback=None):
+    """
+    Voer een ultralytics-aanroep uit op het gekozen apparaat, met de CPU als vangnet
+    wanneer het GPU-geheugen volloopt. `aanroep(device)` doet het echte werk.
+
+    Een laptop-GPU heeft weinig VRAM en deelt dat met het bureaublad, dus yolo26x-pose
+    op `DETECT_IMGSZ` kan er nét niet in passen — en dan zou een analyse van tien
+    minuten halverwege alsnog sneuvelen op een OOM. Na zo'n fout schakelt de hele run
+    **blijvend** over op de CPU: per frame terugvallen zou het geheugen telkens opnieuw
+    laten vollopen. Halverwege van apparaat wisselen is voor de meting onschadelijk —
+    het zijn dezelfde gewichten in dezelfde precisie.
+    """
+    global _gpu_uitgevallen
+    device = 'cpu' if _gpu_uitgevallen else yolo_device()
+    try:
+        return aanroep(device)
+    except Exception as exc:
+        if device == 'cpu' or 'out of memory' not in str(exc).lower():
+            raise
+        _gpu_uitgevallen = True
+        try:                       # geef het vastgelopen geheugen terug vóór de retry
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        melding = ("GPU-geheugen vol; de analyse gaat verder op de CPU en duurt "
+                   "daardoor langer.")
+        if waarschuwing_callback:
+            waarschuwing_callback(melding)
+        else:
+            print(melding)
+        return aanroep('cpu')
+
 
 # yolo26x-pose = meest nauwkeurig (traagst op CPU). Alternatief: "yolo26m-pose.pt"
 # (sneller, iets minder nauwkeurig). Ultralytics downloadt het model bij eerste gebruik.
@@ -358,7 +457,7 @@ class _BochtWacht:
 
 
 def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callback=None,
-                     bocht=True):
+                     bocht=True, waarschuwing_callback=None):
     """
     Pass 1: YOLO-pose + ByteTrack over de video op hoge resolutie. Retourneert
     `(frames, buiten_meting)`: per frame een lijst Detectie's (alle personen, met
@@ -396,8 +495,9 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
         else:
             # Stond de wacht in de overslaan-stand, dan is dít een controleframe.
             buiten_meting.append(wacht.skip)
-            res = model.track(frame, persist=True, imgsz=imgsz,
-                              tracker='bytetrack.yaml', classes=[0], verbose=False)[0]
+            res = _infereer(lambda dev: model.track(
+                frame, persist=True, imgsz=imgsz, tracker='bytetrack.yaml',
+                classes=[0], verbose=False, device=dev), waarschuwing_callback)[0]
             dets = []
             kps, boxes = res.keypoints, res.boxes
             if kps is not None and boxes is not None and kps.xy is not None and len(boxes) > 0:
@@ -697,11 +797,33 @@ def _interpoleer_doel(doel_per_frame, fps, bocht=None):
     return plan
 
 
-def _maak_rtmpose():
-    """RTMPose-26-model voor de verfijningspass, of None zonder rtmlib."""
+def _maak_rtmpose(waarschuwing_callback=None):
+    """
+    RTMPose-26-model voor de verfijningspass, of None zonder rtmlib.
+
+    De CPU-terugval is hier geen luxe: `rtmpose_device()` leest af of ONNXRuntime een
+    CUDA-provider heeft **meegecompileerd**, wat iets anders is dan of de bijbehorende
+    CUDA/cuDNN-DLL's op deze machine ook echt laden. Blijkt dat laatste niet zo, dan
+    faalt pas het opbouwen van de sessie — en dat mag geen analyse kosten die verder
+    prima op de CPU had gekund.
+    """
     if not IS_RTMPOSE:
         return None
-    return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT)
+    device = rtmpose_device()
+    try:
+        return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT,
+                        backend='onnxruntime', device=device)
+    except Exception as exc:
+        if device == 'cpu':
+            raise
+        melding = (f"RTMPose kon niet op de GPU starten ({exc}); de verfijningspass "
+                   "draait op de CPU.")
+        if waarschuwing_callback:
+            waarschuwing_callback(melding)
+        else:
+            print(melding)
+        return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT,
+                        backend='onnxruntime', device='cpu')
 
 
 def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
@@ -875,7 +997,8 @@ def _verfijn_yolo_crop(model, frame, bbox, ref, w, h):
     x0 = int(np.clip(cx * w - kant / 2, 0, w - kant))
     y0 = int(np.clip(cy * h - kant / 2, 0, h - kant))
     crop = frame[y0:y0 + kant, x0:x0 + kant]
-    res = model.predict(crop, imgsz=VERFIJN_IMGSZ, classes=[0], verbose=False)[0]
+    res = _infereer(lambda dev: model.predict(
+        crop, imgsz=VERFIJN_IMGSZ, classes=[0], verbose=False, device=dev))[0]
     keuze = _kies_in_crop(res, crop, (cx * w - x0, cy * h - y0), kant, ref)
     if keuze is None:
         return None
@@ -987,7 +1110,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     # frames over en zijn de frames die hij nog wél infereert enkel controleframes;
     # allebei staan ze in `buiten_meting` en gaan zo de rest van de pijplijn in.
     frames, buiten_meting = _detecteer_alles(input_pad, model, info,
-                                             progress_callback=det_cb, bocht=bocht)
+                                             progress_callback=det_cb, bocht=bocht,
+                                             waarschuwing_callback=waarschuwing_callback)
     n_frames = len(frames)
 
     # Offline doelkeuze: tracklets → kleur-splits → seed → stitching.
@@ -1036,7 +1160,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route.
     if verfijn and doel_per_frame:
         verfijnd, devs = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                                            progress_callback=ver_cb, rtmpose=_maak_rtmpose(),
+                                            progress_callback=ver_cb,
+                                            rtmpose=_maak_rtmpose(waarschuwing_callback),
                                             bocht=bocht_per_frame)
     else:
         verfijnd, devs = {}, {}
