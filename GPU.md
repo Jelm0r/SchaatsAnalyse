@@ -163,7 +163,51 @@ kosten je een run van vier minuten voordat je doorhebt dat je eigen testscript f
 
 ---
 
-## 6. Wat je beter niet doet
+## 6. Kun je CPU en GPU tegelijk laten rekenen?
+
+Technisch kan het, praktisch levert het bijna niets op — en dat is geen kwestie van smaak
+maar van rekenkunde. De GPU doet een frame in ~0,15 s, de CPU in ~1,75 s. Verdeel je het werk
+optimaal over die twee, dan kan de trage kant hooguit **~9%** van de frames voor zijn rekening
+nemen; meer, en hij wordt zelf de vertrager terwijl de snelle staat te wachten. De hele winst is
+dus die 9% (19,5 s → ~17,8 s). **Hoe sneller je GPU, hoe minder een CPU er nog bij kan
+bijdragen.**
+
+**Waar de tijd nu heen gaat** (gemeten op de RTX 3050, 103 frames, `bocht=False`, door de tijd
+binnen de modelaanroepen af te zetten tegen de totale analysetijd):
+
+| | tijd | aandeel |
+|---|---|---|
+| YOLO-detectie | 15,50 s | 78% |
+| RTMPose-verfijning | 2,44 s | 12% |
+| Al het overige (decoderen, kleur, tracking, smoothing, afgeleiden) | 1,77 s | **9%** |
+
+Dat laatste getal is het belangrijkste van de tabel: de CPU zit **niet** werkeloos naast een
+wachtende GPU. Was het 40% geweest, dan liep de aanvoer achter en viel er wél iets te winnen —
+maar dan door de aanvoer te repareren, niet door er inferentie bij te proppen. (Kanttekening:
+de 150 ms per YOLO-aanroep bevat ook CPU-voorbereiding binnen ultralytics, dus het pure GPU-deel
+is iets kleiner dan 78%. Aan de conclusie verandert dat niets.)
+
+**Twee struikelblokken die specifiek voor dit programma gelden:**
+
+- **De tracking is van nature volgordelijk.** De detectiepass draait ByteTrack met
+  `persist=True`: elk frame bouwt voort op het vorige, zo houdt elke schaatser een doorlopend ID.
+  Frames over twee werkers verdelen breekt die keten. Je zou de video in blokken moeten knippen en
+  de sporen daarna weer aaneen moeten naaien — precies de robuustheid raken waar dit programma het
+  bij kruisende schaatsers van moet hebben, voor een winst van 9%.
+- **De CPU is al bezet** met decoderen, aanleveren en verwerken. Laad je hem óók vol met eigen
+  inferentie, dan gaat het aanvoeren naar de GPU trager en kun je netto langzamer uitkomen.
+
+**Op een integrated GPU is het idee nóg minder kansrijk**, om een reden die niet meteen opvalt:
+een iGPU heeft geen eigen geheugen maar deelt het werkgeheugen met de processor. Allebei tegelijk
+laten rekenen betekent dat ze om dezelfde geheugenbandbreedte vechten.
+
+**Wat wél helpt is minder werk, niet meer apparaten:** de bochtdetectie die er al in zit (gemeten
+45% tijdwinst op "Kim tempo") en eventueel een lichter model (`yolo26m-pose`) — maar dat laatste
+is een **meetwijziging** en hoort dus langs het protocol in hoofdstuk 5.
+
+---
+
+## 7. Wat je beter niet doet
 
 - **Geen `half=True` / fp16.** Het is verleidelijk (het is op een GPU gratis snelheid), maar het
   verandert de keypoints in de laatste decimalen en daarmee de gemeten hoeken. Dat is een
@@ -177,7 +221,7 @@ kosten je een run van vier minuten voordat je doorhebt dat je eigen testscript f
 
 ---
 
-## 7. Praktisch advies zolang de iGPU-route er niet is
+## 8. Praktisch advies zolang de iGPU-route er niet is
 
 De bibliotheek staat in Google Drive, dus analyseren en bekijken hoeven niet op dezelfde machine.
 Draai de **analyses** op de laptop met de RTX 3050 en gebruik deze laptop voor het **kijken en
