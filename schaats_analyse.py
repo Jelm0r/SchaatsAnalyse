@@ -295,11 +295,40 @@ class AfzetEvent:
 class PerspectiefConfig:
     """Opt-in perspectiefcorrectie via baanlijnen (fase 7): een kalibratie uit
     `schaats_perspectief.kalibreer_uit_lijnen` plus de reconstructie-keuzes.
-    Zonder deze config gedraagt de pijplijn zich exact als voorheen."""
+    Zonder deze config gedraagt de pijplijn zich exact als voorheen.
+
+    `invoer` (KalibratieInvoer) is de bewaarbare herkomst van `kalibratie`. Hij is
+    optioneel omdat de kern ook met een los opgebouwde kalibratie werkt (zelftests),
+    maar zónder invoer kan de config niet opgeslagen worden — `naar_dict` weigert dat
+    dan expliciet in plaats van stilzwijgend een correctie te laten verdampen."""
     kalibratie: object              # schaats_perspectief.PerspectiefKalibratie
     methode: str = "onderbeen"      # 'onderbeen' (bol-snijding) | 'beenvlak' (rijrichting-vlak)
     onderbeen_l: float = None       # onderbeenlengte in m (verplicht bij 'onderbeen')
     enkel_hoogte: float = ENKEL_HOOGTE_M
+    invoer: object = None           # schaats_perspectief.KalibratieInvoer
+
+    def naar_dict(self):
+        """JSON-bare vorm voor `analyse.instellingen_json`."""
+        if self.invoer is None:
+            raise ValueError("deze PerspectiefConfig heeft geen KalibratieInvoer en "
+                             "kan dus niet opgeslagen worden")
+        return {
+            "invoer": self.invoer.naar_dict(),
+            "methode": self.methode,
+            "onderbeen_l": None if self.onderbeen_l is None else float(self.onderbeen_l),
+            "enkel_hoogte": float(self.enkel_hoogte),
+        }
+
+    @classmethod
+    def uit_dict(cls, d):
+        """Herbouwt de config uit `naar_dict`, inclusief het herberekenen van de
+        kalibratie uit de bewaarde lijnen. Gooit ValueError als dat niet lukt."""
+        invoer = schaats_perspectief.KalibratieInvoer.uit_dict(d["invoer"])
+        return cls(kalibratie=invoer.kalibreer(),
+                   methode=d.get("methode", "onderbeen"),
+                   onderbeen_l=d.get("onderbeen_l"),
+                   enkel_hoogte=d.get("enkel_hoogte", ENKEL_HOOGTE_M),
+                   invoer=invoer)
 
 
 def video_info(input_pad, force_fps=None):
@@ -1465,6 +1494,117 @@ def maak_voorvulling(resultaten, idx, fps, n_lm=33):
     bron = voor if na is None else (na if voor is None else
                                     (voor if idx - voor <= na - idx else na))
     return [Landmark(p.x, p.y, 0.0, p.visibility) for p in resultaten[bron].lm[:n_lm]]
+
+
+class KnipAfgebroken(Exception):
+    """De gebruiker heeft het knippen gestopt (zie knip_fragmenten/stop_check)."""
+
+
+def _veilige_bestandsnaam(naam):
+    """Maakt van een fragmenttitel een bestandsnaam die Windows accepteert."""
+    schoon = "".join(c if c.isalnum() or c in " -_." else "_" for c in (naam or "").strip())
+    return schoon.strip(" .")[:80]
+
+
+def knip_fragmenten(bron_pad, fragmenten, doelmap, progress_callback=None,
+                    stop_check=None, fps=None):
+    """
+    Schrijft de gemarkeerde stukken van een lange opname weg als losse videobestanden
+    (ROADMAP fase 8) en retourneert de paden, in dezelfde volgorde als `fragmenten`.
+
+    `fragmenten` is een lijst `(start_frame, eind_frame, naam)` — beide grenzen **inclusief**,
+    `naam` wordt de bestandsnaam (zonder extensie). **Er wordt exact op de gemarkeerde frames
+    geknipt**: geen marge erbij of eraf. De trainer kijkt tijdens het markeren naar het beeld
+    en bepaalt de grenzen zelf; het programma hoort daar niet stilzwijgend seconden bij te
+    doen. (Aan de voorkant zou lucht de doelkeuze zelfs moeilijker maken: `DoelKiezer` krijgt
+    frame 0 van de clip, en dat is nu precies het beeld waarop "start" gedrukt werd.)
+
+    **Eén sequentiële pass**: elk frame gaat naar de writer van elk fragment waarin het valt,
+    zodat de video precies één keer gedecodeerd wordt en er nérgens geseekt hoeft te worden —
+    zelfde motief als de eigen leeslus in `schaats_yolo._detecteer_alles`. Overlappende
+    fragmenten mogen daardoor gewoon (het frame gaat dan naar twee writers).
+
+    Codec `mp4v`: die zit in de opencv-python-wheel, terwijl `avc1` op Windows vaak ontbreekt.
+    Er wordt dus her-gecodeerd; voor pose-detectie is dat kwaliteitsverlies verwaarloosbaar.
+    Een stream-copy (ffmpeg `-c copy`) zou dat vermijden maar kan alleen op een keyframe
+    beginnen — dat is precies de stilzwijgende marge die hier niet gewenst is, en het maakt
+    frame 0 van de clip een ánder beeld dan waarop je "start" drukte.
+
+    `progress_callback(frame_nr, totaal)` en `stop_check() -> bool` (afbreken; de reeds
+    geschreven bestanden worden dan opgeruimd).
+    """
+    cap = cv2.VideoCapture(bron_pad)
+    if not cap.isOpened():
+        raise IOError(f"Kan video niet openen: {bron_pad}")
+    fps = fps or cap.get(cv2.CAP_PROP_FPS) or 30.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    totaal = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    os.makedirs(doelmap, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+
+    taken, gebruikt = [], set()
+    for i, (start, eind, naam) in enumerate(fragmenten):
+        stam = _veilige_bestandsnaam(naam) or f"fragment_{i + 1}"
+        if stam.lower() in gebruikt:                # twee fragmenten met dezelfde titel
+            stam = f"{stam}_{i + 1}"
+        gebruikt.add(stam.lower())
+        taken.append({"start": int(start), "eind": int(eind), "writer": None,
+                      "pad": os.path.join(doelmap, f"{stam}.mp4")})
+
+    # Voorbij het laatste eindframe hoeft er niets meer gedecodeerd te worden — bij een
+    # fragment aan het begin van een opname van een half uur scheelt dat vrijwel alles.
+    laatste = max((t["eind"] for t in taken), default=-1)
+    geschreven = set()
+    try:
+        idx = 0
+        while idx <= laatste:
+            if stop_check is not None and stop_check():
+                raise KnipAfgebroken()
+            # grab/retrieve i.p.v. read(): frames die in géén enkel fragment vallen hoeven
+            # alleen doorgeschoven te worden, niet gedecodeerd. Gemeten op een 1080p-opname
+            # scheelt dat ~9 → ~3 ms per frame, en juist bij een fragment ver in een opname
+            # van 23 minuten is dat het leeuwendeel van het werk.
+            if not cap.grab():
+                break                               # video korter dan CAP_PROP_FRAME_COUNT meldde
+            actief = [t for t in taken if t["start"] <= idx <= t["eind"]]
+            if actief:
+                ret, frame = cap.retrieve()
+                if not ret:
+                    break
+                for t in actief:
+                    if t["writer"] is None:
+                        t["writer"] = cv2.VideoWriter(t["pad"], fourcc, fps, (w, h))
+                        if not t["writer"].isOpened():
+                            raise IOError(f"Kan fragment niet schrijven: {t['pad']}")
+                        geschreven.add(t["pad"])
+                    t["writer"].write(frame)
+            idx += 1
+            if progress_callback is not None:
+                progress_callback(idx, max(totaal, laatste + 1))
+    except BaseException:
+        for t in taken:
+            if t["writer"] is not None:
+                t["writer"].release()
+        cap.release()
+        for pad in geschreven:
+            try:
+                os.remove(pad)
+            except OSError:
+                pass
+        raise
+    for t in taken:
+        if t["writer"] is not None:
+            t["writer"].release()
+    cap.release()
+
+    ontbreekt = [t for t in taken if t["writer"] is None]
+    if ontbreekt:
+        # Een fragment dat volledig voorbij het einde van de video lag: melden i.p.v. een
+        # onbestaand pad de batch-flow in te sturen.
+        raise IOError(f"{len(ontbreekt)} fragment(en) vielen buiten de video "
+                      f"({os.path.basename(bron_pad)}) en konden niet geknipt worden.")
+    return [t["pad"] for t in taken]
 
 
 def wijs_afzetbeen_cyclus(resultaten, h, fps):

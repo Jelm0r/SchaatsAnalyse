@@ -48,7 +48,7 @@ except ImportError:
     IS_RTMPOSE = False
 
 from schaats_analyse import (
-    FrameResultaat, Landmark, video_info,
+    FrameResultaat, Landmark, VideoInfo, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
     bocht_ratio, bepaal_bocht_reeks, NUM_POSES_DEFAULT, BOCHT_IN, BOCHT_UIT,
 )
@@ -361,8 +361,17 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
                      bocht=True):
     """
     Pass 1: YOLO-pose + ByteTrack over de video op hoge resolutie. Retourneert
-    `(frames, overgeslagen)`: per frame een lijst Detectie's (alle personen, met
-    torso-kleurhistogram) en per frame of de inferentie is overgeslagen.
+    `(frames, buiten_meting)`: per frame een lijst Detectie's (alle personen, met
+    torso-kleurhistogram) en per frame of het buiten de meting valt.
+
+    **`buiten_meting` dekt twee soorten frames**, en die horen allebei bij "de bocht is
+    niet geanalyseerd": de frames die zijn overgeslagen (géén inferentie), én de
+    **controleframes** — de frames die in de overslaan-stand wél zijn geïnfereerd, puur
+    om te kijken of het rechte stuk alweer begonnen is. Zo'n controleframe heeft dus wél
+    een skelet, maar het is een kijkje en geen meting: het staat midden in een stuk dat
+    verder niet bekeken is, dus de buurframes die een afzet zouden moeten aantonen
+    ontbreken. De verdikking van dat frame telt wél mee voor het óórdeel (het mag de
+    bocht beëindigen — daar is het voor), maar het levert zelf nooit een afzethoek.
 
     De lus leest de frames zelf i.p.v. `model.track(source=pad, stream=True)` te laten
     streamen — anders is er geen manier om een frame wél te lezen maar niet te
@@ -371,7 +380,7 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
     decoderen is verwaarloosbaar naast de ~2 s inferentie per frame.
     """
     w, h = info.w, info.h
-    frames, overgeslagen = [], []
+    frames, buiten_meting = [], []
     wacht = _BochtWacht(info.fps, w, h, aan=bocht)
     cap = cv2.VideoCapture(input_pad)
     if not cap.isOpened():
@@ -383,8 +392,10 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
             break
         if not wacht.analyseren(f):
             frames.append([])
-            overgeslagen.append(True)
+            buiten_meting.append(True)
         else:
+            # Stond de wacht in de overslaan-stand, dan is dít een controleframe.
+            buiten_meting.append(wacht.skip)
             res = model.track(frame, persist=True, imgsz=imgsz,
                               tracker='bytetrack.yaml', classes=[0], verbose=False)[0]
             dets = []
@@ -411,12 +422,11 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
                     ))
             wacht.voed(f, dets)
             frames.append(dets)
-            overgeslagen.append(False)
         f += 1
         if progress_callback is not None:
             progress_callback(f, info.totaal)
     cap.release()
-    return frames, overgeslagen
+    return frames, buiten_meting
 
 
 def _bouw_tracklets(frames):
@@ -911,6 +921,30 @@ def _kies_in_crop(res, crop, verwacht_xy, kant, ref):
     return None
 
 
+def _bocht_met_controleframes(resultaten, buiten_meting, info):
+    """
+    Classificeer de bocht (`bepaal_bocht_reeks`) en houd daarna vast dat een frame dat de
+    detectiepass niet echt geanalyseerd heeft ook nooit een meting oplevert.
+
+    Dat laatste gaat over de **controleframes**: in de overslaan-stand infereert de wacht
+    elke `BOCHT_CHECK_S` één frame om te zien of het rechte stuk alweer begonnen is. Dat
+    frame krijgt dus een skelet, maar het is een kijkje en geen meting — de buurframes
+    die samen een afzet zouden moeten aantonen zijn juist overgeslagen. Zijn óórdeel telt
+    wél mee (het mag de bocht beëindigen, daar is het voor); alleen zijn eigen hoek niet.
+
+    Zonder deze regel zou zo'n frame zichzelf op z'n eigen heupstand kunnen vrijpleiten,
+    en midden in een bocht draait een schaatser af en toe kort bijna frontaal (zichtbaar
+    in de Ellia- en Fran-clips). Beëindigt een controleframe de bocht echt, dan draait de
+    detectiepass daarná weer op vol tempo en worden díe frames gewoon gemeten — er gaat
+    dan hooguit dit ene frame aan het begin van de eerstvolgende stand-run verloren, en
+    een aan het begin afgekapte run telt sowieso mee (zie `bepaal_afzet_uit_strek`).
+    """
+    bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
+    for r, buiten in zip(resultaten, buiten_meting):
+        if buiten:
+            r.bocht = True
+
+
 # ── Hoofd-API ───────────────────────────────────────────────────────────────────
 def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
@@ -950,9 +984,10 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     hor_cb = fase_voortgang(progress_callback, fase, n_fasen) if auto_horizon else None
 
     # Pass 1: alle detecties verzamelen (hoge resolutie). In de bocht slaat de wacht
-    # frames over — die staan in `overgeslagen` en gaan zo de rest van de pijplijn in.
-    frames, overgeslagen = _detecteer_alles(input_pad, model, info,
-                                            progress_callback=det_cb, bocht=bocht)
+    # frames over en zijn de frames die hij nog wél infereert enkel controleframes;
+    # allebei staan ze in `buiten_meting` en gaan zo de rest van de pijplijn in.
+    frames, buiten_meting = _detecteer_alles(input_pad, model, info,
+                                             progress_callback=det_cb, bocht=bocht)
     n_frames = len(frames)
 
     # Offline doelkeuze: tracklets → kleur-splits → seed → stitching.
@@ -980,7 +1015,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     resultaten = []
     for f in range(n_frames):
         r = FrameResultaat(frame_nr=f, tijd=f / info.fps if info.fps > 0 else 0)
-        r.bocht = bool(overgeslagen[f])
+        r.bocht = bool(buiten_meting[f])
         if f in doel_per_frame:
             r.lm = doel_per_frame[f].lm
             r.pose_gevonden = True
@@ -988,11 +1023,11 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
 
     # Bocht bepalen op de rúwe pass-1-landmarks, vóór de verfijning: dan hoeft die
     # verfijning niet meer over de bocht. De controleframes die de detectiepass in de
-    # bocht wél heeft geïnfereerd geven daar het oordeel; heeft de wacht een stuk
-    # ónterecht overgeslagen, dan laten juist die frames een frontale schaatser zien en
-    # wordt het stuk hier alsnog vrijgegeven — waarna pass 2 de gaten gewoon opvult.
+    # bocht wél heeft geïnfereerd geven daar het oordeel; zeggen die dat het rechte stuk
+    # alweer bezig is, dan draait de detectiepass daarná weer op vol tempo en worden
+    # díe frames wél gewoon gemeten.
     if bocht:
-        bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
+        _bocht_met_controleframes(resultaten, buiten_meting, info)
         bocht_per_frame = [r.bocht for r in resultaten]
     else:
         bocht_per_frame = None
@@ -1018,7 +1053,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     if bocht:
         # Nog eens, nu op de verfijnde landmarks: de frames die pass 2 erbij heeft
         # gevonden krijgen zo alsnog hun eigen oordeel.
-        bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
+        _bocht_met_controleframes(resultaten, buiten_meting, info)
     zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps, hor_cb,
                 perspectief=perspectief)
     verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, smooth_n, threshold,
@@ -1096,6 +1131,36 @@ def _zelftest_bochtwacht():
     # 6. Uitgezet = alles analyseren, ook in de bocht.
     _, over = _loop(200, lambda f: [_det(0.1)], aan=False)
     assert over == 0, f"met bocht=False werden er toch {over} frames overgeslagen"
+
+    # 7. Een controleframe is een kijkje, geen meting — ook niet als de schaatser er
+    #    toevallig frontaal op staat (dat gebeurt: midden in een bocht draait hij af en
+    #    toe kort bijna frontaal). We spelen de bocht na, laten één controleframe er
+    #    frontaal uitzien en eisen dat het frame géén afgeleiden krijgt.
+    wacht = _BochtWacht(FPS, W, H)
+    resultaten, buiten_meting, frontaal_op = [], [], None
+    for f in range(300):
+        r = FrameResultaat(frame_nr=f, tijd=f / FPS)
+        controle = wacht.skip                      # infereren we dit frame alleen als check?
+        if not wacht.analyseren(f):
+            buiten_meting.append(True)             # overgeslagen: geen inferentie
+        else:
+            buiten_meting.append(controle)
+            r.pose_gevonden = True
+            # Eén controleframe halverwege krijgt een frontale heupstand mee.
+            if controle and frontaal_op is None and f > 150:
+                r.lm, frontaal_op = _pose(1.0, 100, 0.5), f
+            else:
+                r.lm = _pose(0.15, 100, 0.5)
+            wacht.voed(f, [_det(0.15)])
+        resultaten.append(r)
+
+    assert frontaal_op is not None, "geen controleframe om te toetsen"
+    _bocht_met_controleframes(resultaten, buiten_meting, VideoInfo(W, H, FPS, len(resultaten)))
+    assert resultaten[frontaal_op].bocht, (
+        f"controleframe {frontaal_op} pleitte zichzelf vrij op z'n eigen heupstand")
+    verwerk_afgeleiden(resultaten, W, H, FPS)
+    assert all(r.lm_data is None for r in resultaten), \
+        "een frame in de bocht leverde tóch een meting op"
 
     print("Zelftest _BochtWacht OK")
 

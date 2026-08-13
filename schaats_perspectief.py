@@ -58,6 +58,16 @@ STANDAARD_LIJNAFSTAND = 4.0   # m — onderlinge afstand van opeenvolgende baanl
 CONDITIE_MIN_DEG = 25.0       # been↔kijkstraal-hoek waaronder de reconstructie onbetrouwbaar geldt
 VLAK_CONDITIE_MIN_DEG = 10.0  # kijkstraal↔beenvlak-hoek waaronder methode 'beenvlak' onbetrouwbaar geldt
 F_MIN_FRAC, F_MAX_FRAC = 0.4, 15.0  # plausibel f-bereik als fractie van de beeldbreedte
+# Conditionering van de zelfkalibratie van f: hoe verder een verdwijnpunt van het
+# beeldmidden ligt, hoe minder f eruit te halen valt (f² = −(V1−pp)·(V2−pp) wordt dan
+# door één ver, slecht bepaald punt gedomineerd). Afstand gemeten in eenheden
+# f0 = (breedte+hoogte)/2. Geijkt op de zelftest-camera's — die halen 1,0 / 1,5 / 9,3
+# en leveren allemaal de juiste f — tegen een echte baanopname waar de camera langs de
+# baan kijkt: daar ligt V2 op 133 en komt f op 3,3× de beeldbreedte (≈17° beeldhoek,
+# onmogelijk voor zo'n shot), terwijl 5 px verschuiving van één lijnuiteinde f van
+# 3827 px naar "onmogelijk" laat springen.
+VP_CONDITIE_WAARSCHUW = 5.0   # hierboven: f is gevoelig, meld het
+VP_CONDITIE_MAX = 30.0        # hierboven: f is betekenisloos, weiger en vraag om f_px
 ONDERBEEN_FRACTIE = 0.246     # onderbeenlengte (knie–enkel) als fractie van de lichaamslengte
                               # (antropometrische tabel van Winter: knie 0.285·H − enkel 0.039·H)
 KNIE_Z_MIN_FRAC = -0.05       # knie mag hooguit deze fractie van L onder het ijs (ruis)
@@ -78,6 +88,14 @@ def _lijn_hom(p1, p2):
     if n < 1e-12:
         raise ValueError("lijn met (vrijwel) samenvallende eindpunten")
     return l / n
+
+
+def _vp_afstand(v):
+    """Afstand van een verdwijnpunt tot het beeldmidden, in eenheden f0 = (b+h)/2
+    (de normalisatie waarin `kalibreer_uit_lijnen` rekent). Oneindig ver = evenwijdige
+    lijnen in beeld; dat is precies het geval waarin f er niet uit te halen valt."""
+    noemer = abs(v[2])
+    return float("inf") if noemer < 1e-15 else float(np.hypot(v[0], v[1]) / noemer)
 
 
 def _verdwijnpunt(lijnen):
@@ -166,6 +184,77 @@ class PerspectiefKalibratie:
         return float(np.degrees(np.arctan2(-dy, dx)))
 
 
+@dataclass
+class KalibratieInvoer:
+    """De nagetrokken lijnen + parameters waaruit een `PerspectiefKalibratie` volgt.
+
+    Dit is wat er bewaard wordt, níet de kalibratie zelf: `PerspectiefKalibratie`
+    bestaat vrijwel geheel uit afgeleide matrices (R, t, C, H, H_inv) die exact uit
+    deze invoer te herberekenen zijn. Zo blijft de opslag JSON-baar (past in
+    `analyse.instellingen_json`, geen schemabump), leesbaar voor een mens, en krijgt
+    een oude analyse automatisch de winst van een latere verbetering in de
+    kalibratiewiskunde — dezelfde redenering als de events-cache, die bij het openen
+    ook vers herberekend wordt.
+
+    Een kalibratie hoort bij één **camerastand**, niet bij één video: alle clips die
+    uit dezelfde vaste opstelling komen mogen hem delen (zie `past_bij`).
+    """
+    rijlijnen: list                 # [((x1,y1),(x2,y2))] in originele pixels
+    dwarslijnen: list
+    beeld_w: int
+    beeld_h: int
+    lijnafstand: float = STANDAARD_LIJNAFSTAND
+    rij_offsets: list = None
+    schaal_bekend: bool = True
+    f_px: float = None
+    notitie: str = ""               # vrije tekst, bv. "baan Deventer, camera bij 100m"
+
+    def naar_dict(self):
+        """JSON-bare vorm; punten worden floats, geen numpy."""
+        def _lijnen(ls):
+            return [[[float(p[0]), float(p[1])] for p in lijn] for lijn in ls]
+        return {
+            "rijlijnen": _lijnen(self.rijlijnen),
+            "dwarslijnen": _lijnen(self.dwarslijnen),
+            "beeld_w": int(self.beeld_w),
+            "beeld_h": int(self.beeld_h),
+            "lijnafstand": float(self.lijnafstand),
+            "rij_offsets": None if self.rij_offsets is None
+                           else [float(o) for o in self.rij_offsets],
+            "schaal_bekend": bool(self.schaal_bekend),
+            "f_px": None if self.f_px is None else float(self.f_px),
+            "notitie": self.notitie or "",
+        }
+
+    @classmethod
+    def uit_dict(cls, d):
+        def _lijnen(ls):
+            return [tuple((float(p[0]), float(p[1])) for p in lijn) for lijn in (ls or [])]
+        return cls(
+            rijlijnen=_lijnen(d.get("rijlijnen")),
+            dwarslijnen=_lijnen(d.get("dwarslijnen")),
+            beeld_w=int(d["beeld_w"]), beeld_h=int(d["beeld_h"]),
+            lijnafstand=float(d.get("lijnafstand", STANDAARD_LIJNAFSTAND)),
+            rij_offsets=d.get("rij_offsets"),
+            schaal_bekend=bool(d.get("schaal_bekend", True)),
+            f_px=d.get("f_px"),
+            notitie=d.get("notitie", ""))
+
+    def past_bij(self, w, h):
+        """Mag deze kalibratie op een video van w×h? Alleen bij gelijke beeldmaat —
+        de lijnen staan in pixels, dus een andere resolutie of bijsnijding verschuift
+        ze stilzwijgend en levert een plausibele maar foute kalibratie op."""
+        return int(w) == int(self.beeld_w) and int(h) == int(self.beeld_h)
+
+    def kalibreer(self):
+        """Herbereken de `PerspectiefKalibratie`. Gooit dezelfde ValueError als
+        `kalibreer_uit_lijnen` bij een onbruikbare configuratie."""
+        return kalibreer_uit_lijnen(
+            self.rijlijnen, self.dwarslijnen, self.beeld_w, self.beeld_h,
+            lijnafstand=self.lijnafstand, rij_offsets=self.rij_offsets,
+            schaal_bekend=self.schaal_bekend, f_px=self.f_px)
+
+
 def kalibreer_uit_lijnen(rijlijnen, dwarslijnen, beeld_w, beeld_h,
                          lijnafstand=STANDAARD_LIJNAFSTAND, rij_offsets=None,
                          schaal_bekend=True, f_px=None):
@@ -243,6 +332,26 @@ def kalibreer_uit_lijnen(rijlijnen, dwarslijnen, beeld_w, beeld_h,
             raise ValueError(
                 "verdwijnpunten niet consistent met een camera (f² ≤ 0) — staan de "
                 "dwarslijn(en) in werkelijkheid wel haaks op de baanlijnen?")
+        # Conditionering: ligt een verdwijnpunt heel ver weg, dan is f er niet uit te
+        # halen — de lijnen die erbij horen lopen in beeld vrijwel evenwijdig, en een
+        # paar pixels tekenfout verschuift het punt (en dus f) enorm. Liever hier
+        # stoppen dan een plausibel ogende, betekenisloze camerastand afleveren.
+        ver = max(_vp_afstand(v1), _vp_afstand(v2))
+        if ver > VP_CONDITIE_MAX:
+            welke = "de baanlijnen" if _vp_afstand(v1) > _vp_afstand(v2) else "de dwarslijnen"
+            raise ValueError(
+                f"brandpuntsafstand niet te schatten uit deze lijnen: {welke} lopen in "
+                f"beeld vrijwel evenwijdig, dus hun verdwijnpunt ligt ~{ver:.0f}× de "
+                f"beeldmaat weg (bruikbaar is < {VP_CONDITIE_MAX:.0f}). De camera kijkt "
+                f"dan bijna langs die richting en f volgt er niet uit — een paar pixels "
+                f"tekenfout verandert hem al met een factor. Geef f_px op (schaakbord"
+                f"kalibratie of cameraspecificatie); de rest van de kalibratie werkt dan "
+                f"gewoon.")
+        if ver > VP_CONDITIE_WAARSCHUW:
+            waarschuwingen.append(
+                f"brandpuntsafstand slecht bepaald: verste verdwijnpunt op ~{ver:.0f}× "
+                f"de beeldmaat — f is gevoelig voor een paar pixels tekenfout; overweeg "
+                f"f_px op te geven")
         fn = float(np.sqrt(f2))
         f_geschat = True
     f_pix = fn * f0
@@ -761,6 +870,29 @@ def zelftest(uitgebreid=True):
                           f"lengte — geen ondergrens meer")
         print(f"{cam.naam:<17} ideaal: {L_i:.4f} m (fout {rel_i:.2%})   "
               f"realistisch: {L_r:.4f} m (bias {bias_r:+.1%})")
+
+    print("\n== Serialisatie: KalibratieInvoer round-trip via JSON ==")
+    cam = cameras[1]
+    rij, dwars = _scene_lijnen(cam)
+    inv = KalibratieInvoer(rijlijnen=rij, dwarslijnen=dwars, beeld_w=cam.w, beeld_h=cam.h,
+                           lijnafstand=STANDAARD_LIJNAFSTAND, notitie="zelftest")
+    kal_a = inv.kalibreer()
+    import json as _json
+    blob = _json.dumps(inv.naar_dict())
+    kal_b = KalibratieInvoer.uit_dict(_json.loads(blob)).kalibreer()
+    # Byte-identiek, niet 'ongeveer': de herberekening moet dezelfde weg lopen, anders
+    # zou een heropende analyse stilletjes iets andere hoeken geven dan de verse.
+    verschillen = [n for n in ("f", "H", "H_inv", "R", "t", "C", "horizonlijn")
+                   if not np.array_equal(np.asarray(getattr(kal_a, n), float),
+                                         np.asarray(getattr(kal_b, n), float))]
+    print(f"json {len(blob)} bytes; byte-identiek herberekend: "
+          f"{'ja' if not verschillen else 'NEE — ' + ', '.join(verschillen)}")
+    if verschillen:
+        fouten.append(f"serialisatie: {', '.join(verschillen)} wijken af na round-trip")
+    # De beeldmaat hoort mee te reizen: dezelfde lijnen op een andere resolutie leggen
+    # zou een plausibele maar foute kalibratie geven.
+    if not (inv.past_bij(cam.w, cam.h) and not inv.past_bij(cam.w // 2, cam.h)):
+        fouten.append("serialisatie: past_bij() bewaakt de beeldmaat niet")
 
     print("\n== Kwaliteitsvlag: been bijna in de kijkrichting ==")
     cam, kal = kals[cameras[1].naam]

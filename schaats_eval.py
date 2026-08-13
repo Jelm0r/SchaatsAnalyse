@@ -35,6 +35,11 @@ De gouden referentie is een JSON met handmatig aangeklikte knie/enkel-posities
 in een aantal frames; de hoekfout is dan |gemeten hoek − gouden hoek| van het
 segment enkel→knie per been (beeldvlak, incl. horizonaftrek van de analyse).
 De annotatie klikt in twee trappen (grof → uitvergroting) voor subpixel-precisie.
+Die fout wordt **gesplitst in standbeen en zweefbeen**: alleen het standbeen levert
+de hoek die in de tabel en in `AfzetEvent.hoek` terechtkomt, terwijl het zweefbeen
+frontaal achter het standbeen schuilgaat en daar niet meer dan een gok is. **Het
+standbeen-getal is de maat** — ook waar `vergelijk` een A/B-verschil op afdrukt;
+zie `_golden_fouten` voor de cijfers achter die keuze.
 """
 import argparse
 import json
@@ -180,10 +185,30 @@ def bereken_metrics(pad, golden_pad=None):
 
 
 def _golden_fouten(resultaten, w, h, golden_pad):
-    """Hoek- en positiefouten t.o.v. handmatig geannoteerde frames."""
+    """
+    Hoek- en positiefouten t.o.v. handmatig geannoteerde frames.
+
+    De hoekfout wordt **gesplitst op standbeen/zweefbeen** (`r.been`, gezet door
+    `wijs_afzetbeen_cyclus`) — zelfde meetfilosofie als de `been`-parameter van
+    `_botlengte_cv` hierboven. Frontaal gefilmd gaat het zweefbeen (deels) schuil
+    achter het standbeen; dáár gokken zowel de detector als de mens die de gouden
+    referentie aanklikt, wat "fouten" van tientallen graden oplevert. En die hoek
+    komt nergens in het resultaat terecht: alleen het standbeen levert
+    `AfzetEvent.hoek` en de tabel. Op één hoop gegooid is het gemiddelde ruim zes
+    keer te somber (gemeten op "Schaats frontaal.MOV": 8,47° gemengd vs. 1,34°
+    standbeen) en beweegt het bij een A/B-vergelijking vooral mee met die gokken —
+    waardoor een echte verbetering van een paar tienden erin verdwijnt.
+    **Het standbeen-getal is de maat.**
+
+    Frames zonder standbeen (`r.been is None`: bochtframes en detectiegaten) vallen
+    uit beide gemiddelden en worden alleen geteld, zodat zichtbaar blijft hoeveel van
+    de geannoteerde frames daadwerkelijk meedoen.
+    """
     with open(golden_pad, encoding='utf-8') as f:
         goud = json.load(f)
-    hoekfouten, puntfouten = [], []
+    been_code = {'links': 'l', 'rechts': 'r'}
+    stand, zweef, puntfouten = [], [], []
+    n_geen_been = 0
     for fnr_s, punten in goud.get('frames', {}).items():
         fnr = int(fnr_s)
         if fnr >= len(resultaten):
@@ -195,6 +220,7 @@ def _golden_fouten(resultaten, w, h, golden_pad):
             if naam in punten:
                 puntfouten.append(float(np.linalg.norm(
                     _px(r, idx, w, h) - np.array(punten[naam]))))
+        stand_code = been_code.get(r.been)
         for been, (k_idx, e_idx) in (('l', (L_KNEE, L_ANKLE)), ('r', (R_KNEE, R_ANKLE))):
             kn, en = punten.get(f'{been}_knie'), punten.get(f'{been}_enkel')
             if kn is None or en is None:
@@ -202,15 +228,27 @@ def _golden_fouten(resultaten, w, h, golden_pad):
             goud_hoek = bereken_hoek_tov_ijs(en, kn, r.horizon_deg)
             meet_hoek = bereken_hoek_tov_ijs(_px(r, e_idx, w, h), _px(r, k_idx, w, h),
                                              r.horizon_deg)
-            hoekfouten.append(abs(meet_hoek - goud_hoek))
-    if not hoekfouten:
+            fout = abs(meet_hoek - goud_hoek)
+            if stand_code is None:
+                n_geen_been += 1
+            elif been == stand_code:
+                stand.append(fout)
+            else:
+                zweef.append(fout)
+    n_totaal = len(stand) + len(zweef) + n_geen_been
+    if not n_totaal:
         return {'goud_n': 0}
-    return {
-        'goud_n': len(hoekfouten),
-        'goud_hoekfout_gem': float(np.mean(hoekfouten)),
-        'goud_hoekfout_max': float(np.max(hoekfouten)),
-        'goud_puntfout_px': float(np.mean(puntfouten)),
-    }
+    m = {'goud_n': n_totaal, 'goud_n_stand': len(stand), 'goud_n_zweef': len(zweef),
+         'goud_n_geen_been': n_geen_been}
+    if stand:
+        m['goud_hoekfout_stand_gem'] = float(np.mean(stand))
+        m['goud_hoekfout_stand_max'] = float(np.max(stand))
+    if zweef:
+        m['goud_hoekfout_zweef_gem'] = float(np.mean(zweef))
+        m['goud_hoekfout_zweef_max'] = float(np.max(zweef))
+    if puntfouten:
+        m['goud_puntfout_px'] = float(np.mean(puntfouten))
+    return m
 
 
 def print_metrics(m):
@@ -238,8 +276,24 @@ def print_metrics(m):
     if m.get('middellijn_dev_px') is not None:
         print(f"  middellijn-afwijking knie: {m['middellijn_dev_px']:.1f} px gem.")
     if m.get('goud_n'):
-        print(f"  GOUD ({m['goud_n']} metingen): hoekfout gem {m['goud_hoekfout_gem']:.2f}°"
-              f"  max {m['goud_hoekfout_max']:.2f}°  puntfout gem {m['goud_puntfout_px']:.1f} px")
+        # Standbeen eerst en met een pijl erbij: dat is het enige getal dat over de
+        # meting gaat (zie _golden_fouten). De zweefbeen-regel blijft staan omdat de
+        # spreiding diagnostisch is — weglaten verruilt een misleidend getal voor een
+        # verborgen getal.
+        if m.get('goud_hoekfout_stand_gem') is not None:
+            print(f"  GOUD standbeen ({m['goud_n_stand']}): "
+                  f"hoekfout gem {m['goud_hoekfout_stand_gem']:5.2f}°  "
+                  f"max {m['goud_hoekfout_stand_max']:5.2f}°   <-- dit is de maat")
+        if m.get('goud_hoekfout_zweef_gem') is not None:
+            print(f"  GOUD zweefbeen ({m['goud_n_zweef']}): "
+                  f"hoekfout gem {m['goud_hoekfout_zweef_gem']:5.2f}°  "
+                  f"max {m['goud_hoekfout_zweef_max']:5.2f}°   "
+                  f"(verborgen achter standbeen - niet stuurbaar)")
+        if m.get('goud_puntfout_px') is not None:
+            geen = m.get('goud_n_geen_been', 0)
+            print(f"  GOUD puntfout gem {m['goud_puntfout_px']:.1f} px"
+                  + (f"   ({geen} metingen zonder standbeen: bocht/gat, niet meegeteld)"
+                     if geen else ""))
 
 
 # ── Vergelijken ─────────────────────────────────────────────────────────────────
@@ -264,6 +318,18 @@ def vergelijk(pad_a, pad_b, golden_pad=None):
             d = np.array(d)
             print(f"  {naam}: mediaan {np.median(d):.1f}  gem {d.mean():.1f}  "
                   f"p95 {np.percentile(d, 95):.1f}")
+
+    # Het standbeen-getal apart naast elkaar: dáár rust de A/B-conclusie op, en het
+    # uit twee losse metrics-blokken bij elkaar zoeken is vragen om een verkeerde
+    # lezing (zie _golden_fouten).
+    if (ma.get('goud_hoekfout_stand_gem') is not None
+            and mb.get('goud_hoekfout_stand_gem') is not None):
+        print("\n== GOUD standbeen ==")
+        for label, sleutel in (('hoekfout gem', 'goud_hoekfout_stand_gem'),
+                               ('hoekfout max', 'goud_hoekfout_stand_max')):
+            a, b = ma[sleutel], mb[sleutel]
+            print(f"  {label}  {a:5.2f} -> {b:5.2f}°   ({b - a:+.2f})")
+        print(f"  n             {ma['goud_n_stand']} -> {mb['goud_n_stand']}")
 
 
 # ── Annotatie (gouden referentie) ───────────────────────────────────────────────

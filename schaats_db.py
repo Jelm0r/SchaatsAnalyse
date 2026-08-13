@@ -8,6 +8,7 @@ Eén bibliotheekmap (pad instelbaar via config, later deelbaar via een cloudmap)
       media/<analyse-uuid>/
         <originele videonaam>     ← gekopieerd origineel
         landmarks.npz             ← gesmoothte landmarks (fase 0-serialisatie)
+      opnames/                    ← ruwe trainingsopnames, nog te knippen (fase 8)
 
 Alle SQL en padlogica leeft hier; de GUI praat alleen met deze module.
 
@@ -27,18 +28,27 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import uuid
 from contextlib import contextmanager
 from datetime import date
 
-from schaats_analyse import (sla_landmarks_op, laad_landmarks,
+from schaats_analyse import (sla_landmarks_op, laad_landmarks, video_info,
                              ONV_AFGEKAPT, ONV_GEEN_PUSH)
 
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
+OPNAMES_MAP = "opnames"              # ruwe, nog niet geknipte opnames (fase 8)
 NPZ_NAAM    = "landmarks.npz"
 NPZ_RUW_NAAM = "landmarks_ruw.npz"   # pristine landmarks vóór de eerste handmatige edit (fase 3)
-SCHEMA_VERSIE = 2   # v2 (fase 4): kolom analyse.video_bytes voor de cloud-sync-check
+SCHEMA_VERSIE = 3   # v2 (fase 4): analyse.video_bytes; v3 (fase 8): bronvideo + analyse.bron_*
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".wmv")
+
+# Status van een opname in de werklijst (fase 8). Bewust handmatig: het programma kan niet
+# weten of de trainer een opname áf vindt, dus er wordt nooit automatisch iets op 'klaar'
+# gezet — het toont alleen de telling (`3 fragmenten · 2 analyses`).
+BRON_STATUSSEN = ("nog doen", "bezig", "klaar", "onbruikbaar")
+BRON_STATUS_DEFAULT = BRON_STATUSSEN[0]
 # Tekstvlaggen in afzet_event_cache.opmerking voor een afzet die zichtbaar blijft maar
 # buiten de gemiddelde hoek valt (`AfzetEvent.onvolledig`). De teksten zijn die van
 # schaats_analyse zelf, zodat caches van vóór de tweede reden gewoon blijven werken:
@@ -98,6 +108,51 @@ def trainer_naam():
     return (laad_config().get("trainer_naam") or "").strip()
 
 
+# ── Appversie (welke code heeft deze analyse gedraaid?) ────────────────────────
+
+_app_versie_cache = None
+
+
+def _git(*args):
+    """Draait een git-commando in de repomap; "" bij elke fout (geen git, geen repo,
+    timeout). CREATE_NO_WINDOW voorkomt een console-flits vanuit de GUI op Windows."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__))] + list(args),
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def app_versie():
+    """Met welke versie van de app draait deze analyse? → dict met `commit` (korte
+    hash), `datum` (commitdatum ISO), `vuil` (ongecommitte wijzigingen) en `label`
+    ("2026-08-05 · 7e013fb2+"). Buiten een git-repo zijn alle velden leeg.
+
+    De trackinglogica wijzigt tijdens het ontwikkelen regelmatig, dus van een opgeslagen
+    analyse moet achteraf te zien zijn welke code hem maakte. Bewust uit git en niet uit
+    een handmatig opgehoogde constante: die loopt juist tijdens snel ontwikkelen achter
+    en liegt dan. De commitdatum is het mens-leesbare deel voor een trainer, de hash het
+    precieze deel om `git show` op te doen. `vuil` (de `+`) telt untracked bestanden niet
+    mee — video's en npz's naast de code zeggen niets over de gedraaide logica.
+
+    Eén keer per proces gemeten (subprocess kost tijd; de code wijzigt niet tijdens een
+    draaiende sessie)."""
+    global _app_versie_cache
+    if _app_versie_cache is None:
+        commit = datum = ""
+        uit = _git("log", "-1", "--abbrev=8", "--format=%h%x09%cs")
+        if "\t" in uit:
+            commit, datum = uit.split("\t", 1)
+        vuil = bool(commit) and bool(_git("status", "--porcelain", "-uno"))
+        label = f"{datum} · {commit}{'+' if vuil else ''}" if commit else ""
+        _app_versie_cache = {"commit": commit, "datum": datum,
+                             "vuil": vuil, "label": label}
+    return dict(_app_versie_cache)
+
+
 # ── Verbinding + schema ────────────────────────────────────────────────────────
 
 @contextmanager
@@ -126,6 +181,18 @@ CREATE TABLE schaatser(
     notities      TEXT NOT NULL DEFAULT '',
     aangemaakt_op TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+CREATE TABLE bronvideo(
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bestand         TEXT NOT NULL UNIQUE,        -- relatief pad ('opnames/…'), forward slashes
+    naam            TEXT NOT NULL,
+    bytes           INTEGER,                     -- alleen de sync-check, géén identiteit
+    fps             REAL,
+    totaal_frames   INTEGER,
+    status          TEXT NOT NULL DEFAULT 'nog doen',
+    notitie         TEXT NOT NULL DEFAULT '',
+    bijgewerkt_door TEXT NOT NULL DEFAULT '',    -- wie de status/notitie het laatst zette
+    toegevoegd_op   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 CREATE TABLE analyse(
     id                TEXT PRIMARY KEY,          -- UUID, tevens mapnaam onder media/
     schaatser_id      INTEGER NOT NULL REFERENCES schaatser(id) ON DELETE CASCADE,
@@ -141,6 +208,9 @@ CREATE TABLE analyse(
     aangemaakt_door   TEXT NOT NULL DEFAULT '',  -- trainersnaam (fase 4)
     bewerkt           INTEGER NOT NULL DEFAULT 0,-- handmatige skelet-edits (fase 3)
     video_bytes       INTEGER,                   -- grootte van de gekopieerde video (fase 4, cloud-sync-check)
+    bron_id           INTEGER REFERENCES bronvideo(id) ON DELETE SET NULL,
+    bron_start_frame  INTEGER,                   -- uit welk stuk van de opname deze clip komt
+    bron_eind_frame   INTEGER,                   -- (alle drie NULL bij een losse clip)
     aangemaakt_op     TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE afzet_event_cache(
@@ -176,6 +246,7 @@ def open_db(bieb):
     onbruikbaar maken. `user_version` wordt daarom alleen geschreven ná een geslaagde
     aanmaak of migratie."""
     os.makedirs(os.path.join(bieb, MEDIA_MAP), exist_ok=True)
+    os.makedirs(os.path.join(bieb, OPNAMES_MAP), exist_ok=True)   # werklijst-map (fase 8)
     with _verbind(bieb) as con:
         versie = con.execute("PRAGMA user_version").fetchone()[0]
         if versie > SCHEMA_VERSIE:
@@ -199,6 +270,26 @@ def _migreer(con, van):
         # v1 → v2 (fase 4): kolom voor de video-grootte; oude rijen krijgen NULL en
         # slaan de sync-groottecheck bij het openen dus over (alleen bestaanscheck).
         con.execute("ALTER TABLE analyse ADD COLUMN video_bytes INTEGER")
+    if van < 3:
+        # v2 → v3 (fase 8): de nog niet geknipte opnames als werklijst, plus de
+        # herkomst van een analyse (welk stuk van welke opname). Oude analyses houden
+        # bron_id NULL — dat klopt ook: die kwamen van een losse clip, niet uit een
+        # opname. Nergens een migratie die iets moet raden.
+        con.execute(_bronvideo_ddl())
+        # De REFERENCES-clausule mag mee in ADD COLUMN zolang de default NULL is (SQLite),
+        # zodat een gemigreerde bibliotheek exact hetzelfde schema krijgt als een verse.
+        for kolom in ("bron_id INTEGER REFERENCES bronvideo(id) ON DELETE SET NULL",
+                      "bron_start_frame INTEGER", "bron_eind_frame INTEGER"):
+            con.execute(f"ALTER TABLE analyse ADD COLUMN {kolom}")
+
+
+def _bronvideo_ddl():
+    """De CREATE TABLE van `bronvideo` uit _SCHEMA, als IF NOT EXISTS — zo staat het
+    schema op één plek en kan de migratie dezelfde definitie gebruiken."""
+    begin = _SCHEMA.index("CREATE TABLE bronvideo(")
+    eind = _SCHEMA.index(");", begin) + 2
+    return _SCHEMA[begin:eind].replace("CREATE TABLE bronvideo(",
+                                       "CREATE TABLE IF NOT EXISTS bronvideo(")
 
 
 def _abs_pad(bieb, rel):
@@ -208,6 +299,17 @@ def _abs_pad(bieb, rel):
 
 def _normaliseer_backend(naam):
     return "yolo" if (naam or "").lower().startswith("yolo") else "mediapipe"
+
+
+def _meta_uit_rij(rij):
+    """DB-rij → dict met de geparste `instellingen` erbij (corrupte JSON → {}).
+    Gedeeld door lijst_analyses, laad_analyse en analyse_meta."""
+    meta = dict(rij)
+    try:
+        meta["instellingen"] = json.loads(meta.get("instellingen_json") or "{}")
+    except ValueError:
+        meta["instellingen"] = {}
+    return meta
 
 
 # ── Schaatsers ─────────────────────────────────────────────────────────────────
@@ -251,18 +353,22 @@ def verwijder_schaatser(bieb, schaatser_id):
 # ── Analyses ───────────────────────────────────────────────────────────────────
 
 def lijst_analyses(bieb, schaatser_id):
-    """Lijstweergave uit de events-cache (geen npz nodig): titel, datum,
-    aantal afzetten, gemiddelde hoek.
+    """Lijstweergave uit de events-cache (geen npz nodig): titel, datum, videoduur
+    (`totaal_frames`/`fps`), aantal afzetten, gemiddelde hoek.
 
     De gemiddelde hoek slaat **onvolledige** afzetten over — de push liep nog toen de video
     ophield, of er is binnen de stand-run geen zijwaartse push waargenomen; beide geven een
     veel te steile hoek die het gemiddelde omhoog trekt. Ze tellen wél mee in het aantal,
-    want ze zijn gebeurd."""
+    want ze zijn gebeurd.
+
+    `instellingen_json` gaat mee (geparst als `instellingen`) zodat de lijstweergave de
+    appversie kan tonen zonder een analyse te openen — dat kost één json.loads per rij,
+    verwaarloosbaar naast de subselects hieronder."""
     niet_like = " AND ".join(["c.opmerking NOT LIKE ?"] * len(ONVOLLEDIG_MARKERS))
     with _verbind(bieb) as con:
         rijen = con.execute(
             "SELECT a.id, a.titel, a.datum, a.backend, a.bewerkt, a.aangemaakt_op,"
-            "       a.aangemaakt_door,"
+            "       a.aangemaakt_door, a.instellingen_json, a.totaal_frames, a.fps,"
             "       (SELECT COUNT(*)  FROM afzet_event_cache c WHERE c.analyse_id = a.id)"
             "       AS aantal_afzetten,"
             "       (SELECT AVG(hoek) FROM afzet_event_cache c WHERE c.analyse_id = a.id"
@@ -270,11 +376,55 @@ def lijst_analyses(bieb, schaatser_id):
             "FROM analyse a WHERE a.schaatser_id = ? "
             "ORDER BY a.datum DESC, a.aangemaakt_op DESC",
             tuple(f"%{m}%" for m in ONVOLLEDIG_MARKERS) + (schaatser_id,)).fetchall()
-        return [dict(r) for r in rijen]
+        return [_meta_uit_rij(r) for r in rijen]
+
+
+def lijst_kalibraties(bieb, beeld_w=None, beeld_h=None):
+    """Analyses die een bewaarde perspectiefkalibratie dragen (fase 7), nieuwste eerst.
+
+    Bedoeld om een kalibratie te hérgebruiken: een kalibratie hoort bij één camerastand,
+    niet bij één clip, dus alle fragmenten uit dezelfde opname mogen hem delen. Dat is
+    ook een meetkundige voorwaarde om analyses onderling te kunnen vergelijken — zeven
+    keer met de hand dezelfde lijnen natrekken geeft zeven nét andere kalibraties, en
+    dan meet je die spreiding in plaats van het effect van de correctie.
+
+    Met `beeld_w`/`beeld_h` worden alleen kalibraties van diezelfde beeldmaat
+    teruggegeven: de lijnen staan in pixels, dus op een andersgrote video liggen ze
+    ernaast. Retourneert dicts met id/titel/schaatser/datum/`perspectief` (de ruwe dict)
+    en `notitie`.
+
+    Er is bewust géén aparte kalibratietabel: de kalibratie zit in `instellingen_json`,
+    dus dit kost één json.loads per analyse en geen schemabump."""
+    uit = []
+    with _verbind(bieb) as con:
+        rijen = con.execute(
+            "SELECT a.id, a.titel, a.datum, a.aangemaakt_op, a.w, a.h,"
+            "       a.instellingen_json, s.naam AS schaatser "
+            "FROM analyse a LEFT JOIN schaatser s ON s.id = a.schaatser_id "
+            "ORDER BY a.datum DESC, a.aangemaakt_op DESC").fetchall()
+    for r in rijen:
+        try:
+            inst = json.loads(r["instellingen_json"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        p = inst.get("perspectief")
+        if not p or not p.get("invoer"):
+            continue
+        inv = p["invoer"]
+        if beeld_w is not None and int(inv.get("beeld_w", -1)) != int(beeld_w):
+            continue
+        if beeld_h is not None and int(inv.get("beeld_h", -1)) != int(beeld_h):
+            continue
+        uit.append({"id": r["id"], "titel": r["titel"], "datum": r["datum"],
+                    "schaatser": r["schaatser"], "w": inv.get("beeld_w"),
+                    "h": inv.get("beeld_h"), "perspectief": p,
+                    "notitie": inv.get("notitie", "")})
+    return uit
 
 
 def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, events,
-                   backend, instellingen, datum=None, aangemaakt_door=""):
+                   backend, instellingen, datum=None, aangemaakt_door="",
+                   bron_id=None, bron_start_frame=None, bron_eind_frame=None):
     """
     Slaat een afgeronde analyse op in de bibliotheek: kopieert de video, schrijft de
     landmarks als .npz en insert de DB-rij + events-cache in één transactie.
@@ -285,7 +435,22 @@ def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, event
     `aangemaakt_door` (fase 4) is de trainersnaam; `video_bytes` (de grootte van de
     gekopieerde video) wordt bewaard zodat een collega die de analyse opent terwijl de
     cloudsync nog loopt een halve download kan herkennen.
+
+    De **appversie** en de volledige `backend_naam` worden hier aan `instellingen`
+    toegevoegd — één plek, dus elke opslagroute (enkele analyse, batch, zelftest) legt
+    het vast zonder eraan te hoeven denken. Het gaat mee in `instellingen_json`, dus
+    zonder schemabump. `setdefault`: een caller die het zelf al invult wint.
+
+    `bron_id` + `bron_start_frame`/`bron_eind_frame` (fase 8) leggen vast uit welk stuk van
+    welke opname deze clip geknipt is; bij een losse video blijven ze NULL. Daarmee is "welke
+    stukken van deze opname zijn al gedaan" één query (`bron_fragmenten`).
     """
+    inst = dict(instellingen or {})
+    inst.setdefault("backend_naam", backend or "")   # de kolom `backend` is genormaliseerd
+    versie = app_versie()
+    inst.setdefault("app_versie", versie["label"])
+    inst.setdefault("app_commit", versie["commit"])
+
     analyse_id = str(uuid.uuid4())
     doelmap = os.path.join(bieb, MEDIA_MAP, analyse_id)
     videonaam = os.path.basename(video_pad)
@@ -301,14 +466,16 @@ def sla_analyse_op(bieb, schaatser_id, titel, video_pad, info, resultaten, event
             con.execute(
                 "INSERT INTO analyse(id, schaatser_id, titel, datum, video_bestand,"
                 "                    w, h, fps, totaal_frames, backend, instellingen_json,"
-                "                    aangemaakt_door, video_bytes)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "                    aangemaakt_door, video_bytes,"
+                "                    bron_id, bron_start_frame, bron_eind_frame)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (analyse_id, schaatser_id, titel,
                  datum or date.today().isoformat(), rel_video,
                  info.w, info.h, info.fps, info.totaal,
                  _normaliseer_backend(backend),
-                 json.dumps(instellingen or {}, ensure_ascii=False),
-                 aangemaakt_door or "", video_bytes))
+                 json.dumps(inst, ensure_ascii=False),
+                 aangemaakt_door or "", video_bytes,
+                 bron_id, bron_start_frame, bron_eind_frame))
             _schrijf_events_cache(con, analyse_id, events)
         return analyse_id
     except Exception:
@@ -343,23 +510,30 @@ def _cache_opmerking(ev):
     return ev.opmerking
 
 
+def analyse_meta(bieb, analyse_id):
+    """Alleen de DB-rij van één analyse (incl. geparste `instellingen`), zónder het npz
+    te lezen — genoeg voor een info-overzicht (appversie, backend, instellingen).
+    `bron_naam` komt er los bij: de herkomst tonen ("uit opname X, 12:30–13:05") vraagt
+    de bestandsnaam, en die staat in de bronvideo-tabel."""
+    with _verbind(bieb) as con:
+        rij = con.execute(
+            "SELECT a.*, b.naam AS bron_naam FROM analyse a "
+            "LEFT JOIN bronvideo b ON b.id = a.bron_id WHERE a.id = ?",
+            (analyse_id,)).fetchone()
+    if rij is None:
+        raise KeyError(f"Analyse {analyse_id} staat niet in de bibliotheek.")
+    return _meta_uit_rij(rij)
+
+
 def laad_analyse(bieb, analyse_id):
     """Laadt een analyse: DB-meta (incl. geparste instellingen) + landmarks uit het
     .npz. Retourneert {'meta', 'info', 'resultaten', 'video_pad'}; de afgeleiden zijn
     nog leeg — draai verwerk_afgeleiden() + segmenteer_afzetten() (fase 0-naad)."""
-    with _verbind(bieb) as con:
-        rij = con.execute("SELECT * FROM analyse WHERE id = ?", (analyse_id,)).fetchone()
-    if rij is None:
-        raise KeyError(f"Analyse {analyse_id} staat niet in de bibliotheek.")
-    meta = dict(rij)
-    try:
-        meta["instellingen"] = json.loads(rij["instellingen_json"] or "{}")
-    except ValueError:
-        meta["instellingen"] = {}
+    meta = analyse_meta(bieb, analyse_id)
     # npz-lezen buiten de DB-verbinding houden (verbinding zo kort mogelijk).
     info, resultaten = laad_landmarks(os.path.join(bieb, MEDIA_MAP, analyse_id, NPZ_NAAM))
     return {"meta": meta, "info": info, "resultaten": resultaten,
-            "video_pad": _abs_pad(bieb, rij["video_bestand"])}
+            "video_pad": _abs_pad(bieb, meta["video_bestand"])}
 
 
 def analyse_video_pad(bieb, analyse_id):
@@ -370,6 +544,145 @@ def analyse_video_pad(bieb, analyse_id):
     if rij is None:
         raise KeyError(f"Analyse {analyse_id} staat niet in de bibliotheek.")
     return _abs_pad(bieb, rij["video_bestand"])
+
+
+# ── Opnames: de nog niet geknipte bronvideo's (fase 8) ─────────────────────────
+#
+# De ontwerpregel: **de map is de waarheid over wélke bestanden er zijn, de database over
+# wat wij ervan weten.** De bestandslijst wordt bij het openen van schijf gescand, niet uit
+# de DB gelezen — anders loopt de DB scheef zodra iemand een bestand hernoemt of weggooit en
+# zit je aan opruimwerk vast. In de DB staat alleen wat je nooit van schijf kunt aflezen:
+# status, notitie, en welke analyses uit welk stuk van welke opname komen.
+
+def opnames_pad(bieb, maak_aan=True):
+    """Absoluut pad van `<bibliotheek>/opnames/`. Binnen de bibliotheekmap, zodat alle paden
+    relatief blijven (fase 1-discipline) en er géén extra pad-instelling per trainer nodig
+    is; de map wordt aangemaakt als hij er nog niet staat."""
+    pad = os.path.join(bieb, OPNAMES_MAP)
+    if maak_aan:
+        os.makedirs(pad, exist_ok=True)
+    return pad
+
+
+def synchroniseer_bronmap(bieb, meta_lezer=None):
+    """Scant `opnames/` en zet nieuwe bestanden in de bronvideo-tabel. Retourneert het
+    aantal toegevoegde opnames.
+
+    - **Identiteit is het relatieve pad** (`opnames/<naam>`, UNIQUE): één map kan geen twee
+      bestanden met dezelfde naam bevatten, en omdat de map ín de bibliotheek zit is dat pad
+      bij elke trainer hetzelfde. Een hernoemd bestand geldt als nieuw; de oude rij blijft
+      met zijn analyses bestaan en wordt getoond als "bestand niet gevonden".
+    - **`bytes` hoort níet in de sleutel**, alleen in de sync-check: een opname die bij een
+      collega nog binnenkomt is op dat moment *kleiner* dan wat er in de DB staat. Zat de
+      grootte in de sleutel, dan zag de scan een half gedownload bestand aan voor een nieuwe
+      opname en kwam er een tweede rij bij — precies wanneer je de fragmentgeschiedenis nodig
+      hebt.
+    - `INSERT OR IGNORE`, zodat twee trainers die tegelijk dezelfde nieuwe opname zien niet
+      botsen, en er wordt **alleen geschreven als er echt iets nieuws is**: anders zou elke
+      app-start van elke trainer de gedeelde DB aanraken, terwijl die volgens de fase
+      4-discipline zo veel mogelijk in rust hoort te zijn voor de syncer.
+
+    `meta_lezer(pad)` levert `(fps, totaal_frames)`; standaard via OpenCV. Een onleesbaar
+    bestand (nog aan het downloaden) komt gewoon in de lijst met lege meta — dat is beter dan
+    het overslaan, want dan zie je niet dát er een opname is.
+    """
+    map_pad = opnames_pad(bieb)
+    try:
+        namen = sorted(n for n in os.listdir(map_pad)
+                       if os.path.splitext(n)[1].lower() in VIDEO_EXTS)
+    except OSError:
+        return 0
+    with _verbind(bieb) as con:
+        bekend = {r["bestand"] for r in con.execute("SELECT bestand FROM bronvideo")}
+        nieuw = [n for n in namen if f"{OPNAMES_MAP}/{n}" not in bekend]
+        for naam in nieuw:
+            pad = os.path.join(map_pad, naam)
+            fps, totaal = (meta_lezer or _video_meta)(pad)
+            try:
+                grootte = os.path.getsize(pad)
+            except OSError:
+                grootte = None
+            con.execute(
+                "INSERT OR IGNORE INTO bronvideo(bestand, naam, bytes, fps, totaal_frames,"
+                "                                status) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"{OPNAMES_MAP}/{naam}", naam, grootte, fps, totaal, BRON_STATUS_DEFAULT))
+    return len(nieuw)
+
+
+def _video_meta(pad):
+    """(fps, totaal_frames) van een videobestand; (None, None) als het niet te lezen is."""
+    try:
+        info = video_info(pad)
+        return info.fps, info.totaal
+    except Exception:
+        return None, None
+
+
+def lijst_bronvideos(bieb):
+    """Alle bekende opnames met hun werklijst-gegevens: status, notitie, hoeveel fragmenten
+    er al uit geknipt zijn (= analyses met deze bron), of het bestand er staat en of de
+    cloudsync nog bezig is.
+
+    `aantal_fragmenten` telt de analyses die uit deze opname komen; `aantal_schaatsers`
+    hoeveel verschillende schaatsers dat betreft. Het onderscheid "fragmenten vs. analyses"
+    uit de roadmap valt hier samen — elk gemarkeerd fragment wordt precies één analyse."""
+    with _verbind(bieb) as con:
+        rijen = con.execute(
+            "SELECT b.*,"
+            "       (SELECT COUNT(*) FROM analyse a WHERE a.bron_id = b.id)"
+            "       AS aantal_fragmenten,"
+            "       (SELECT COUNT(DISTINCT a.schaatser_id) FROM analyse a"
+            "         WHERE a.bron_id = b.id) AS aantal_schaatsers "
+            "FROM bronvideo b ORDER BY b.naam COLLATE NOCASE").fetchall()
+    uit = []
+    for r in rijen:
+        d = dict(r)
+        d["pad"] = _abs_pad(bieb, d["bestand"])
+        d["sync"] = video_sync_status(d["pad"], d["bytes"])
+        uit.append(d)
+    return uit
+
+
+def bronvideo(bieb, bron_id):
+    """Eén opname-rij (incl. absoluut pad + sync-status), of KeyError."""
+    for b in lijst_bronvideos(bieb):
+        if b["id"] == bron_id:
+            return b
+    raise KeyError(f"Opname {bron_id} staat niet in de bibliotheek.")
+
+
+def wijzig_bronvideo(bieb, bron_id, status=None, notitie=None, bijgewerkt_door=""):
+    """Zet status en/of notitie van een opname. `bijgewerkt_door` (de trainersnaam) gaat mee
+    zodat in een gedeelde bibliotheek zichtbaar is wie een opname op 'klaar' zette —
+    hetzelfde motief als `aangemaakt_door` bij een analyse."""
+    velden, waarden = [], []
+    if status is not None:
+        velden.append("status = ?")
+        waarden.append(status)
+    if notitie is not None:
+        velden.append("notitie = ?")
+        waarden.append(notitie)
+    if not velden:
+        return
+    velden.append("bijgewerkt_door = ?")
+    waarden.append(bijgewerkt_door or "")
+    with _verbind(bieb) as con:
+        con.execute(f"UPDATE bronvideo SET {', '.join(velden)} WHERE id = ?",
+                    waarden + [bron_id])
+
+
+def bron_fragmenten(bieb, bron_id):
+    """De stukken van deze opname die al geanalyseerd zijn: [{analyse_id, titel, schaatser,
+    start_frame, eind_frame}], op startframe gesorteerd. Dit levert de grijze blokken in het
+    knipvenster — één query in plaats van een scan door alle instellingen_json-velden."""
+    with _verbind(bieb) as con:
+        rijen = con.execute(
+            "SELECT a.id AS analyse_id, a.titel, s.naam AS schaatser,"
+            "       a.bron_start_frame AS start_frame, a.bron_eind_frame AS eind_frame "
+            "FROM analyse a LEFT JOIN schaatser s ON s.id = a.schaatser_id "
+            "WHERE a.bron_id = ? AND a.bron_start_frame IS NOT NULL "
+            "ORDER BY a.bron_start_frame", (bron_id,)).fetchall()
+    return [dict(r) for r in rijen]
 
 
 # ── Gedeelde cloudmap (fase 4) ──────────────────────────────────────────────────
@@ -435,6 +748,25 @@ def bewaar_bewerkte_landmarks(bieb, analyse_id, resultaten, info, events):
         _schrijf_events_cache(con, analyse_id, events)
 
 
+def bewaar_bochtmarkering(bieb, analyse_id, resultaten, info, events):
+    """
+    Schrijft een alsnog bepaalde bochtmarkering (`FrameResultaat.bocht`) weg en ververst
+    de events-cache. Voor analyses van vóór de bochtdetectie: hun npz heeft de vlag nog
+    niet, terwijl de landmarks van de héle clip er wél in staan — daar valt de bocht dus
+    prima uit af te leiden zonder opnieuw te analyseren.
+
+    Bewust níet `bewaar_bewerkte_landmarks`: dat is voor handwerk met de skelet-editor en
+    zet `analyse.bewerkt = 1` plus een pristine backup. Hier verandert geen enkel
+    landmark — alleen de vlag die zegt welke frames buiten de meting vallen — dus die
+    analyse blijft "niet bewerkt" en de eval-metrics blijven vergelijkbaar met andere
+    onbewerkte analyses (zie de waarschuwing in schaats_eval).
+    """
+    npz = os.path.join(bieb, MEDIA_MAP, analyse_id, NPZ_NAAM)
+    sla_landmarks_op(npz, resultaten, info)
+    with _verbind(bieb) as con:
+        _schrijf_events_cache(con, analyse_id, events)
+
+
 def herstel_originele_landmarks(bieb, analyse_id):
     """Zet de landmarks terug naar vóór de eerste edit (landmarks_ruw.npz → landmarks.npz)
     en analyse.bewerkt = 0. Retourneert True als er een origineel was, anders False (de
@@ -482,18 +814,53 @@ if __name__ == "__main__":
         with _verbind(bieb) as c:
             assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
 
-        # Migratie v1 → v2 (fase 4): een oude DB zonder video_bytes-kolom wordt
-        # bijgewerkt zonder dataverlies.
+        # Migratie v1 → v3: een oude DB zonder video_bytes (v2) en zonder bronvideo/bron_*
+        # (v3) wordt in één keer bijgewerkt zonder dataverlies. Het oude schema staat hier
+        # bewust letterlijk: v1 ís bevroren, en het uit _SCHEMA weg filteren wordt met elke
+        # bump fragieler.
+        v1_schema = """
+        CREATE TABLE schaatser(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, naam TEXT NOT NULL,
+            geboortejaar INTEGER, notities TEXT NOT NULL DEFAULT '',
+            aangemaakt_op TEXT NOT NULL DEFAULT (datetime('now', 'localtime')));
+        CREATE TABLE analyse(
+            id TEXT PRIMARY KEY,
+            schaatser_id INTEGER NOT NULL REFERENCES schaatser(id) ON DELETE CASCADE,
+            titel TEXT NOT NULL, datum TEXT NOT NULL, video_bestand TEXT NOT NULL,
+            w INTEGER, h INTEGER, fps REAL, totaal_frames INTEGER,
+            backend TEXT NOT NULL, instellingen_json TEXT NOT NULL DEFAULT '{}',
+            aangemaakt_door TEXT NOT NULL DEFAULT '', bewerkt INTEGER NOT NULL DEFAULT 0,
+            aangemaakt_op TEXT NOT NULL DEFAULT (datetime('now', 'localtime')));
+        CREATE TABLE afzet_event_cache(
+            analyse_id TEXT NOT NULL REFERENCES analyse(id) ON DELETE CASCADE,
+            idx INTEGER NOT NULL, been TEXT, start_frame INTEGER, eind_frame INTEGER,
+            hoek REAL, min_hoek REAL, max_hoek REAL, opmerking TEXT,
+            PRIMARY KEY (analyse_id, idx));
+        """
         oud = os.path.join(tmp, "oud_v1")
         os.makedirs(os.path.join(oud, MEDIA_MAP))
-        v1_schema = "\n".join(r for r in _SCHEMA.splitlines() if "video_bytes" not in r)
         with sqlite3.connect(os.path.join(oud, DB_NAAM)) as c:
             c.executescript(v1_schema)
             c.execute("PRAGMA user_version = 1")
         open_db(oud)   # migreert
         with _verbind(oud) as c:
             assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
-            assert "video_bytes" in [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
+            kolommen = [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
+            assert "video_bytes" in kolommen
+            assert {"bron_id", "bron_start_frame", "bron_eind_frame"} <= set(kolommen)
+            assert c.execute("SELECT COUNT(*) FROM bronvideo").fetchone()[0] == 0
+
+        # Migratie v2 → v3 apart: alleen de fase 8-stap, zonder de v2-stap ervoor.
+        oud2 = os.path.join(tmp, "oud_v2")
+        os.makedirs(os.path.join(oud2, MEDIA_MAP))
+        with sqlite3.connect(os.path.join(oud2, DB_NAAM)) as c:
+            c.executescript(v1_schema)
+            c.execute("ALTER TABLE analyse ADD COLUMN video_bytes INTEGER")   # = v2
+            c.execute("PRAGMA user_version = 2")
+        open_db(oud2)
+        with _verbind(oud2) as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
+            assert "bron_eind_frame" in [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
 
         # Nieuwere DB (collega met een recentere app): weigeren, niét downgraden.
         nieuw = os.path.join(tmp, "nieuw_v99")
@@ -548,10 +915,17 @@ if __name__ == "__main__":
         s = lijst_schaatsers(bieb)
         assert len(s) == 1 and s[0]["geboortejaar"] == 2011 and s[0]["aantal_analyses"] == 0
 
+        # Appversie: buiten een git-repo zijn de velden leeg — daarom alleen de vorm
+        # controleren, niet de inhoud.
+        versie = app_versie()
+        assert set(versie) == {"commit", "datum", "vuil", "label"}
+        assert bool(versie["label"]) == bool(versie["commit"])
+
+        # `backend_naam` bewust weggelaten: sla_analyse_op hoort hem zelf in te vullen.
         instellingen = {"smooth_n": 5, "threshold": 0.015, "smooth_landmarks": True,
+                        "bocht_overslaan": True,
                         "doel_punt": [0.5, 0.5], "horizon_deg": 0.0, "auto_horizon": False,
-                        "heavy": False, "backend_naam": "YOLO-pose + ByteTrack",
-                        "perspectief_gebruikt": False}
+                        "heavy": False, "perspectief_gebruikt": False}
         aid = sla_analyse_op(bieb, sid, "Proefanalyse", video, info, resultaten, events,
                              backend="YOLO-pose + ByteTrack", instellingen=instellingen,
                              aangemaakt_door="Coach Tester")
@@ -563,11 +937,28 @@ if __name__ == "__main__":
         # gemiddelde over (40.0, 42.0); de onvolledige 79.0 en 83.0 vallen erbuiten
         assert abs(la[0]["gem_hoek"] - 41.0) < 1e-9 and la[0]["backend"] == "yolo"
         assert la[0]["aangemaakt_door"] == "Coach Tester"
+        # De lijstweergave draagt de instellingen mee (voor de appversie-tooltip).
+        assert la[0]["instellingen"]["app_versie"] == versie["label"]
         assert lijst_schaatsers(bieb)[0]["aantal_analyses"] == 1
+
+        # analyse_meta = dezelfde meta zonder het npz te lezen.
+        m = analyse_meta(bieb, aid)
+        assert m["titel"] == "Proefanalyse" and m["instellingen"]["smooth_n"] == 5
+        try:
+            analyse_meta(bieb, "bestaat-niet")
+            raise AssertionError("analyse_meta hoort KeyError te geven")
+        except KeyError:
+            pass
 
         data = laad_analyse(bieb, aid)
         assert data["meta"]["titel"] == "Proefanalyse"
-        assert data["meta"]["instellingen"] == instellingen
+        # Wat de caller meegaf staat er onveranderd in; appversie en de volledige
+        # backendnaam heeft sla_analyse_op er zelf bij gezet.
+        opgeslagen = data["meta"]["instellingen"]
+        assert all(opgeslagen[k] == v for k, v in instellingen.items())
+        assert opgeslagen["backend_naam"] == "YOLO-pose + ByteTrack"
+        assert opgeslagen["app_versie"] == versie["label"]
+        assert opgeslagen["app_commit"] == versie["commit"]
         assert data["meta"]["aangemaakt_door"] == "Coach Tester"
         assert data["meta"]["video_bytes"] == os.path.getsize(video)
         assert os.path.isfile(data["video_pad"])
@@ -577,6 +968,55 @@ if __name__ == "__main__":
         assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"]) is None
         assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"] + 999) == "onvolledig"
         assert video_sync_status(os.path.join(tmp, "weg.mp4"), 100) == "ontbreekt"
+
+        # ── Opnames / bronvideo's (fase 8) ────────────────────────────────────────
+        # De map is de waarheid over wélke bestanden er zijn: scannen levert de rijen,
+        # en een tweede scan zonder nieuwe bestanden schrijft niets (rust voor de syncer).
+        assert os.path.isdir(opnames_pad(bieb))
+        assert lijst_bronvideos(bieb) == []
+        opname = os.path.join(opnames_pad(bieb), "Training 3 aug.mp4")
+        with open(opname, "wb") as f:
+            f.write(b"nep-opname van een half uur")
+        with open(os.path.join(opnames_pad(bieb), "aantekeningen.txt"), "w") as f:
+            f.write("geen video, hoort niet in de lijst")
+        # meta_lezer geïnjecteerd: het nepbestand is geen echte video.
+        assert synchroniseer_bronmap(bieb, meta_lezer=lambda p: (30.0, 54000)) == 1
+        assert synchroniseer_bronmap(bieb, meta_lezer=lambda p: (30.0, 54000)) == 0  # idempotent
+        bronnen = lijst_bronvideos(bieb)
+        assert len(bronnen) == 1                     # het .txt-bestand telt niet mee
+        bron = bronnen[0]
+        assert bron["bestand"] == f"{OPNAMES_MAP}/Training 3 aug.mp4"
+        assert bron["totaal_frames"] == 54000 and bron["status"] == BRON_STATUS_DEFAULT
+        assert bron["sync"] is None and bron["aantal_fragmenten"] == 0
+        assert os.path.isfile(bron["pad"])
+
+        wijzig_bronvideo(bieb, bron["id"], status="bezig", notitie="tempo-serie",
+                         bijgewerkt_door="Coach Tester")
+        bron = bronvideo(bieb, bron["id"])
+        assert bron["status"] == "bezig" and bron["notitie"] == "tempo-serie"
+        assert bron["bijgewerkt_door"] == "Coach Tester"
+
+        # Een analyse die uit een stuk van deze opname geknipt is → grijze blokken.
+        assert bron_fragmenten(bieb, bron["id"]) == []
+        aid_f = sla_analyse_op(bieb, sid, "Fragment 1", video, info, resultaten, events,
+                               "MediaPipe", {}, bron_id=bron["id"],
+                               bron_start_frame=1200, bron_eind_frame=1560)
+        frag = bron_fragmenten(bieb, bron["id"])
+        assert len(frag) == 1 and frag[0]["start_frame"] == 1200
+        assert frag[0]["eind_frame"] == 1560 and frag[0]["schaatser"] == "Test Schaatser"
+        assert lijst_bronvideos(bieb)[0]["aantal_fragmenten"] == 1
+        assert analyse_meta(bieb, aid_f)["bron_id"] == bron["id"]
+        # Een losse clip houdt bron_id NULL — er valt niets te raden.
+        assert analyse_meta(bieb, aid)["bron_id"] is None
+        verwijder_analyse(bieb, aid_f)
+        assert bron_fragmenten(bieb, bron["id"]) == []
+
+        # De sync-check van fase 4 werkt één op één op een opname die nog binnenkomt.
+        with open(bron["pad"], "wb") as f:
+            f.write(b"half")
+        assert lijst_bronvideos(bieb)[0]["sync"] == "onvolledig"
+        os.remove(bron["pad"])
+        assert lijst_bronvideos(bieb)[0]["sync"] == "ontbreekt"   # rij blijft staan
 
         # Conflictkopie-detectie (fase 4): een tweede .db-bestand wordt gemeld.
         assert detecteer_conflictkopieen(bieb) == []
