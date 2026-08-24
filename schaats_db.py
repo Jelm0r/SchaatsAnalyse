@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from datetime import date
 
 from schaats_analyse import (sla_landmarks_op, laad_landmarks, video_info,
-                             ONV_AFGEKAPT, ONV_GEEN_PUSH)
+                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_bevroren)
 
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
@@ -129,6 +129,29 @@ def _git(*args):
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _versie_uit_bundel():
+    """De versie zoals het buildscript hem in `_versie.py` heeft gezet, of None.
+
+    In een gebundelde .exe is er geen git en geen repo, dus zou `_git()` overal leeg
+    teruggeven en elke analyse van een collega **zonder versiestempel** in de bibliotheek
+    belanden — precies het gegeven waarop de Info-dialoog en de titel-tooltip leunen. Het
+    buildscript legt daarom dezelfde velden vast in een gegenereerde `_versie.py`, en het
+    label-formaat blijft exact gelijk ("2026-08-24 · 4df9ab5a") zodat analyses uit de exe
+    en uit de repo vergelijkbaar blijven.
+    """
+    try:
+        import _versie
+    except Exception:
+        return None
+    commit = str(getattr(_versie, "COMMIT", "") or "").strip()
+    if not commit:
+        return None
+    datum = str(getattr(_versie, "DATUM", "") or "").strip()
+    vuil = bool(getattr(_versie, "VUIL", False))
+    return {"commit": commit, "datum": datum, "vuil": vuil,
+            "label": f"{datum} · {commit}{'+' if vuil else ''}"}
+
+
 def app_versie():
     """Met welke versie van de app draait deze analyse? → dict met `commit` (korte
     hash), `datum` (commitdatum ISO), `vuil` (ongecommitte wijzigingen) en `label`
@@ -141,18 +164,25 @@ def app_versie():
     precieze deel om `git show` op te doen. `vuil` (de `+`) telt untracked bestanden niet
     mee — video's en npz's naast de code zeggen niets over de gedraaide logica.
 
+    In een gebundelde .exe komt het antwoord uit `_versie.py` (zie `_versie_uit_bundel`)
+    i.p.v. uit git; het formaat is identiek.
+
     Eén keer per proces gemeten (subprocess kost tijd; de code wijzigt niet tijdens een
     draaiende sessie)."""
     global _app_versie_cache
     if _app_versie_cache is None:
-        commit = datum = ""
-        uit = _git("log", "-1", "--abbrev=8", "--format=%h%x09%cs")
-        if "\t" in uit:
-            commit, datum = uit.split("\t", 1)
-        vuil = bool(commit) and bool(_git("status", "--porcelain", "-uno"))
-        label = f"{datum} · {commit}{'+' if vuil else ''}" if commit else ""
-        _app_versie_cache = {"commit": commit, "datum": datum,
-                             "vuil": vuil, "label": label}
+        gebundeld = _versie_uit_bundel() if is_bevroren() else None
+        if gebundeld is not None:
+            _app_versie_cache = gebundeld
+        else:
+            commit = datum = ""
+            uit = _git("log", "-1", "--abbrev=8", "--format=%h%x09%cs")
+            if "\t" in uit:
+                commit, datum = uit.split("\t", 1)
+            vuil = bool(commit) and bool(_git("status", "--porcelain", "-uno"))
+            label = f"{datum} · {commit}{'+' if vuil else ''}" if commit else ""
+            _app_versie_cache = {"commit": commit, "datum": datum,
+                                 "vuil": vuil, "label": label}
     return dict(_app_versie_cache)
 
 

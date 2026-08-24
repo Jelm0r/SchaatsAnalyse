@@ -71,6 +71,7 @@ from schaats_analyse import (
     FrameResultaat, Landmark, VideoInfo, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
     bocht_ratio, bepaal_bocht_reeks, NUM_POSES_DEFAULT, BOCHT_IN, BOCHT_UIT,
+    app_dir, data_dir,
 )
 
 BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
@@ -201,6 +202,9 @@ def _infereer(aanroep, waarschuwing_callback=None):
 # (sneller, iets minder nauwkeurig). Ultralytics downloadt het model bij eerste gebruik.
 # NB: YOLOv12 is nooit als pose-model uitgebracht (alleen detectie); YOLO26 is het
 # nieuwste pose-model in ultralytics, opvolger van yolo11x-pose.
+# Bewust alleen de bestandsnaam; `analyseer()` maakt hem absoluut t.o.v. `app_dir()`.
+# Een kále naam hangt aan de wérkmap, en vanuit een snelkoppeling gestart zou ultralytics
+# het model daar niet vinden en 126 MB opnieuw downloaden naar een willekeurige map.
 STANDAARD_YOLO_MODEL = "yolo26x-pose.pt"
 
 # ── Detectie ────────────────────────────────────────────────────────────────────
@@ -213,9 +217,19 @@ ONNX_OPSET = 17
 
 
 def _onnx_pad(pt_pad):
-    """Pad van het DirectML-model naast het .pt-bestand."""
+    """Pad van het DirectML-model: naast het .pt-bestand als het daar staat, anders in de
+    schrijfbare datamap.
+
+    Normaal wordt er niets geschreven — in de repo staat de export er na de eerste keer,
+    en een installatie levert hem mee. Maar ontbreekt hij toch, dan moet de eenmalige
+    export ergens heen waar zeker geschreven mag worden: een installatiemap kan read-only
+    zijn, en dan zou de GPU-route bij elke analyse opnieuw stuklopen.
+    """
     stam, _ = os.path.splitext(pt_pad)
-    return f"{stam}-dml.onnx"
+    naast = f"{stam}-dml.onnx"
+    if os.path.exists(naast):
+        return naast
+    return os.path.join(data_dir(), os.path.basename(naast))
 
 
 @contextmanager
@@ -401,6 +415,10 @@ GAP_VUL_S       = 1.0        # max. detectiegat dat via geïnterpoleerde bboxes 
 RTMPOSE_MODEL = ('https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/'
                  'onnx_sdk/rtmpose-x_simcc-body7_pt-body7-halpe26_700e-384x288'
                  '-7fb6e239_20230606.zip')
+# Naam van het meegeleverde model naast de app (installatie); rtmlib's `BaseTool` doet
+# `if not os.path.exists(onnx_model): download_checkpoint(...)`, dus een lokaal pad werkt
+# zonder patch en de URL blijft de terugval voor een kale repo-omgeving.
+RTMPOSE_LOKAAL = "rtmpose-x-halpe26-384x288.onnx"
 RTMPOSE_INPUT = (288, 384)   # (breedte, hoogte) van de modelinvoer
 RTMPOSE_MIN_SCORE = 0.3      # min. gemiddelde been-keypointscore om de schatting te vertrouwen
 # Terugvalroute zonder rtmlib (vierkante crop door yolo26x):
@@ -982,6 +1000,13 @@ def _interpoleer_doel(doel_per_frame, fps, bocht=None):
     return plan
 
 
+def _rtmpose_model():
+    r"""Het meegeleverde RTMPose-bestand als dat er staat, anders de URL — waarna rtmlib
+    het zelf downloadt en cachet in %USERPROFILE%\.cache\rtmlib."""
+    pad = os.path.join(app_dir(), RTMPOSE_LOKAAL)
+    return pad if os.path.exists(pad) else RTMPOSE_MODEL
+
+
 def _maak_rtmpose(waarschuwing_callback=None):
     """
     RTMPose-26-model voor de verfijningspass, of None zonder rtmlib.
@@ -995,8 +1020,9 @@ def _maak_rtmpose(waarschuwing_callback=None):
     if not IS_RTMPOSE:
         return None
     device = rtmpose_device()
+    model = _rtmpose_model()     # één keer bepalen: beide takken hetzelfde gewichtenbestand
     try:
-        return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT,
+        return _RTMPose(model, model_input_size=RTMPOSE_INPUT,
                         backend='onnxruntime', device=device)
     except Exception as exc:
         if device == 'cpu':
@@ -1004,7 +1030,7 @@ def _maak_rtmpose(waarschuwing_callback=None):
         _meld(waarschuwing_callback,
               f"RTMPose kon niet op de GPU starten ({exc}); de verfijningspass "
               "draait op de CPU.")
-        return _RTMPose(RTMPOSE_MODEL, model_input_size=RTMPOSE_INPUT,
+        return _RTMPose(model, model_input_size=RTMPOSE_INPUT,
                         backend='onnxruntime', device='cpu')
 
 
@@ -1276,7 +1302,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     meten. Met `bocht=False` wordt elk frame geïnfereerd en gemeten, zoals voorheen.
     """
     info = video_info(input_pad, force_fps)
-    model = _laad_yolo(yolo_model or STANDAARD_YOLO_MODEL, waarschuwing_callback)
+    model = _laad_yolo(yolo_model or os.path.join(app_dir(), STANDAARD_YOLO_MODEL),
+                       waarschuwing_callback)
     if perspectief is not None:
         auto_horizon = False     # vaste camera per aanname; kalibratie kent de kanteling al
 

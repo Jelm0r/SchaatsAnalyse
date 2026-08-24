@@ -23,6 +23,7 @@ Opties:
 """
 
 import os
+import sys
 import cv2
 import numpy as np
 import argparse
@@ -30,6 +31,16 @@ from collections import deque, namedtuple
 from dataclasses import dataclass, field
 
 import schaats_perspectief   # puur numpy — veilig in beide venvs
+
+
+# ── Waar staan de bestanden? ────────────────────────────────────────────────────
+# Deze drie hoorden hier (de laagste gedeelde module: schaats_gui, schaats_yolo én
+# schaats_db importeren er alle drie uit), maar staan nu in schaats_omgeving.py — dat is
+# stdlib-only en dus laadbaar vóór het opstartscherm, waar `data_dir()` al nodig is om de
+# uitvoer om te leiden (EXE.md stap 2) terwijl deze module juist cv2+numpy binnentrekt.
+# Ze worden hier doorgegeven, zodat elke bestaande import ongewijzigd blijft werken.
+from schaats_omgeving import is_bevroren, app_dir, data_dir     # noqa: F401
+
 
 # MediaPipe wordt bewust NIET op moduleniveau geïmporteerd: dan kan dit bestand ook
 # geladen worden in een omgeving zónder mediapipe (bv. de YOLO-venv, die de gedeelde
@@ -2430,8 +2441,7 @@ if __name__ == "__main__":
         exit(1)
 
     standaard_naam = "pose_landmarker_heavy.task" if args.heavy else "pose_landmarker_full.task"
-    model_pad = args.model or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), standaard_naam)
+    model_pad = args.model or os.path.join(app_dir(), standaard_naam)
     if not args.from_npz and not os.path.isfile(model_pad):
         # Bij --from-npz wordt niet gedetecteerd, dus is het model niet nodig.
         variant = "heavy" if args.heavy else "full"

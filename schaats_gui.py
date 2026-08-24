@@ -20,6 +20,18 @@ import tempfile
 import threading
 import time
 
+# ── Uitvoer eerst: bevroren is er geen console ──────────────────────────────────
+# Vóór álle andere imports, want een gebundelde .exe (PyInstaller --windowed) heeft geen
+# console: sys.stdout/stderr zijn dan None en alles wat die stroom écht aanspreekt loopt
+# stuk — de tqdm-balk van ultralytics/rtmlib, de logging-handler die ultralytics bij de
+# import aanhaakt, elke sys.stdout.write. Dat moet dus geregeld zijn vóór de eerste van
+# die imports, en dus ook vóór _start_opstartscherm() hieronder, dat al op moduleniveau
+# een venster neerzet. schaats_omgeving is stdlib-only: ~1 ms, threading stond er al.
+# In de repo-omgeving gebeurt er niets, tenzij SCHAATSANALYSE_LOG gezet is.
+import schaats_omgeving
+
+LOGPAD = schaats_omgeving.start_logboek() if __name__ == "__main__" else None
+
 # ── Qt eerst, en meteen een opstartscherm ───────────────────────────────────────
 # Bewust vóór alle andere imports: de rest van deze module trekt cv2/numpy binnen en
 # (bij het eerste gebruik) torch/ultralytics, en juist op een koude machine kost dat
@@ -111,7 +123,7 @@ from schaats_analyse import (
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
     torso_centroid, kader_reeks, maak_voorvulling, bepaal_bocht_reeks,
     FrameResultaat, video_info, knip_fragmenten, KnipAfgebroken,
-    ONV_AFGEKAPT, ONV_GEEN_PUSH,
+    ONV_AFGEKAPT, ONV_GEEN_PUSH, app_dir, is_bevroren,
 )
 
 # Skelet-editor (fase 3)
@@ -346,6 +358,16 @@ _backend_fn = None
 BACKEND_FOUT = ""      # gevuld als de YOLO-import geïnstalleerd leek maar toch mislukte
 
 
+def _backend_stuk(*_args, **_kwargs):
+    """Analyse-ingang als de enige meegeleverde backend niet laadde (alleen bevroren).
+
+    MediaPipe zit niet in het gebundelde pakket, dus daar terugvallen zou pas midden in
+    de eerste analyse als ImportError opduiken. Liever hier meteen één duidelijke fout;
+    `_waarschuw_backend_terugval()` heeft de gebruiker dan al gewaarschuwd."""
+    raise RuntimeError("De analyse-backend kon niet geladen worden:\n\n"
+                       f"{BACKEND_FOUT}")
+
+
 def _laad_backend():
     """Importeert de gekozen backend (eenmalig) en retourneert zijn `analyseer`-functie.
 
@@ -354,6 +376,11 @@ def _laad_backend():
     te laten stuklopen, en worden `IS_YOLO`/`BACKEND_NAAM` bijgetrokken. Dat mag níet
     stilzwijgend gebeuren (het is een andere detector en dus een andere meting), dus de
     reden wordt bewaard in `BACKEND_FOUT` en door de GUI gemeld zodra er een analyse start.
+
+    In een gebundelde .exe bestaat die terugval niet: MediaPipe zit niet in het pakket
+    (`IS_YOLO` is daar altijd waar). Dan blijft de backendnaam staan en levert dit
+    `_backend_stuk` op, zodat er één duidelijke fout komt i.p.v. een ImportError diep in
+    de eerste analyse.
     """
     global _backend_fn, IS_YOLO, BACKEND_NAAM, BACKEND_FOUT
     with _backend_slot:
@@ -364,14 +391,20 @@ def _laad_backend():
                     BACKEND_NAAM = schaats_yolo.BACKEND_NAAM
                     _backend_fn = schaats_yolo.analyseer
                 except Exception as e:
-                    IS_YOLO = False
-                    BACKEND_NAAM = "MediaPipe"
                     BACKEND_FOUT = f"{type(e).__name__}: {e}"
+                    if not is_bevroren():
+                        IS_YOLO = False
+                        BACKEND_NAAM = "MediaPipe"
                     print(f"YOLO-backend kon niet geladen worden ({BACKEND_FOUT}); "
-                          f"de app werkt verder met MediaPipe.", file=sys.stderr)
+                          + ("er kan nu niet geanalyseerd worden." if is_bevroren()
+                             else "de app werkt verder met MediaPipe."),
+                          file=sys.stderr)
             if _backend_fn is None:
-                from schaats_analyse import analyseer as mp_analyseer
-                _backend_fn = mp_analyseer
+                if is_bevroren():
+                    _backend_fn = _backend_stuk      # MediaPipe zit niet in dit pakket
+                else:
+                    from schaats_analyse import analyseer as mp_analyseer
+                    _backend_fn = mp_analyseer
         return _backend_fn
 
 
@@ -389,7 +422,7 @@ def _warm_backend_op():
     if IS_YOLO:
         threading.Thread(target=_laad_backend, name="backend-warmup", daemon=True).start()
 
-_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+_MODEL_DIR = app_dir()          # naast de scripts, of naast de exe
 STANDAARD_MODEL = os.path.join(_MODEL_DIR, "pose_landmarker_full.task")
 HEAVY_MODEL = os.path.join(_MODEL_DIR, "pose_landmarker_heavy.task")
 
@@ -5225,10 +5258,25 @@ class MainWindow(QMainWindow):
         """Meldt (één keer) dat de YOLO-backend niet geladen kon worden en er dus met
         MediaPipe gemeten wordt — een andere detector geeft andere hoeken, dus dat mag
         niet onopgemerkt blijven. Het warmdraaien start bij het tonen van het venster, dus
-        op het moment dat hier een analyse begint is de uitkomst allang bekend."""
+        op het moment dat hier een analyse begint is de uitkomst allang bekend.
+
+        In een gebundelde .exe is er geen MediaPipe om op terug te vallen; daar is het
+        geen waarschuwing maar een blokkade, en zegt de melding dat ook."""
         if not BACKEND_FOUT or self._backend_gemeld:
             return
         self._backend_gemeld = True
+        if is_bevroren():
+            # In het gebundelde pakket is er geen tweede backend om op terug te vallen:
+            # er valt nu niets te meten (bibliotheek en opnames bekijken werken wel).
+            QMessageBox.critical(
+                self, "Analyse-backend niet beschikbaar",
+                "De meegeleverde analyse-backend liet zich niet laden:\n\n"
+                f"{BACKEND_FOUT}\n\n"
+                "Er kan nu niet geanalyseerd worden. De bibliotheek openen en opnames "
+                "bekijken werkt wel. Geef deze melding door aan de beheerder van de app."
+                # Het logboek is alleen iets waard als de gebruiker weet waar het staat.
+                + (f"\n\nHet volledige logboek staat in:\n{LOGPAD}" if LOGPAD else ""))
+            return
         QMessageBox.warning(
             self, "YOLO-backend niet beschikbaar",
             "torch/ultralytics is wel geïnstalleerd, maar liet zich niet laden:\n\n"

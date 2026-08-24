@@ -1,6 +1,6 @@
 # SchaatsAnalyse als installeerbare .exe
 
-*Plan, opgesteld 24 augustus 2026. Nog niet uitgevoerd.*
+*Plan, opgesteld 24 augustus 2026. Stap 1 en 2 uitgevoerd op 24 augustus 2026; stap 3 t/m 6 nog niet.*
 
 ## Context
 
@@ -32,7 +32,47 @@ download.**
 
 ---
 
-## Stap 1 — Codefixes: zes plekken, twee helpers
+## Stap 1 — Codefixes: zes plekken, twee helpers ✅ *uitgevoerd 24 aug 2026*
+
+### Wat er nu staat
+
+Alle zes plekken om, plus de terugvalregel. De helpers heten `app_dir()`, `data_dir()` en
+`is_bevroren()` en staan boven in [schaats_analyse.py](schaats_analyse.py); `data_dir()` maakt
+de map aan (`makedirs(exist_ok=True)`, fouten ingeslikt — de schrijfactie zelf faalt dan wel).
+
+**In de repo-omgeving lost alles naar exact dezelfde bestanden als voorheen**, dus er verandert
+niets aan de meting. Nagemeten op deze machine:
+
+```
+app_dir     C:\Apps\SchaatsAnalyse          data_dir  C:\Users\<u>\AppData\Local\SchaatsAnalyse
+yolo model  C:\Apps\SchaatsAnalyse\yolo26x-pose.pt        (bestaat → geen herdownload)
+onnx pad    C:\Apps\SchaatsAnalyse\yolo26x-pose-dml.onnx  (fictief .pt → data_dir)
+rtmpose     https://download.openmmlab.com/...            (geen lokaal bestand → URL)
+app_versie  2026-08-24 · 85ba31fc+                        (git-route, ongewijzigd)
+```
+
+`_laad_yolo()` op het nieuwe absolute pad pakt de bestaande DirectML-export en exporteert of
+downloadt niets opnieuw. Zelftests van `schaats_db.py`, `schaats_yolo.py` en
+`schaats_perspectief.py` draaien, `py_compile` in beide venvs, en de GUI start. Het bevroren
+pad is gesimuleerd met `sys.frozen` + een handgeschreven `_versie.py` → `2026-08-24 · 4df9ab5a`
+(en `+` bij vuil): hetzelfde formaat als de git-route.
+
+Twee dingen die de latere stappen hieruit moeten overnemen:
+
+- **`_versie.py` moet `COMMIT`, `DATUM` en `VUIL` definiëren** (str, str, bool) — dat leest
+  `_versie_uit_bundel()` in [schaats_db.py](schaats_db.py). Een leeg of ontbrekend `COMMIT`
+  betekent "geen stempel" en valt terug op `_git()`.
+- **Het RTMPose-bestand moet `rtmpose-x-halpe26-384x288.onnx` heten** en naast de exe staan;
+  die naam staat als `RTMPOSE_LOKAAL` in [schaats_yolo.py](schaats_yolo.py). Staat hij er niet,
+  dan pakt de app stilzwijgend de URL en downloadt 178 MB bij het eerste gebruik.
+
+De terugvalregel is iets strenger uitgevallen dan hierboven beschreven: bevroren blijft
+`IS_YOLO`/`BACKEND_NAAM` staan en levert `_laad_backend()` een `_backend_stuk` op dat één
+duidelijke `RuntimeError` gooit, en `_waarschuw_backend_terugval()` toont daar een
+**blokkerende** melding ("er kan nu niet geanalyseerd worden; bibliotheek en opnames bekijken
+werkt wel") in plaats van de MediaPipe-waarschuwing.
+
+### Het oorspronkelijke plan
 
 Zes plaatsen gaan ervan uit dat er een scriptmap en een git-repo naast de code staan. Alle
 zes lossen op met twee kleine helpers in **`schaats_analyse.py`** — dat is de laagste
@@ -90,7 +130,60 @@ van een terugval — `BACKEND_FOUT` bestaat al en wordt al door
 
 ---
 
-## Stap 2 — De uitvoer omleiden (anders crasht een `print`)
+## Stap 2 — De uitvoer omleiden (anders crasht een `print`) ✅ *uitgevoerd 24 aug 2026*
+
+### Wat er nu staat
+
+Een nieuwe, **stdlib-only** module [schaats_omgeving.py](schaats_omgeving.py): `is_bevroren()`,
+`app_dir()` en `data_dir()` (verhuisd uit [schaats_analyse.py](schaats_analyse.py), dat ze
+doorgeeft zodat élke bestaande import ongewijzigd blijft werken) plus `start_logboek()`. Die
+verhuizing is de kern van deze stap: de omleiding heeft `data_dir()` nodig op precies het moment
+dat cv2/numpy nog niet geladen mógen worden.
+
+[schaats_gui.py](schaats_gui.py) roept `start_logboek()` aan **vóór de Qt-import en dus vóór
+`_start_opstartscherm()`**, en alleen als `__name__ == "__main__"` — dezelfde regel als het
+opstartscherm zelf, zodat `import schaats_gui` in een meetscript niets kaapt. Kosten: **~1 ms**
+(de 8 ms die `-X importtime` toont is bijna helemaal `threading`, en dat stond er al).
+
+Het logboek staat in `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log`: regelgebufferd (een
+crash laat de laatste complete regels dus wél achter), roterend op 1 MB naar `.log.1`, met per
+start een kopblok (tijd, programma, `app_dir`, `data_dir`, pythonversie, bevroren ja/nee).
+`sys.stdout` en `sys.stderr` wijzen naar dezelfde stroom, zodat de volgorde klopt. Loggen mag de
+app nooit slopen: elke schrijfactie zit in een try/except, en is het bestand niet te openen
+(read-only map, volle schijf) dan gaat de uitvoer naar een stille stroom — uitvoer kwijt, maar
+géén crash, en dat laatste was hier de hele bedoeling.
+
+**Aangetoond dat het het probleem oplost**, met een gesimuleerde exe (`sys.frozen` + stdout en
+stderr op `None`):
+
+| | zonder omleiding | met |
+|---|---|---|
+| kale `print()` | **stil** — Python slikt hem, geen fout | in het logboek |
+| `sys.stdout.write(...)` | `AttributeError: 'NoneType' object has no attribute 'write'` | in het logboek |
+| tqdm-balk (ultralytics-download/-export, rtmlib) | **`AttributeError`** | in het logboek |
+| logging-handler op `sys.stdout` | stil | in het logboek |
+| traceback van een onafgevangen fout | stil | in het logboek |
+
+De aanname bovenaan deze stap klopte dus net niet: een kale `print()` crasht niet (CPython laat
+hem vallen als `sys.stdout` None is), maar tqdm en elke rechtstreekse `.write` wél — en alles wat
+niet crasht verdwijnt spoorloos, precies wat je nodig hebt als een collega belt dat het niet werkt.
+
+**Getest**: zelftest `python schaats_omgeving.py` (omleiden, een tweede sessie erachteraan,
+rotatie naar `.log.1`, en de terugval als het logbestand niet te openen is) in beide venvs; de
+zelftests van `schaats_db`/`schaats_yolo`/`schaats_perspectief` ongewijzigd; `py_compile` in
+beide venvs; en de GUI echt gestart met `SCHAATSANALYSE_LOG=1` — het kopblok stond in het
+logboek. Aan de meting verandert er niets: in de repo-omgeving wordt er zonder die env-var
+niets omgeleid.
+
+Twee dingen die de latere stappen hieruit moeten overnemen:
+
+- **`SCHAATSANALYSE_LOG=1` zet de omleiding ook in de gewone venv aan.** Zo is deze route te
+  testen zonder eerst een exe te bouwen; zonder de env-var blijft alle uitvoer op de console.
+- **De blokkerende backend-melding noemt nu het logpad** (alleen als er echt gelogd wordt), want
+  een logboek dat niemand kan vinden is niets waard. `INSTALLEREN.md` (stap 6) hoort datzelfde
+  pad te noemen: "stuur me `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log`".
+
+### Het oorspronkelijke plan
 
 Een PyInstaller-build met `--windowed` heeft geen console: `sys.stdout` is dan `None` en een
 kale `print()` gooit `AttributeError`. Deze codebase print op meerdere plekken — onder meer
@@ -143,7 +236,8 @@ Inno aanroept.
   werk-laptop zitten), en de map is schrijfbaar, zodat de terugval uit stap 1.4 werkt.
 - `[Files]`: de PyInstaller-uitvoer plus de drie modellen — `yolo26x-pose.pt`,
   `yolo26x-pose-dml.onnx` en het RTMPose-model uit
-  `%USERPROFILE%\.cache\rtmlib\hub\checkpoints\` (hernoemd naar iets leesbaars). **Niet**
+  `%USERPROFILE%\.cache\rtmlib\hub\checkpoints\`, **hernoemd naar
+  `rtmpose-x-halpe26-384x288.onnx`** (= `RTMPOSE_LOKAAL`, zie stap 1). **Niet**
   meenemen: `pose_landmarker_*.task`, `yolo11*-pose.pt` — die horen bij backends die niet
   in dit pakket zitten.
 - `Compression=lzma2/max`, `SolidCompression=yes`.
@@ -174,7 +268,9 @@ de discipline uit [GPU.md](GPU.md), en die is hier één-op-één herbruikbaar.
    geïnstalleerde GPU-pakketten. Zonder deze test weet je alleen dat het bij jou werkt.
 6. **Functionele rondgang:** bibliotheek in Drive openen, een analyse heropenen, Info-dialoog
    controleren (moet de versie tonen, niet "onbekend"), een opname bekijken in het
-   kijkvenster, een fragment knippen, twee analyses vergelijken.
+   kijkvenster, een fragment knippen, twee analyses vergelijken. Kijk daarna in
+   `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log`: er hoort één kopblok per start te
+   staan, en verder geen tracebacks (stap 2).
 7. **Opstarttijd meten** — moet in de buurt van de huidige 2,5 s liggen.
 8. `python schaats_db.py` (zelftest) draaien ná de `app_versie`-wijziging: die controleert al
    de vorm van `app_versie()` en de automatische `app_versie`/`app_commit` in de opgeslagen
@@ -190,8 +286,9 @@ PyInstaller-builds met enige regelmaat als verdacht. Een certificaat kost ~€20
 en is voor een handvol trainers waarschijnlijk niet de moeite — maar de installatie-instructie
 moet dit **wél** noemen, anders denkt de eerste collega dat er een virus in zit.
 
-Actie: een kort `INSTALLEREN.md` met de download, de SmartScreen-stap en de instructie om de
-bibliotheekmap op de gedeelde Drive te kiezen.
+Actie: een kort `INSTALLEREN.md` met de download, de SmartScreen-stap, de instructie om de
+bibliotheekmap op de gedeelde Drive te kiezen, en — als er tóch iets misgaat — waar het
+logboek staat: `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log` (stap 2).
 
 ---
 
@@ -199,8 +296,9 @@ bibliotheekmap op de gedeelde Drive te kiezen.
 
 | bestand | wat |
 |---|---|
-| [schaats_analyse.py](schaats_analyse.py) | nieuw: `app_dir()`, `data_dir()`; fix CLI-modelpad |
-| [schaats_gui.py](schaats_gui.py) | `_MODEL_DIR` via `app_dir()`; uitvoer omleiden; backend-terugval |
+| [schaats_omgeving.py](schaats_omgeving.py) | nieuw — `is_bevroren()`/`app_dir()`/`data_dir()` + het logboek; stdlib-only zodat het vóór het opstartscherm kan |
+| [schaats_analyse.py](schaats_analyse.py) | geeft de drie helpers door uit `schaats_omgeving`; fix CLI-modelpad |
+| [schaats_gui.py](schaats_gui.py) | `_MODEL_DIR` via `app_dir()`; `start_logboek()` vóór alle imports; backend-terugval |
 | [schaats_yolo.py](schaats_yolo.py) | modelpad, `_onnx_pad`, RTMPose-pad |
 | [schaats_db.py](schaats_db.py) | `app_versie()` leest `_versie.py` als bevroren |
 | `schaatsanalyse.spec` | nieuw — PyInstaller-recept |
