@@ -26,9 +26,11 @@ Zelftest zonder video of GUI: `python schaats_db.py`.
 
 import json
 import os
+import random
 import shutil
 import sqlite3
 import subprocess
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import date
@@ -41,7 +43,8 @@ MEDIA_MAP   = "media"
 OPNAMES_MAP = "opnames"              # ruwe, nog niet geknipte opnames (fase 8)
 NPZ_NAAM    = "landmarks.npz"
 NPZ_RUW_NAAM = "landmarks_ruw.npz"   # pristine landmarks vóór de eerste handmatige edit (fase 3)
-SCHEMA_VERSIE = 3   # v2 (fase 4): analyse.video_bytes; v3 (fase 8): bronvideo + analyse.bron_*
+SCHEMA_VERSIE = 4   # v2 (fase 4): analyse.video_bytes; v3 (fase 8): bronvideo + analyse.bron_*;
+                    # v4: bron_markering (punten van het handmatige kijkvenster)
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".wmv")
 
 # Status van een opname in de werklijst (fase 8). Bewust handmatig: het programma kan niet
@@ -193,6 +196,14 @@ CREATE TABLE bronvideo(
     bijgewerkt_door TEXT NOT NULL DEFAULT '',    -- wie de status/notitie het laatst zette
     toegevoegd_op   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
+CREATE TABLE bron_markering(
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bron_id         INTEGER NOT NULL REFERENCES bronvideo(id) ON DELETE CASCADE,
+    frame           INTEGER NOT NULL,            -- framenummer in de opname
+    label           TEXT NOT NULL DEFAULT '',
+    aangemaakt_door TEXT NOT NULL DEFAULT '',    -- wie het punt zette (gedeelde bibliotheek)
+    aangemaakt_op   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
 CREATE TABLE analyse(
     id                TEXT PRIMARY KEY,          -- UUID, tevens mapnaam onder media/
     schaatser_id      INTEGER NOT NULL REFERENCES schaatser(id) ON DELETE CASCADE,
@@ -275,21 +286,28 @@ def _migreer(con, van):
         # herkomst van een analyse (welk stuk van welke opname). Oude analyses houden
         # bron_id NULL — dat klopt ook: die kwamen van een losse clip, niet uit een
         # opname. Nergens een migratie die iets moet raden.
-        con.execute(_bronvideo_ddl())
+        con.execute(_tabel_ddl("bronvideo"))
         # De REFERENCES-clausule mag mee in ADD COLUMN zolang de default NULL is (SQLite),
         # zodat een gemigreerde bibliotheek exact hetzelfde schema krijgt als een verse.
         for kolom in ("bron_id INTEGER REFERENCES bronvideo(id) ON DELETE SET NULL",
                       "bron_start_frame INTEGER", "bron_eind_frame INTEGER"):
             con.execute(f"ALTER TABLE analyse ADD COLUMN {kolom}")
+    if van < 4:
+        # v3 → v4: de punten die de trainer in het handmatige kijkvenster zet. Een losse
+        # tabel en geen kolom op bronvideo: het zijn er meerdere per opname, en ze horen
+        # bij de opname (niet bij een analyse), dus ze verdwijnen mee als die rij ooit weg
+        # zou vallen. Oude bibliotheken krijgen simpelweg een lege tabel.
+        con.execute(_tabel_ddl("bron_markering"))
 
 
-def _bronvideo_ddl():
-    """De CREATE TABLE van `bronvideo` uit _SCHEMA, als IF NOT EXISTS — zo staat het
-    schema op één plek en kan de migratie dezelfde definitie gebruiken."""
-    begin = _SCHEMA.index("CREATE TABLE bronvideo(")
+def _tabel_ddl(naam):
+    """De CREATE TABLE van `naam` uit _SCHEMA, als IF NOT EXISTS — zo staat het schema op
+    één plek en gebruikt de migratie gegarandeerd dezelfde definitie als een verse
+    bibliotheek."""
+    kop = f"CREATE TABLE {naam}("
+    begin = _SCHEMA.index(kop)
     eind = _SCHEMA.index(");", begin) + 2
-    return _SCHEMA[begin:eind].replace("CREATE TABLE bronvideo(",
-                                       "CREATE TABLE IF NOT EXISTS bronvideo(")
+    return _SCHEMA[begin:eind].replace(kop, f"CREATE TABLE IF NOT EXISTS {naam}(")
 
 
 def _abs_pad(bieb, rel):
@@ -624,7 +642,8 @@ def lijst_bronvideos(bieb):
     cloudsync nog bezig is.
 
     `aantal_fragmenten` telt de analyses die uit deze opname komen; `aantal_schaatsers`
-    hoeveel verschillende schaatsers dat betreft. Het onderscheid "fragmenten vs. analyses"
+    hoeveel verschillende schaatsers dat betreft; `aantal_punten` de bewaarde punten uit het
+    handmatige kijkvenster. Het onderscheid "fragmenten vs. analyses"
     uit de roadmap valt hier samen — elk gemarkeerd fragment wordt precies één analyse."""
     with _verbind(bieb) as con:
         rijen = con.execute(
@@ -632,7 +651,9 @@ def lijst_bronvideos(bieb):
             "       (SELECT COUNT(*) FROM analyse a WHERE a.bron_id = b.id)"
             "       AS aantal_fragmenten,"
             "       (SELECT COUNT(DISTINCT a.schaatser_id) FROM analyse a"
-            "         WHERE a.bron_id = b.id) AS aantal_schaatsers "
+            "         WHERE a.bron_id = b.id) AS aantal_schaatsers,"
+            "       (SELECT COUNT(*) FROM bron_markering m WHERE m.bron_id = b.id)"
+            "       AS aantal_punten "
             "FROM bronvideo b ORDER BY b.naam COLLATE NOCASE").fetchall()
     uit = []
     for r in rijen:
@@ -685,6 +706,53 @@ def bron_fragmenten(bieb, bron_id):
     return [dict(r) for r in rijen]
 
 
+# ── Punten in een opname (handmatig kijkvenster) ───────────────────────────────
+# Een trainer die een opname doorkijkt wil een plek kunnen terugvinden — de sprong die
+# hij nog eens wil zien, het moment waarop de serie begint. Dat zijn losse framenummers
+# met een naampje, en ze horen bij de **opname**: ze overleven het afsluiten van het
+# venster en staan (net als status en notitie) voor het hele team in de gedeelde
+# database. Bewust géén analyse: er wordt niets gemeten, alleen onthouden waar je was.
+
+def lijst_markeringen(bieb, bron_id):
+    """De bewaarde punten van een opname, op framenummer gesorteerd."""
+    with _verbind(bieb) as con:
+        rijen = con.execute(
+            "SELECT * FROM bron_markering WHERE bron_id = ? ORDER BY frame, id",
+            (bron_id,)).fetchall()
+    return [dict(r) for r in rijen]
+
+
+def voeg_markering_toe(bieb, bron_id, frame, label="", aangemaakt_door=""):
+    """Zet een punt op `frame` in deze opname; retourneert het nieuwe id."""
+    with _verbind(bieb) as con:
+        cur = con.execute(
+            "INSERT INTO bron_markering(bron_id, frame, label, aangemaakt_door) "
+            "VALUES (?, ?, ?, ?)",
+            (bron_id, int(frame), label or "", aangemaakt_door or ""))
+        return cur.lastrowid
+
+
+def wijzig_markering(bieb, markering_id, label=None, frame=None):
+    """Hernoemt een punt en/of verplaatst het naar een ander frame."""
+    velden, waarden = [], []
+    if label is not None:
+        velden.append("label = ?")
+        waarden.append(label)
+    if frame is not None:
+        velden.append("frame = ?")
+        waarden.append(int(frame))
+    if not velden:
+        return
+    with _verbind(bieb) as con:
+        con.execute(f"UPDATE bron_markering SET {', '.join(velden)} WHERE id = ?",
+                    waarden + [markering_id])
+
+
+def verwijder_markering(bieb, markering_id):
+    with _verbind(bieb) as con:
+        con.execute("DELETE FROM bron_markering WHERE id = ?", (markering_id,))
+
+
 # ── Gedeelde cloudmap (fase 4) ──────────────────────────────────────────────────
 
 def detecteer_conflictkopieen(bieb):
@@ -726,6 +794,66 @@ def video_sync_status(video_pad, verwacht_bytes):
     except OSError:
         return "ontbreekt"
     return None
+
+
+# Snelheidsproef (zie `bestand_lokaal`): grootte van één leesblokje en de tijd waarboven
+# we het bestand als "niet op deze pc" beschouwen. Gemeten 24 aug 2026 op deze bibliotheek:
+# van een lokale schijf kost zo'n blokje 0,3-2 ms, uit een Google Drive streaming-map 614 ms.
+# De drempel ligt daar ruim tussenin, zodat ook een trage USB- of netwerkschijf nog "lokaal"
+# heet — het gaat om de factor 100, niet om de precieze grens.
+LOKAAL_BLOK_BYTES = 64 * 1024
+LOKAAL_DREMPEL_MS = 100.0
+
+
+def bestand_lokaal(pad, monsters=3, drempel_ms=LOKAAL_DREMPEL_MS):
+    """Staat dit videobestand écht op deze pc, of wordt het per stukje uit de cloud gehaald?
+
+    - 'lokaal' : elk monster kwam meteen binnen;
+    - 'deels'  : een deel wel, een deel niet (cloudmap is nog aan het downloaden);
+    - 'cloud'  : geen enkel monster kwam van schijf;
+    - None     : het bestand is er niet, of is niet te lezen.
+
+    **Meten, niet vragen.** Windows kent wel een attribuut voor cloud-placeholders
+    (FILE_ATTRIBUTE_OFFLINE / RECALL_ON_DATA_ACCESS), maar Google Drive voor desktop zet dat
+    niet: zijn schijf meldt zich als een gewone vaste schijf en een niet-gedownloade opname
+    van 4 GB heeft attribuut `Normal`. Wat je wél kunt zien is de tijd — een blokje van een
+    plek die nog niet lokaal staat kost een netwerkronde.
+
+    Waarom dit ertoe doet: op een streaming-map moet elke sprong in het knipvenster eerst
+    tientallen MB ophalen (gemeten: 5-20 s per sprong, ~40 MB), terwijl diezelfde sprong op
+    een lokale kopie 30-120 ms kost. Zie `schaats_gui._opname_beschikbaar`.
+
+    De monsters liggen op **willekeurige** plekken: een gelezen stuk zit daarna in de
+    cloudcache, dus steeds dezelfde plek proeven zou de tweede keer altijd 'lokaal' zeggen.
+    Kosten: verwaarloosbaar als het bestand lokaal staat, en anders een paar seconden —
+    daarom draait dit in de GUI op een achtergrondthread.
+    """
+    try:
+        grootte = os.path.getsize(pad)
+    except OSError:
+        return None
+    if grootte <= 0:
+        return None
+
+    traag = gemeten = 0
+    try:
+        with open(pad, "rb") as f:
+            for _ in range(max(1, monsters)):
+                speling = grootte - LOKAAL_BLOK_BYTES
+                off = random.randrange(speling) if speling > 0 else 0
+                begin = time.perf_counter()
+                f.seek(off)
+                if not f.read(LOKAAL_BLOK_BYTES):
+                    continue
+                gemeten += 1
+                traag += (time.perf_counter() - begin) * 1000.0 > drempel_ms
+    except OSError:
+        return None
+    if not gemeten:
+        return None
+    if traag == 0:
+        return "lokaal"
+    return "cloud" if traag == gemeten else "deels"
 
 
 # ── Skelet-editor (fase 3) ──────────────────────────────────────────────────────
@@ -814,8 +942,8 @@ if __name__ == "__main__":
         with _verbind(bieb) as c:
             assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
 
-        # Migratie v1 → v3: een oude DB zonder video_bytes (v2) en zonder bronvideo/bron_*
-        # (v3) wordt in één keer bijgewerkt zonder dataverlies. Het oude schema staat hier
+        # Migratie v1 → v4: een oude DB zonder video_bytes (v2), zonder bronvideo/bron_*
+        # (v3) en zonder bron_markering (v4) wordt in één keer bijgewerkt zonder dataverlies. Het oude schema staat hier
         # bewust letterlijk: v1 ís bevroren, en het uit _SCHEMA weg filteren wordt met elke
         # bump fragieler.
         v1_schema = """
@@ -849,6 +977,7 @@ if __name__ == "__main__":
             assert "video_bytes" in kolommen
             assert {"bron_id", "bron_start_frame", "bron_eind_frame"} <= set(kolommen)
             assert c.execute("SELECT COUNT(*) FROM bronvideo").fetchone()[0] == 0
+            assert c.execute("SELECT COUNT(*) FROM bron_markering").fetchone()[0] == 0
 
         # Migratie v2 → v3 apart: alleen de fase 8-stap, zonder de v2-stap ervoor.
         oud2 = os.path.join(tmp, "oud_v2")
@@ -861,6 +990,25 @@ if __name__ == "__main__":
         with _verbind(oud2) as c:
             assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
             assert "bron_eind_frame" in [r[1] for r in c.execute("PRAGMA table_info(analyse)")]
+
+        # Migratie v3 → v4 apart: een bibliotheek die alleen de puntentabel nog mist, en
+        # waarvan de bestaande opnamerijen ongemoeid moeten blijven.
+        oud3 = os.path.join(tmp, "oud_v3")
+        os.makedirs(os.path.join(oud3, MEDIA_MAP))
+        with sqlite3.connect(os.path.join(oud3, DB_NAAM)) as c:
+            c.executescript(v1_schema)
+            c.execute("ALTER TABLE analyse ADD COLUMN video_bytes INTEGER")   # = v2
+            c.execute(_tabel_ddl("bronvideo"))                                # = v3
+            for kolom in ("bron_id INTEGER REFERENCES bronvideo(id) ON DELETE SET NULL",
+                          "bron_start_frame INTEGER", "bron_eind_frame INTEGER"):
+                c.execute(f"ALTER TABLE analyse ADD COLUMN {kolom}")
+            c.execute("INSERT INTO bronvideo(bestand, naam) VALUES ('opnames/x.mp4', 'x.mp4')")
+            c.execute("PRAGMA user_version = 3")
+        open_db(oud3)
+        with _verbind(oud3) as c:
+            assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
+            assert c.execute("SELECT COUNT(*) FROM bron_markering").fetchone()[0] == 0
+            assert c.execute("SELECT naam FROM bronvideo").fetchone()[0] == "x.mp4"
 
         # Nieuwere DB (collega met een recentere app): weigeren, niét downgraden.
         nieuw = os.path.join(tmp, "nieuw_v99")
@@ -969,6 +1117,12 @@ if __name__ == "__main__":
         assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"] + 999) == "onvolledig"
         assert video_sync_status(os.path.join(tmp, "weg.mp4"), 100) == "ontbreekt"
 
+        # Snelheidsproef: een bestand in een tempmap staat per definitie lokaal, en een
+        # bestand dat er niet is levert None (geen exceptie de GUI in). De cloud-kant valt
+        # niet na te bootsen zonder cloudmap — die is met de hand gemeten, zie de docstring.
+        assert bestand_lokaal(data["video_pad"]) == "lokaal"
+        assert bestand_lokaal(os.path.join(tmp, "weg.mp4")) is None
+
         # ── Opnames / bronvideo's (fase 8) ────────────────────────────────────────
         # De map is de waarheid over wélke bestanden er zijn: scannen levert de rijen,
         # en een tweede scan zonder nieuwe bestanden schrijft niets (rust voor de syncer).
@@ -1010,6 +1164,31 @@ if __name__ == "__main__":
         assert analyse_meta(bieb, aid)["bron_id"] is None
         verwijder_analyse(bieb, aid_f)
         assert bron_fragmenten(bieb, bron["id"]) == []
+
+        # Punten uit het handmatige kijkvenster: bewaren, hernoemen, verplaatsen, wissen.
+        assert lijst_markeringen(bieb, bron["id"]) == []
+        assert lijst_bronvideos(bieb)[0]["aantal_punten"] == 0
+        p2 = voeg_markering_toe(bieb, bron["id"], 900, "sprong", "Coach Tester")
+        p1 = voeg_markering_toe(bieb, bron["id"], 300, "start serie")
+        punten = lijst_markeringen(bieb, bron["id"])
+        assert [p["frame"] for p in punten] == [300, 900]        # op frame gesorteerd
+        assert punten[1]["id"] == p2 and punten[1]["label"] == "sprong"
+        assert punten[1]["aangemaakt_door"] == "Coach Tester"
+        assert lijst_bronvideos(bieb)[0]["aantal_punten"] == 2
+        wijzig_markering(bieb, p1, label="warming-up", frame=250)
+        punten = lijst_markeringen(bieb, bron["id"])
+        assert punten[0]["frame"] == 250 and punten[0]["label"] == "warming-up"
+        wijzig_markering(bieb, p1)                               # niets op te geven = niets doen
+        assert lijst_markeringen(bieb, bron["id"])[0]["frame"] == 250
+        verwijder_markering(bieb, p1)
+        assert [p["id"] for p in lijst_markeringen(bieb, bron["id"])] == [p2]
+        # De foreign key wordt echt gehandhaafd (PRAGMA foreign_keys=ON in _verbind).
+        try:
+            voeg_markering_toe(bieb, 999999, 10, "nergens bij")
+            raise AssertionError("een punt bij een onbekende opname had moeten falen")
+        except sqlite3.IntegrityError:
+            pass
+        verwijder_markering(bieb, p2)
 
         # De sync-check van fase 4 werkt één op één op een opname die nog binnenkomt.
         with open(bron["pad"], "wb") as f:

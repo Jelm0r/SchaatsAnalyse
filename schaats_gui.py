@@ -17,16 +17,21 @@ import csv
 import math
 import shutil
 import tempfile
+import threading
 import time
 
-import cv2
-import numpy as np
-
+# ── Qt eerst, en meteen een opstartscherm ───────────────────────────────────────
+# Bewust vóór alle andere imports: de rest van deze module trekt cv2/numpy binnen en
+# (bij het eerste gebruik) torch/ultralytics, en juist op een koude machine kost dat
+# seconden waarin er niets op het scherm gebeurt en de gebruiker denkt dat de app niet
+# opgestart is. Alleen de Qt-import (~0,1 s) gaat eraan vooraf, zodat er binnen een
+# fractie van een seconde een venstertje staat dat vertelt wat er gebeurt.
 from PySide6.QtCore import (
-    Qt, QTimer, QThread, Signal, QPointF, QEventLoop, QSize, QRect, QPoint, QMargins,
+    Qt, QTimer, QThread, Signal, QPointF, QEventLoop, QEvent, QSize, QRect, QPoint,
+    QMargins,
 )
 from PySide6.QtGui import (
-    QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence,
+    QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence, QFont,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -36,7 +41,67 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QDialog, QRadioButton, QComboBox, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QInputDialog,
     QDialogButtonBox, QToolTip, QLayout, QSizePolicy, QTabWidget, QProgressDialog,
+    QSplashScreen,
 )
+
+
+class Opstartscherm(QSplashScreen):
+    """Het venstertje dat tijdens het opstarten laat zien dát er iets gebeurt.
+
+    Getekend in code (geen afbeeldingsbestand): een plaatje laden zou weer een schijf-
+    toegang zijn op precies het moment dat we die willen vermijden.
+    """
+    BREEDTE, HOOGTE = 460, 180
+
+    def __init__(self):
+        super().__init__(self._achtergrond())
+        # QSplashScreen staat standaard altijd-bovenop. Tijdens het opstarten kan er een
+        # modale melding komen (bibliotheek onbereikbaar, conflictkopie) en die zou dán
+        # áchter het opstartscherm vallen — een app die vastgelopen lijkt. Vandaar uit.
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+
+    @classmethod
+    def _achtergrond(cls):
+        pm = QPixmap(cls.BREEDTE, cls.HOOGTE)
+        pm.fill(QColor(24, 40, 66))
+        p = QPainter(pm)
+        p.setPen(QColor(255, 255, 255))
+        p.setFont(QFont(p.font().family(), 22, QFont.Bold))
+        p.drawText(QRect(0, 40, cls.BREEDTE, 44), Qt.AlignCenter, "Schaats Analyse")
+        p.setPen(QColor(150, 180, 220))
+        p.setFont(QFont(p.font().family(), 9))
+        p.drawText(QRect(0, 84, cls.BREEDTE, 22), Qt.AlignCenter, "bezig met opstarten...")
+        p.end()
+        return pm
+
+    def melding(self, tekst):
+        """Zet de statusregel en tékent hem ook meteen: tussen twee meldingen door draait
+        er geen event-loop (we zitten nog in de opstartcode), dus zonder processEvents
+        blijft het scherm op de eerste tekst staan."""
+        self.showMessage(f"  {tekst}", Qt.AlignBottom | Qt.AlignLeft,
+                         QColor(220, 232, 248))
+        QApplication.processEvents()
+
+
+def _start_opstartscherm():
+    """Maakt de QApplication en zet het opstartscherm neer. Retourneert (app, scherm).
+
+    Wordt op moduleniveau aangeroepen — vóór de zware imports hieronder — en alleen als
+    dit bestand als programma draait; bij `import schaats_gui` (zelftests, meetscripts)
+    gebeurt er niets.
+    """
+    app = QApplication(sys.argv)
+    scherm = Opstartscherm()
+    scherm.show()
+    scherm.melding("Onderdelen laden...")
+    return app, scherm
+
+
+_APP, _SPLASH = _start_opstartscherm() if __name__ == "__main__" else (None, None)
+
+import cv2
+import numpy as np
+
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
 import schaats_db
@@ -182,6 +247,30 @@ def _kalibratie_rijen(inst):
         rijen.append(("Camerastand:", f"niet herberekenbaar: {e}", None))
     return rijen
 
+# Kolommen van de opnametabel (fase 8). Als getal genoemd omdat er cel-widgets en een
+# itemChanged-filter op hangen: een kolom erbij mag geen stille verschuiving worden.
+OPNAME_KOL_NAAM, OPNAME_KOL_DUUR, OPNAME_KOL_LOKAAL = 0, 1, 2
+OPNAME_KOL_STATUS, OPNAME_KOL_TELLING, OPNAME_KOL_NOTITIE = 3, 4, 5
+
+# Weergave van `schaats_db.bestand_lokaal`: (tekst, kleur, uitleg). Zonder deze kolom is er
+# geen enkel signaal dat een opname nog in de cloud staat — het bestand ís er immers, hij
+# komt alleen tergend traag binnen. Zie `_opname_beschikbaar` voor het waarom van de cijfers.
+LOKAAL_WEERGAVE = {
+    "lokaal": ("✓ ja", QColor(60, 140, 60),
+               "Deze opname staat op deze pc: doorbladeren en knippen gaan op volle "
+               "snelheid."),
+    "deels":  ("⏳ deels", QColor(190, 130, 0),
+               "Een deel staat lokaal, de rest nog niet — waarschijnlijk is de cloudmap nog "
+               "aan het downloaden. Wacht daarop, anders blijft doorbladeren traag."),
+    "cloud":  ("☁ nee — nog in de cloud", QColor(190, 60, 60),
+               "Deze opname staat niet offline op deze pc; elk stuk beeld moet eerst "
+               "gedownload worden.\n"
+               "Gemeten: 5 tot 20 seconden per sprong in het knipvenster, tegen "
+               "0,1 seconde als hij lokaal staat.\n\n"
+               "Oplossing: rechtsklik de map 'opnames' in Verkenner → Google Drive "
+               "→ 'Offline beschikbaar maken'."),
+}
+
 # Knipvenster (fase 8): boven deze sprong seekt een `snel_zoeken`-speler i.p.v. sequentieel
 # door te spoelen. Kleine sprongen sequentieel laten lopen houdt frame-voor-frame-stappen en
 # gewoon afspelen exact — en juist rond een fragmentgrens tik je frame voor frame.
@@ -203,6 +292,13 @@ def _snelheid_idx(factor):
 
 SNELHEID_DEFAULT_IDX = _snelheid_idx(1.0)
 
+# Doorspoelen met . en , in het handmatige kijkvenster. 6× de opnamesnelheid: snel genoeg
+# om een half uur door te komen, langzaam genoeg om te zien wanneer je erlangs schiet. De
+# tik is een bovengrens op de vloeiendheid — het doelframe volgt uit de wandklok, dus het
+# blijft 6× ook als de decoder het niet bijhoudt (zie BekijkVenster._spoel_tick).
+SPOEL_FACTOR = 6.0
+SPOEL_TICK_MS = 40
+
 # Breedte van de transportknoppen (⏮ ⏪ ▶ ⏩ ⏭): ze dragen één teken, dus de
 # Qt-standaardbreedte voor tekstknoppen is verspilde ruimte op een smal scherm.
 TRANSPORT_KNOP_BREEDTE = 46
@@ -215,15 +311,83 @@ ALLES_TICK_MS = 30
 # standaard ¼×.
 ALLES_SNELHEID_IDX = _snelheid_idx(0.25)
 
-# Backend-selectie: gebruik YOLO-pose + ByteTrack als torch/ultralytics beschikbaar is
-# (draai de app dan onder de .venv-yolo), val anders terug op de MediaPipe-backend.
-try:
-    from schaats_yolo import analyseer as analyseer_backend, BACKEND_NAAM
-except Exception:
-    from schaats_analyse import analyseer as analyseer_backend
-    BACKEND_NAAM = "MediaPipe"
+# ── Backend-selectie ────────────────────────────────────────────────────────────
+# Gebruik YOLO-pose + ByteTrack als torch/ultralytics beschikbaar is (draai de app dan
+# onder de .venv-yolo), val anders terug op de MediaPipe-backend.
+#
+# `import schaats_yolo` trekt torch + ultralytics binnen: ~2,8 s op een warme machine en
+# een veelvoud daarvan koud (Windows scant die honderden MB's aan DLL's). Dat is
+# tweederde van de opstarttijd, terwijl de startpagina alleen de bibliotheek toont — de
+# backend is pas nodig als er écht een analyse begint. Daarom hier alleen de goedkope
+# vraag "staat het pakket geïnstalleerd?" (find_spec: ~1 ms, importeert niets) en de
+# echte import lui, via `analyseer_backend()`. Meteen na het tonen van het venster wordt
+# hij op de achtergrond alvast warmgedraaid (`_warm_backend_op`), zodat de eerste analyse
+# er niets van merkt.
+def _backend_beschikbaar():
+    """(yolo?, rtmpose?) puur op basis van geïnstalleerde pakketten, zonder ze te laden."""
+    from importlib.util import find_spec
+    try:
+        yolo = find_spec("ultralytics") is not None and find_spec("torch") is not None
+        return yolo, yolo and find_spec("rtmlib") is not None
+    except (ImportError, ValueError):     # kapotte installatie: dan MediaPipe
+        return False, False
 
-IS_YOLO = BACKEND_NAAM.startswith("YOLO")
+
+_HEEFT_YOLO, _HEEFT_RTMPOSE = _backend_beschikbaar()
+IS_YOLO = _HEEFT_YOLO
+# Voorspelling van schaats_yolo.BACKEND_NAAM (die module is nog niet geladen). Zodra hij
+# er wél is, wordt deze naam vervangen door de zijne — een verschil corrigeert zichzelf
+# dus, en de naam die in een analyse wordt opgeslagen komt altijd van de backend zelf.
+BACKEND_NAAM = (("YOLO-pose + ByteTrack + RTMPose-verfijning" if _HEEFT_RTMPOSE
+                 else "YOLO-pose + ByteTrack") if IS_YOLO else "MediaPipe")
+
+_backend_slot = threading.Lock()
+_backend_fn = None
+BACKEND_FOUT = ""      # gevuld als de YOLO-import geïnstalleerd leek maar toch mislukte
+
+
+def _laad_backend():
+    """Importeert de gekozen backend (eenmalig) en retourneert zijn `analyseer`-functie.
+
+    Faalt de YOLO-import alsnog — het pakket stond er wel maar is stuk, bv. een torch met
+    ontbrekende DLL's — dan valt de app hier terug op MediaPipe in plaats van de analyse
+    te laten stuklopen, en worden `IS_YOLO`/`BACKEND_NAAM` bijgetrokken. Dat mag níet
+    stilzwijgend gebeuren (het is een andere detector en dus een andere meting), dus de
+    reden wordt bewaard in `BACKEND_FOUT` en door de GUI gemeld zodra er een analyse start.
+    """
+    global _backend_fn, IS_YOLO, BACKEND_NAAM, BACKEND_FOUT
+    with _backend_slot:
+        if _backend_fn is None:
+            if IS_YOLO:
+                try:
+                    import schaats_yolo
+                    BACKEND_NAAM = schaats_yolo.BACKEND_NAAM
+                    _backend_fn = schaats_yolo.analyseer
+                except Exception as e:
+                    IS_YOLO = False
+                    BACKEND_NAAM = "MediaPipe"
+                    BACKEND_FOUT = f"{type(e).__name__}: {e}"
+                    print(f"YOLO-backend kon niet geladen worden ({BACKEND_FOUT}); "
+                          f"de app werkt verder met MediaPipe.", file=sys.stderr)
+            if _backend_fn is None:
+                from schaats_analyse import analyseer as mp_analyseer
+                _backend_fn = mp_analyseer
+        return _backend_fn
+
+
+def analyseer_backend(*args, **kwargs):
+    """De analyse-ingang van de GUI; laadt de backend bij het eerste gebruik."""
+    return _laad_backend()(*args, **kwargs)
+
+
+def _warm_backend_op():
+    """Laadt de backend alvast op de achtergrond, direct nadat het venster in beeld staat.
+
+    Een daemon-thread, want het is puur vooruitwerken: gaat de gebruiker meteen een
+    analyse starten, dan blokkeert diens import gewoon op dezelfde lock tot deze klaar is.
+    """
+    if IS_YOLO:
+        threading.Thread(target=_laad_backend, name="backend-warmup", daemon=True).start()
 
 _MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
 STANDAARD_MODEL = os.path.join(_MODEL_DIR, "pose_landmarker_full.task")
@@ -2975,9 +3139,478 @@ class FragmentKiezer(QDialog):
         super().done(resultaat)
 
 
+class PuntenBalk(QWidget):
+    """
+    De balk onder de tijdlijn van het kijkvenster: één streepje per bewaard punt, op zijn
+    plek in de opname. De tegenhanger van `FragmentBalk` — die tekent stukken (start–eind),
+    dit zijn losse momenten.
+
+    Klikken op (of vlak naast) een streepje springt erheen; dat is de snelste weg terug naar
+    hetzelfde beeld, terwijl de lijst ernaast vooral dient om te zien wát een punt is.
+    """
+    KLIK = Signal(int)        # index in `punten` van het aangeklikte streepje (−1 = ernaast)
+
+    HOOGTE = 22
+    RAAK_PX = 6               # hoe ver naast een streepje een klik nog telt
+    KLEUR_ACHTERGROND = QColor(45, 45, 45)
+    KLEUR_PUNT = QColor(90, 170, 240)
+    KLEUR_SELECTIE = QColor(255, 255, 255)
+    KLEUR_CURSOR = QColor(240, 240, 240)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(self.HOOGTE)
+        self.setToolTip("Bewaarde punten in deze opname. Klik op een streepje om erheen "
+                        "te springen.")
+        self.totaal = 1
+        self.punten = []          # [(frame, label)] op framenummer gesorteerd
+        self.cursor = 0
+        self.selectie = -1
+
+    def zet(self, totaal=None, punten=None, cursor=None, selectie=None):
+        """Alles wat de balk toont in één aanroep bijwerken (en hertekenen)."""
+        if totaal is not None:
+            self.totaal = max(1, int(totaal))
+        if punten is not None:
+            self.punten = list(punten)
+        if cursor is not None:
+            self.cursor = int(cursor)
+        if selectie is not None:
+            self.selectie = int(selectie)
+        self.update()
+
+    def _x(self, frame):
+        return int(round(frame / self.totaal * max(1, self.width() - 1)))
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.KLEUR_ACHTERGROND)
+        h = self.height()
+        for i, (frame, _label) in enumerate(self.punten):
+            x = self._x(frame)
+            kleur = self.KLEUR_SELECTIE if i == self.selectie else self.KLEUR_PUNT
+            p.fillRect(QRect(max(0, x - 1), 3, 3, h - 6), kleur)
+            # Het nummer erbij zolang het er een van de eerste negen is: dat is tevens de
+            # toets waarmee je erheen springt, dus het staat er niet voor de sier.
+            if i < 9:
+                p.setPen(QPen(kleur))
+                p.drawText(QRect(x - 10, 2, 20, h - 4),
+                           Qt.AlignHCenter | Qt.AlignTop, str(i + 1))
+        p.setPen(QPen(self.KLEUR_CURSOR, 1))
+        x = self._x(self.cursor)
+        p.drawLine(x, 0, x, h)
+
+    def mousePressEvent(self, event):
+        klik_x = event.position().x()
+        dichtst, beste = -1, self.RAAK_PX + 1
+        for i, (frame, _label) in enumerate(self.punten):
+            afstand = abs(self._x(frame) - klik_x)
+            if afstand < beste:
+                dichtst, beste = i, afstand
+        self.KLIK.emit(dichtst)
+
+
+class BekijkVenster(QDialog):
+    """
+    Een opname handmatig bekijken: beelden rechtstreeks uit de camera doorlopen, zónder
+    analyse. **Er wordt niets gedetecteerd, gevolgd of gemeten** — dit is puur een speler,
+    en juist daarom bruikbaar op materiaal waar de tracking niets van zou maken (de bocht,
+    meerdere schaatsers door elkaar, een warming-up) en op een opname die nog niet geknipt is.
+
+    Vier dingen maken het meer dan een speler:
+      * **volledig scherm** — je kijkt naar techniek, niet naar knoppen (F11 → venster);
+      * **inzoomen en vertragen** komen ongewijzigd uit `VideoSpeler` (muiswiel/zoomregelaar
+        en de snelheidcombo tot 1/16×);
+      * **`.` en `,` spoelen op 6×** door de opname, met de wandklok als maat (zie
+        `_spoel_tick`), zodat het echt 6× is en niet "zo snel als de decoder toevallig kan";
+      * **punten** die je op een frame zet en die bewaard blijven (`bron_markering`), zodat
+        dezelfde sprong of afzet er de volgende sessie nog staat — en in de gedeelde
+        bibliotheek ook voor een collega.
+
+    Hergebruikt `VideoSpeler` met dezelfde twee afwijkingen als het knipvenster:
+    `snel_zoeken=True` (achteruit mag seeken — dit is een kijkje, geen meting) en
+    `toon_overlay=False` (er is geen analyse om te tekenen).
+    """
+
+    PANEEL_BREEDTE = 260
+
+    def __init__(self, bron, info, bieb, trainer_naam="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Bekijken — {bron['naam']}")
+        self.bron = bron
+        self.bieb = bieb
+        self.trainer_naam = trainer_naam
+        self.info = info
+        self.fps = info.fps or 30.0
+        self._punten = []           # rijen uit bron_markering, op framenummer gesorteerd
+        self._vullen = False        # onderdrukt itemChanged tijdens het opbouwen
+        self._spoel_richting = 0    # −1 terug, 0 stil, +1 vooruit
+        self._spoel_vanaf = 0
+        self._spoel_t0 = 0.0
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(4)
+
+        kop = QHBoxLayout()
+        kop.addWidget(QLabel(f"<b>{bron['naam']}</b>"))
+        self.lbl_spoel = QLabel("")
+        self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
+        kop.addWidget(self.lbl_spoel)
+        kop.addStretch(1)
+        self.btn_paneel = QPushButton("Punten verbergen")
+        self.btn_paneel.clicked.connect(self._toggle_paneel)
+        kop.addWidget(self.btn_paneel)
+        btn_venster = QPushButton("Venstermodus (F11)")
+        btn_venster.clicked.connect(self._toggle_volledig_scherm)
+        kop.addWidget(btn_venster)
+        btn_sluit = QPushButton("Sluiten (Esc)")
+        btn_sluit.clicked.connect(self.accept)
+        kop.addWidget(btn_sluit)
+        v.addLayout(kop)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
+                                  toon_overlay=False)
+        self.speler.op_frame_getoond = self._frame_getoond
+        self.splitter.addWidget(self.speler)
+
+        # De balk hangt ín de speler, zodat hij dezelfde breedte als de tijdlijn houdt.
+        self.balk = PuntenBalk()
+        self.balk.KLIK.connect(self._klik_op_balk)
+        self.speler.voeg_onderbalk(self.balk)
+
+        self.splitter.addWidget(self._bouw_puntenpaneel())
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        v.addWidget(self.splitter, stretch=1)
+
+        hulp = QLabel(
+            "<b>Spatie</b> pauze · <b>.</b> doorspoelen 6× · <b>,</b> terugspoelen 6× · "
+            "<b>&larr;/&rarr;</b> één frame · <b>P</b> punt zetten · <b>1&ndash;9</b> naar "
+            "punt · <b>Del</b> punt weg · muiswiel zoomt · <b>F11</b> venster · "
+            "<b>Esc</b> sluiten")
+        hulp.setWordWrap(True)
+        hulp.setStyleSheet("color: #888;")
+        v.addWidget(hulp)
+
+        self._spoel_timer = QTimer(self)
+        self._spoel_timer.timeout.connect(self._spoel_tick)
+
+        # Lege FrameResultaat-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
+        # is hier per definitie niets geanalyseerd — dat is de hele bedoeling.
+        resultaten = [FrameResultaat(i, i / self.fps) for i in range(max(1, info.totaal))]
+        self.speler.laad(info, resultaten, bron["pad"])
+        self.balk.zet(totaal=len(resultaten))
+        self._vernieuw_punten()
+        self.speler.ga_naar(0)
+
+        # De toetsen moeten werken waar de focus ook staat (een knop slikt spatie, een
+        # slider de pijltjes), dus filteren we op app-niveau zolang dit venster actief is.
+        QApplication.instance().installEventFilter(self)
+
+        # Eerst een normale maat zetten en dán pas volledig scherm: F11 heeft anders geen
+        # zinnige geometrie om naar terug te vallen.
+        zet_venstergrootte(self, 1280, 800)
+        self.setWindowState(self.windowState() | Qt.WindowFullScreen)
+
+    def _bouw_puntenpaneel(self):
+        self.paneel = QWidget()
+        p = QVBoxLayout(self.paneel)
+        p.setContentsMargins(6, 0, 0, 0)
+        p.addWidget(QLabel("<b>Punten</b>  (klik = erheen springen)"))
+
+        self.tabel = QTableWidget(0, 3)
+        self.tabel.setHorizontalHeaderLabels(["#", "Tijd", "Naam"])
+        kop = self.tabel.horizontalHeader()
+        kop.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        kop.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        kop.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tabel.cellClicked.connect(self._klik_op_rij)
+        # Alleen de naamkolom is editeerbaar (de vlaggen worden per item gezet in
+        # _vernieuw_punten); _vullen onderdrukt itemChanged tijdens het opbouwen.
+        self.tabel.itemChanged.connect(self._punt_hernoemd)
+        p.addWidget(self.tabel, stretch=1)
+
+        btn_zet = QPushButton("➕ Punt zetten  (P)")
+        btn_zet.setToolTip("Onthoudt het frame dat nu in beeld staat. Het punt blijft bij "
+                           "deze opname bewaard, ook na het sluiten van dit venster.")
+        btn_zet.clicked.connect(self._zet_punt)
+        p.addWidget(btn_zet)
+        btn_weg = QPushButton("✕ Punt verwijderen  (Del)")
+        btn_weg.clicked.connect(self._verwijder_punt)
+        p.addWidget(btn_weg)
+
+        self.lbl_punten = QLabel("")
+        self.lbl_punten.setStyleSheet("color: #888;")
+        self.lbl_punten.setWordWrap(True)
+        p.addWidget(self.lbl_punten)
+
+        self.paneel.setMinimumWidth(self.PANEEL_BREEDTE)
+        return self.paneel
+
+    # ── Punten (bewaard in de bibliotheek) ───────────────────────────────
+    def _vernieuw_punten(self, selectie=None):
+        """Leest de punten opnieuw uit de database en vult tabel + balk. De database is de
+        waarheid: zo staat er nooit een punt in beeld dat niet bewaard is."""
+        try:
+            self._punten = schaats_db.lijst_markeringen(self.bieb, self.bron["id"])
+        except Exception as e:
+            self._punten = []
+            self.lbl_punten.setText(f"Punten konden niet gelezen worden: {e}")
+            return
+        self._vullen = True
+        try:
+            self.tabel.setRowCount(len(self._punten))
+            for rij, punt in enumerate(self._punten):
+                nr = QTableWidgetItem(str(rij + 1))
+                nr.setFlags(nr.flags() & ~Qt.ItemIsEditable)
+                self.tabel.setItem(rij, 0, nr)
+
+                tijd = QTableWidgetItem(_tijd_tekst(punt["frame"], self.fps))
+                tijd.setFlags(tijd.flags() & ~Qt.ItemIsEditable)
+                tijd.setToolTip(f"frame {punt['frame']}")
+                self.tabel.setItem(rij, 1, tijd)
+
+                naam = QTableWidgetItem(punt["label"] or "")
+                naam.setData(Qt.UserRole, punt["id"])
+                naam.setToolTip("Dubbelklik om te hernoemen"
+                                + (f" · gezet door {punt['aangemaakt_door']}"
+                                   if punt["aangemaakt_door"] else ""))
+                self.tabel.setItem(rij, 2, naam)
+        finally:
+            self._vullen = False
+
+        self.balk.zet(punten=[(p["frame"], p["label"]) for p in self._punten],
+                      selectie=selectie if selectie is not None else -1)
+        n = len(self._punten)
+        self.lbl_punten.setText(
+            "Nog geen punten gezet." if not n
+            else f"{n} punt{'en' if n != 1 else ''} bewaard bij deze opname.")
+        if selectie is not None and 0 <= selectie < n:
+            self.tabel.selectRow(selectie)
+
+    def _zet_punt(self):
+        frame = self.speler.huidige_idx
+        if frame < 0:
+            return
+        if any(p["frame"] == frame for p in self._punten):
+            self.lbl_punten.setText("Op dit frame staat al een punt.")
+            return
+        try:
+            schaats_db.voeg_markering_toe(self.bieb, self.bron["id"], frame,
+                                          f"Punt {len(self._punten) + 1}",
+                                          self.trainer_naam)
+        except Exception as e:
+            QMessageBox.warning(self, "Punt", f"Het punt kon niet bewaard worden:\n{e}")
+            return
+        # Herlezen en dán pas selecteren: de lijst staat op framenummer, dus een punt dat
+        # je halverwege terugzet komt niet onderaan te staan.
+        self._vernieuw_punten()
+        index = next((i for i, punt in enumerate(self._punten)
+                      if punt["frame"] == frame), None)
+        if index is not None:
+            self.tabel.selectRow(index)
+            self.balk.zet(selectie=index)
+
+    def _verwijder_punt(self):
+        rij = self.tabel.currentRow()
+        if not 0 <= rij < len(self._punten):
+            return
+        try:
+            schaats_db.verwijder_markering(self.bieb, self._punten[rij]["id"])
+        except Exception as e:
+            QMessageBox.warning(self, "Punt", f"Het punt kon niet verwijderd worden:\n{e}")
+            return
+        self._vernieuw_punten()
+
+    def _punt_hernoemd(self, item):
+        if self._vullen or item.column() != 2:
+            return
+        try:
+            schaats_db.wijzig_markering(self.bieb, item.data(Qt.UserRole), label=item.text())
+        except Exception as e:
+            QMessageBox.warning(self, "Punt", f"De naam kon niet bewaard worden:\n{e}")
+
+    def _ga_naar_punt(self, index):
+        if 0 <= index < len(self._punten):
+            self.speler.ga_naar(self._punten[index]["frame"])
+            self.tabel.selectRow(index)
+            self.balk.zet(selectie=index)
+
+    def _klik_op_rij(self, rij, _kolom=0):
+        self._ga_naar_punt(rij)
+
+    def _klik_op_balk(self, index):
+        if index >= 0:
+            self.tabel.selectRow(index)
+            self._ga_naar_punt(index)
+
+    # ── Doorspoelen met . en , (6×) ──────────────────────────────────────
+    def _start_spoelen(self, richting):
+        """Begint te spoelen zolang de toets ingedrukt blijft. Het eerste frame gaat er
+        meteen af, zodat een tíkje op de toets één frame opschuift en vasthouden 6× spoelt —
+        allebei manieren waarop zo'n toets gebruikt wordt."""
+        if self._spoel_richting == richting or not self.speler.resultaten:
+            return
+        self.speler.pauzeer()
+        self._spoel_richting = richting
+        self._spoel_vanaf = self.speler.huidige_idx
+        self._spoel_t0 = time.monotonic()
+        self.speler.ga_naar(self._spoel_vanaf + richting)
+        self._spoel_timer.start(SPOEL_TICK_MS)
+        self.lbl_spoel.setText(f"{'▶▶' if richting > 0 else '◀◀'} {SPOEL_FACTOR:g}×")
+
+    def _stop_spoelen(self, richting=None):
+        if self._spoel_richting == 0 or (richting is not None
+                                         and richting != self._spoel_richting):
+            return
+        self._spoel_timer.stop()
+        self._spoel_richting = 0
+        self.lbl_spoel.setText("")
+
+    def _spoel_tick(self):
+        """Het doelframe volgt uit de **wandkloktijd** sinds de toetsdruk, niet uit een vaste
+        stap per tik — hetzelfde motief als de masterklok van de vergelijkpagina. Zo is het
+        echt 6× de opnamesnelheid: haalt de decoder dat niet (achteruit kost elke stap een
+        seek), dan worden er meer frames overgeslagen in plaats van dat het spoelen
+        vertraagt, en er stapelt zich niets op."""
+        verstreken = time.monotonic() - self._spoel_t0
+        stap = max(1, int(round(verstreken * self.fps * SPOEL_FACTOR)))
+        doel = self._spoel_vanaf + self._spoel_richting * stap
+        laatste = len(self.speler.resultaten) - 1
+        if doel <= 0 or doel >= laatste:
+            self.speler.ga_naar(max(0, min(doel, laatste)))
+            self._stop_spoelen()          # begin/eind bereikt: er valt niets meer te spoelen
+            return
+        self.speler.ga_naar(doel)
+
+    # ── Weergave ─────────────────────────────────────────────────────────
+    def _frame_getoond(self, idx):
+        self.balk.zet(cursor=idx)
+
+    def _toggle_paneel(self):
+        zichtbaar = not self.paneel.isVisible()
+        self.paneel.setVisible(zichtbaar)
+        self.btn_paneel.setText("Punten verbergen" if zichtbaar else "Punten tonen")
+
+    def _toggle_volledig_scherm(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    # ── Toetsen ──────────────────────────────────────────────────────────
+    def eventFilter(self, obj, event):
+        """App-brede toetsafhandeling zolang dít venster het actieve is.
+
+        Waarom geen gewone `keyPressEvent`: na één muisklik staat de focus op een knop of op
+        de tijdlijn, en die slikken respectievelijk spatie en de pijltjestoetsen voordat het
+        venster ze ziet. Een filter op de applicatie krijgt ze als eerste. Tekstinvoer is de
+        uitzondering — daar hoort een punt of komma gewoon in de tekst te belanden.
+        """
+        # Dit filter krijgt élk event van de hele applicatie langs, dus deze eerste tak
+        # moet kort zijn: geen toets → meteen terug (False = "niet afgehandeld", precies wat
+        # QObject.eventFilter ook zou doen).
+        soort = event.type()
+        if soort not in (QEvent.KeyPress, QEvent.KeyRelease) or not self.isActiveWindow():
+            return False
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
+            return False
+
+        toets = event.key()
+        richting = {Qt.Key_Period: 1, Qt.Key_Comma: -1}.get(toets)
+        if richting is not None:
+            # Autorepeat overslaan: tijdens het vasthouden stuurt Windows een stroom
+            # press/release-paren, en die zouden het spoelen elke ~30 ms opnieuw starten —
+            # waarmee de wandklok telkens op nul valt en er niets meer opschiet.
+            if not event.isAutoRepeat():
+                if soort == QEvent.KeyPress:
+                    self._start_spoelen(richting)
+                else:
+                    self._stop_spoelen(richting)
+            return True
+        if soort != QEvent.KeyPress:
+            return False
+
+        if toets == Qt.Key_Space:
+            self._stop_spoelen()
+            if self.speler.speelt():
+                self.speler.pauzeer()
+            else:
+                self.speler.speel()
+        elif toets in (Qt.Key_Left, Qt.Key_Right):
+            self._stop_spoelen()
+            self.speler.pauzeer()
+            self.speler.ga_naar(self.speler.huidige_idx
+                                + (1 if toets == Qt.Key_Right else -1))
+        elif toets == Qt.Key_Home:
+            self.speler.ga_naar(0)
+        elif toets == Qt.Key_End:
+            self.speler.ga_naar(len(self.speler.resultaten) - 1)
+        elif toets == Qt.Key_P:
+            self._zet_punt()
+        elif toets == Qt.Key_Delete:
+            self._verwijder_punt()
+        elif toets == Qt.Key_F11:
+            self._toggle_volledig_scherm()
+        elif Qt.Key_1 <= toets <= Qt.Key_9:
+            self._ga_naar_punt(toets - Qt.Key_1)
+        else:
+            return False
+        return True
+
+    def changeEvent(self, event):
+        # Gaat het venster van actief naar inactief (alt-tab, een melding ervoor), dan komt
+        # de key-release nooit meer binnen en zou het spoelen eindeloos doorlopen.
+        if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
+            self._stop_spoelen()
+        super().changeEvent(event)
+
+    def done(self, resultaat):
+        # Niet closeEvent: een modale dialoog die via accept()/reject() sluit krijgt er geen.
+        # Het videobestand moet los, anders houdt Windows de opname vast.
+        self._stop_spoelen()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self.speler.sluit()
+        super().done(resultaat)
+
+
+class LokaalProef(QThread):
+    """Meet op de achtergrond welke opnames echt op deze pc staan (`bestand_lokaal`).
+
+    Op een achtergrondthread omdat de proef juist in het interessante geval geld kost: een
+    opname die nog in de cloud staat levert per monster een netwerkronde op, dus een lijst
+    van vijf opnames zou de bibliotheek seconden laten bevriezen. Elke uitkomst gaat los
+    naar de tabel, zodat de kolom zich vult terwijl je al kunt kijken."""
+
+    gemeten = Signal(int, str)          # bron_id, status uit schaats_db.bestand_lokaal
+
+    def __init__(self, paden, parent=None):
+        super().__init__(parent)
+        self._paden = list(paden)      # [(bron_id, pad)]
+
+    def run(self):
+        for bron_id, pad in self._paden:
+            if self.isInterruptionRequested():
+                return
+            try:
+                status = schaats_db.bestand_lokaal(pad)
+            except Exception:
+                status = None          # een onleesbaar bestand meldt de sync-check al
+            if status:
+                self.gemeten.emit(bron_id, status)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, melding=None):
         super().__init__()
+        # Statusregel van het opstartscherm (of None): de opbouw hieronder duurt op een
+        # koude machine een paar seconden en dat mag te zien zijn.
+        self._melding = melding or (lambda tekst: None)
         self.setWindowTitle("Schaats Analyse")
         zet_venstergrootte(self, 1400, 820, maximaliseer=True)
 
@@ -2998,6 +3631,8 @@ class MainWindow(QMainWindow):
         self.batch_worker = None
         self.bieb = None            # bibliotheekpad (gezet door _zet_bibliotheek)
         self._opnames = []          # fase 8: bronvideo-rijen achter de opnametabel
+        self._lokaal = {}           # bron_id -> 'lokaal'/'deels'/'cloud' (snelheidsproef)
+        self._lokaal_proef = None   # lopende LokaalProef-thread
         self._knip_tmpmap = None    # tijdelijke map met zojuist geknipte fragmenten
         self.knip_worker = None
         self.trainer_naam = schaats_db.trainer_naam()  # fase 4: gaat mee als aangemaakt_door
@@ -3011,6 +3646,8 @@ class MainWindow(QMainWindow):
         self._afsluiten = False     # venster gaat dicht: worker-slots niets meer laten doen
         self._auto_toon_klaar = True  # mag de verse analyse bij afronden vanzelf getoond?
         self._analyse_waarschuwingen = []   # meldingen uit de lopende analyse (na afloop tonen)
+        self._backend_gemeld = False        # is een backend-terugval al gemeld? (zie
+                                            # _waarschuw_backend_terugval)
 
         # Skelet-editor (fase 3) — de zoom/pan-state zit in de VideoSpeler
         self._editor_actief = False
@@ -3029,7 +3666,9 @@ class MainWindow(QMainWindow):
         self._alles_t0 = 0.0
         self._alles_factor = 1.0
 
+        self._melding("Venster opbouwen...")
         self._bouw_ui()
+        self._melding("Bibliotheek openen...")
         self._zet_bibliotheek(schaats_db.bibliotheek_pad())
 
     # De VideoSpeler is de enige eigenaar van deze drie; hier alleen doorkijkjes, zodat de
@@ -3250,18 +3889,20 @@ class MainWindow(QMainWindow):
         uitleg = QLabel(
             "Ruwe trainingsopnames die nog geknipt moeten worden. Zet ze in de map "
             "<b>opnames</b> in de bibliotheek; ze verschijnen hier vanzelf (of na "
-            "'Vernieuwen').<br>Dubbelklik op een opname om er fragmenten uit te knippen.")
+            "'Vernieuwen').<br>Dubbelklik op een opname om er fragmenten uit te knippen, "
+            "of open hem met <b>Bekijken</b> om alleen te kijken — volledig scherm, geen "
+            "analyse.")
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
-        self.tabel_opnames = QTableWidget(0, 5)
+        self.tabel_opnames = QTableWidget(0, 6)
         self.tabel_opnames.setHorizontalHeaderLabels(
-            ["Opname", "Duur", "Status", "Fragmenten", "Notitie"])
+            ["Opname", "Duur", "Op deze pc", "Status", "Fragmenten / punten", "Notitie"])
         kop = self.tabel_opnames.horizontalHeader()
         kop.setSectionResizeMode(0, QHeaderView.Stretch)
-        for k in (1, 2, 3):
+        for k in (1, 2, 3, 4):
             kop.setSectionResizeMode(k, QHeaderView.ResizeToContents)
-        kop.setSectionResizeMode(4, QHeaderView.Stretch)
+        kop.setSectionResizeMode(OPNAME_KOL_NOTITIE, QHeaderView.Stretch)
         self.tabel_opnames.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabel_opnames.cellDoubleClicked.connect(lambda *_: self._knip_opname())
         # De notitie is ter plekke te bewerken; alleen die kolom is editeerbaar (zie
@@ -3271,6 +3912,13 @@ class MainWindow(QMainWindow):
         v.addWidget(self.tabel_opnames, stretch=1)
 
         rij = QHBoxLayout()
+        self.btn_bekijken = QPushButton("👁 Bekijken (volledig scherm)...")
+        self.btn_bekijken.setToolTip(
+            "Speelt de gekozen opname af zoals hij uit de camera komt: geen detectie, geen\n"
+            "tracking, alleen beeld. Vertragen, inzoomen, met . en , op 6× door- en\n"
+            "terugspoelen, en punten zetten die bewaard blijven.")
+        self.btn_bekijken.clicked.connect(self._bekijk_opname)
+        rij.addWidget(self.btn_bekijken)
         self.btn_knippen = QPushButton("✂ Fragmenten knippen...")
         self.btn_knippen.setToolTip(
             "Open de gekozen opname, markeer de bruikbare stukken (start/stop) en laat ze\n"
@@ -3329,24 +3977,29 @@ class MainWindow(QMainWindow):
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
                 combo.currentTextChanged.connect(
                     lambda tekst, bid=b["id"]: self._zet_opname_status(bid, tekst))
-                self.tabel_opnames.setCellWidget(rij, 2, combo)
+                self.tabel_opnames.setCellWidget(rij, OPNAME_KOL_STATUS, combo)
 
                 n_frag, n_sch = b["aantal_fragmenten"], b["aantal_schaatsers"]
+                n_pt = b.get("aantal_punten", 0)
                 telling = QTableWidgetItem(
                     f"{n_frag} fragment{'en' if n_frag != 1 else ''}"
-                    + (f" · {n_sch} schaatser{'s' if n_sch != 1 else ''}" if n_frag else ""))
+                    + (f" · {n_sch} schaatser{'s' if n_sch != 1 else ''}" if n_frag else "")
+                    + (f" · {n_pt} punt{'en' if n_pt != 1 else ''}" if n_pt else ""))
                 telling.setFlags(telling.flags() & ~Qt.ItemIsEditable)
-                self.tabel_opnames.setItem(rij, 3, telling)
+                self.tabel_opnames.setItem(rij, OPNAME_KOL_TELLING, telling)
 
                 notitie = QTableWidgetItem(b["notitie"] or "")
                 notitie.setToolTip("Dubbelklik om te bewerken (bv. 'training 3 aug, "
                                    "tempo-serie').")
-                self.tabel_opnames.setItem(rij, 4, notitie)
+                self.tabel_opnames.setItem(rij, OPNAME_KOL_NOTITIE, notitie)
+
+                self._zet_lokaal_cel(rij, self._lokaal.get(b["id"]))
         finally:
             self._vullen_opnames = False
         if opnames and self.tabel_opnames.currentRow() < 0:
             self.tabel_opnames.selectRow(0)   # 'Knippen...' werkt dan meteen
         self.tabs_bieb.setTabText(1, f"Opnames ({len(opnames)})" if opnames else "Opnames")
+        self._start_lokaal_proef(opnames)
 
     def _geselecteerde_opname(self):
         rij = self.tabel_opnames.currentRow()
@@ -3355,6 +4008,52 @@ class MainWindow(QMainWindow):
         item = self.tabel_opnames.item(rij, 0)
         bron_id = item.data(Qt.UserRole) if item else None
         return next((b for b in getattr(self, "_opnames", []) if b["id"] == bron_id), None)
+
+    def _start_lokaal_proef(self, opnames):
+        """Laat op de achtergrond meten welke opnames op deze pc staan.
+
+        Alleen voor bestanden die er zijn: bij 'ontbreekt' zegt de sync-check het al. Een
+        lopende meting wordt afgebroken — na een verversing kunnen de rijen anders zijn, en
+        een uitkomst van een oude lijst hoort niet meer in de tabel."""
+        self._stop_lokaal_proef()
+        paden = [(b["id"], b["pad"]) for b in opnames if b["sync"] != "ontbreekt"]
+        if not paden:
+            return
+        self._lokaal_proef = LokaalProef(paden, self)
+        self._lokaal_proef.gemeten.connect(self._lokaal_gemeten)
+        self._lokaal_proef.start()
+
+    def _stop_lokaal_proef(self):
+        """Breekt een lopende meting af. `wait` mag hier: de thread controleert de vlag
+        tussen twee opnames door en één monster duurt hooguit een seconde."""
+        proef = self._lokaal_proef
+        self._lokaal_proef = None
+        if proef is not None and proef.isRunning():
+            proef.requestInterruption()
+            proef.wait(3000)
+
+    def _lokaal_gemeten(self, bron_id, status):
+        """Eén uitkomst binnen: onthouden en de cel bijwerken (de rij kan intussen weg zijn)."""
+        self._lokaal[bron_id] = status
+        for b in self._opnames:
+            if b["id"] == bron_id:
+                b["lokaal"] = status
+        for rij in range(self.tabel_opnames.rowCount()):
+            item = self.tabel_opnames.item(rij, OPNAME_KOL_NAAM)
+            if item is not None and item.data(Qt.UserRole) == bron_id:
+                self._zet_lokaal_cel(rij, status)
+                return
+
+    def _zet_lokaal_cel(self, rij, status):
+        """Vult de kolom 'Op deze pc'. Zonder uitkomst een streepje: de meting loopt nog, en
+        'nee' zou dan een bewering zijn die we nog niet kunnen doen."""
+        tekst, kleur, uitleg = LOKAAL_WEERGAVE.get(
+            status, ("—", QColor(150, 150, 150), "De snelheidsproef loopt nog."))
+        cel = QTableWidgetItem(tekst)
+        cel.setFlags(cel.flags() & ~Qt.ItemIsEditable)
+        cel.setForeground(kleur)
+        cel.setToolTip(uitleg)
+        self.tabel_opnames.setItem(rij, OPNAME_KOL_LOKAAL, cel)
 
     def _zet_opname_status(self, bron_id, status):
         if self._vullen_opnames:
@@ -3371,7 +4070,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Status → {status}", 3000)
 
     def _opname_notitie_gewijzigd(self, item):
-        if self._vullen_opnames or item.column() != 4:
+        if self._vullen_opnames or item.column() != OPNAME_KOL_NOTITIE:
             return
         naam_item = self.tabel_opnames.item(item.row(), 0)
         if naam_item is None:
@@ -3382,6 +4081,97 @@ class MainWindow(QMainWindow):
                                         bijgewerkt_door=self.trainer_naam)
         except Exception as e:
             QMessageBox.warning(self, "Opname", f"Notitie opslaan mislukte:\n{e}")
+
+    def _opname_beschikbaar(self, bron):
+        """Staat het bestand er, en helemaal? Meldt zelf wat eraan schort en geeft False.
+
+        Zowel het knipvenster als het kijkvenster openen de opname rechtstreeks van schijf.
+        In een gedeelde cloudmap is een opname van een half uur minutenlang onderweg, en dan
+        is één nette melding beter dan een venster dat op een half bestand stukloopt."""
+        if bron["sync"] == "ontbreekt":
+            QMessageBox.warning(
+                self, "Opname niet gevonden",
+                f"Het bestand staat niet (meer) op schijf:\n{bron['pad']}\n\n"
+                "Is de bibliotheek een gedeelde cloudmap, dan is de opname mogelijk nog niet "
+                "gesynchroniseerd.")
+            return False
+        if bron["sync"] == "onvolledig":
+            QMessageBox.warning(
+                self, "Opname wordt nog gedownload",
+                f"'{bron['naam']}' is op deze pc nog kleiner dan bij de collega die hem "
+                "toevoegde — de cloudsync is er nog mee bezig.\n\n"
+                "Probeer het opnieuw zodra de download klaar is.")
+            return False
+        return self._waarschuw_niet_lokaal(bron)
+
+    def _waarschuw_niet_lokaal(self, bron):
+        """Waarschuwt als de opname niet offline op deze pc staat; True = doorgaan.
+
+        Het bestand is er wél — de cloudmap laat hem gewoon zien — maar het beeld komt
+        er per stukje overheen. Gemeten op deze bibliotheek (24 aug 2026, Google Drive
+        in streaming-stand): één sprong in het knipvenster haalde ~40 MB op en kostte
+        5 tot 20 s, tegen 30-120 ms als dezelfde opname lokaal staat. Dat valt niet met
+        code te verhelpen — de speler springt al gericht i.p.v. door te spoelen (zie
+        SEEK_DREMPEL_FRAMES), en die 40 MB is wat ffmpeg nodig heeft om in een MPEG-TS
+        zonder index het juiste tijdstip te vinden. Het enige zinnige is het zéggen,
+        vóórdat iemand denkt dat het programma hangt.
+
+        Doorgaan mag: soms wil je alleen even het begin zien, en wat je al bekeken hebt
+        zit in de cloudcache en is daarna wél meteen terug."""
+        status = self._lokaal.get(bron["id"])
+        if status is None:                 # de achtergrondmeting was nog niet zover
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                status = schaats_db.bestand_lokaal(bron["pad"])
+            except Exception:
+                status = None
+            finally:
+                QApplication.restoreOverrideCursor()
+            if status:
+                self._lokaal[bron["id"]] = status
+        if status not in ("cloud", "deels"):
+            return True                    # lokaal, of niet te meten → niet zeuren
+
+        antwoord = QMessageBox.warning(
+            self, "Opname staat nog in de cloud",
+            f"'{bron['naam']}' staat "
+            + ("nog maar gedeeltelijk" if status == "deels" else "niet")
+            + " offline op deze pc; het beeld wordt tijdens het kijken uit de cloud "
+              "gedownload.\n\n"
+              "Doorbladeren wordt daardoor traag: een sprong naar een ander moment "
+              "kost al gauw 5 tot 20 seconden, tegen een tiende seconde als de opname "
+              "lokaal staat. Ook het knippen leest de opname helemaal door.\n\n"
+              "Beter: rechtsklik in Verkenner de map 'opnames' → Google Drive → "
+              "'Offline beschikbaar maken', wacht tot hij binnen is en druk daarna "
+              "op 'Vernieuwen'.\n\n"
+              "Toch nu openen?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return antwoord == QMessageBox.Yes
+
+    def _bekijk_opname(self):
+        """Een opname handmatig doorkijken: alleen beeld, geen analyse.
+
+        Bewust zónder de controles die het knippen wél doet (draait er een analyse, bestaat
+        er al een schaatser): er wordt niets gemeten en er komt niets in de bibliotheek
+        terecht behalve de punten, en die horen bij de opname zelf."""
+        bron = self._geselecteerde_opname()
+        if bron is None:
+            QMessageBox.information(
+                self, "Opname bekijken",
+                "Kies eerst een opname in de lijst.\n\n"
+                "Staat er niets? Zet je opnames in de map 'opnames' in de bibliotheek en "
+                "druk op 'Vernieuwen'.")
+            return
+        if not self._opname_beschikbaar(bron):
+            return
+        try:
+            info = video_info(bron["pad"])
+        except Exception as e:
+            QMessageBox.critical(self, "Opname", f"Kan de opname niet openen:\n{e}")
+            return
+        dlg = BekijkVenster(bron, info, self.bieb, self.trainer_naam, parent=self)
+        dlg.exec()
+        self._vernieuw_opnames()      # de puntentelling in de lijst bijwerken
 
     def _open_opnamesmap(self):
         pad = schaats_db.opnames_pad(self.bieb)
@@ -3713,6 +4503,9 @@ class MainWindow(QMainWindow):
         self.lbl_bieb.setText(pad)
         self._waarschuw_conflictkopieen()
         self._vernieuw_schaatsers()
+        # Tijdens het opstarten de traagste stap apart melden: bij een nieuwe opname leest
+        # de scan de videometa, en op een cloudmap kan dat seconden duren.
+        self._melding("Opnames scannen...")
         self._vernieuw_opnames()      # fase 8: werklijst met nog te knippen opnames
 
     def _waarschuw_conflictkopieen(self):
@@ -4428,7 +5221,23 @@ class MainWindow(QMainWindow):
         self._vernieuw_schaatsers()   # nieuwe/gewijzigde analyses direct zichtbaar
         self.stack.setCurrentWidget(self.pagina_start)
 
+    def _waarschuw_backend_terugval(self):
+        """Meldt (één keer) dat de YOLO-backend niet geladen kon worden en er dus met
+        MediaPipe gemeten wordt — een andere detector geeft andere hoeken, dus dat mag
+        niet onopgemerkt blijven. Het warmdraaien start bij het tonen van het venster, dus
+        op het moment dat hier een analyse begint is de uitkomst allang bekend."""
+        if not BACKEND_FOUT or self._backend_gemeld:
+            return
+        self._backend_gemeld = True
+        QMessageBox.warning(
+            self, "YOLO-backend niet beschikbaar",
+            "torch/ultralytics is wel geïnstalleerd, maar liet zich niet laden:\n\n"
+            f"{BACKEND_FOUT}\n\n"
+            "De analyse draait daarom met de MediaPipe-backend. Die meet minder "
+            "nauwkeurig, dus vergelijk deze analyse niet zomaar met eerdere.")
+
     def _start_analyse(self):
+        self._waarschuw_backend_terugval()
         self.speler.zet_besturing_actief(False)
         self.btn_export.setEnabled(False)
         self._auto_toon_klaar = True          # nog niets anders geopend → resultaat straks tonen
@@ -4571,19 +5380,7 @@ class MainWindow(QMainWindow):
             return
         # Cloudsync: melden en niet openen, i.p.v. het knipvenster op een half bestand laten
         # stuklopen. Een opname van een half uur in 4K is minutenlang onderweg.
-        if bron["sync"] == "ontbreekt":
-            QMessageBox.warning(
-                self, "Opname niet gevonden",
-                f"Het bestand staat niet (meer) op schijf:\n{bron['pad']}\n\n"
-                "Is de bibliotheek een gedeelde cloudmap, dan is de opname mogelijk nog niet "
-                "gesynchroniseerd.")
-            return
-        if bron["sync"] == "onvolledig":
-            QMessageBox.warning(
-                self, "Opname wordt nog gedownload",
-                f"'{bron['naam']}' is op deze pc nog kleiner dan bij de collega die hem "
-                "toevoegde — de cloudsync is er nog mee bezig.\n\n"
-                "Probeer het opnieuw zodra de download klaar is.")
+        if not self._opname_beschikbaar(bron):
             return
         # Vóór het markeerwerk, niet erna: zonder profiel valt er straks niets op te slaan.
         schaatsers = schaats_db.lijst_schaatsers(self.bieb)
@@ -4791,6 +5588,7 @@ class MainWindow(QMainWindow):
         # bibliotheek blijft ondertussen bruikbaar.
         self._toon_voortgangsbalk("Batch starten...", met_stop=True)
 
+        self._waarschuw_backend_terugval()
         self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAAM, self.trainer_naam)
         self.batch_worker.taak_start.connect(self._batch_taak_start)
         self.batch_worker.voortgang.connect(self._batch_voortgang)
@@ -5804,6 +6602,7 @@ class MainWindow(QMainWindow):
         if not self._stop_workers():
             event.ignore()
             return
+        self._stop_lokaal_proef()
         self._stop_plaatsen()   # een lopende reeks nog vastleggen of terugdraaien
         self._pauzeer_alles()
         self.speler.sluit()
@@ -5814,9 +6613,18 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    app = QApplication(sys.argv)
-    venster = MainWindow()
+    # De QApplication en het opstartscherm bestaan al sinds de import bovenaan dit bestand
+    # (zie _start_opstartscherm); alleen als deze module via een omweg wordt gestart, zijn
+    # ze er niet.
+    app = _APP or QApplication(sys.argv)
+    venster = MainWindow(melding=_SPLASH.melding if _SPLASH else None)
     venster.show()
+    venster._melding = lambda tekst: None    # het opstartscherm gaat nu dicht
+    if _SPLASH:
+        _SPLASH.finish(venster)
+    # Pas nu torch/ultralytics binnenhalen: het venster staat er, de gebruiker kan al door
+    # de bibliotheek bladeren, en tegen de tijd dat hij een analyse start is de backend er.
+    _warm_backend_op()
     sys.exit(app.exec())
 
 
