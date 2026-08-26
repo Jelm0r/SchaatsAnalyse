@@ -587,6 +587,65 @@ analyse … + bron_id, bron_start_frame, bron_eind_frame   -- NULL bij een losse
 
 ---
 
+## Losse eindjes in de doelkeuze (open, gevonden 26 augustus 2026)
+
+Beide kwamen boven water bij het repareren van de doelklik (`KLIK_ZOEK_S`, zie de fix in
+BUGS.md C2). Geen van beide is toen aangepakt: ze vielen buiten die vraag en verdienen een
+eigen A/B.
+
+### 1. De stitch-poort groeit tot bijna de hele beeldbreedte
+
+`_stik_keten` laat zijn afstandspoort lineair meegroeien met het gat
+(`STITCH_GATE_BASIS` + `STITCH_GATE_GROEI`·gat). Bij een gat dat net onder
+`STITCH_MAX_GAP_S` (2,0 s) blijft is dat **0,06 + 0,015 × 49 = 0,795** — op een
+genormaliseerd beeld van 1,0 breed is er dan feitelijk geen positie-eis meer over, en houdt
+alleen de kleurpoort nog iets tegen.
+
+**Gemeten op `00005 8-41`** (offline replay op een gedumpte detectiepass): de keten begint
+met de frames 27 en 35 van ByteTrack-ID 16 op x ≈ 0,865, en plakt die over een gat van 49
+frames (1,96 s) aan de doelschaatser die op frame 84 op x = 0,378 staat — een werkelijke
+sprong van **0,490**, ruim binnen die poort van 0,795. Dat het om twee verschillende
+personen gaat is hard te maken zonder naar het beeld te kijken: **datzelfde ID 16 is in de
+frames 43–119 aantoonbaar ergens anders**, namelijk op x = 0,871 → 0,963 met een gestaag
+groeiende bbox (area 0,0136 → 0,0294). De keten beweert dus dat één persoon tegelijk links
+en rechts in beeld is. Dat de kleurpoort hem doorliet komt doordat `_splits_op_kleur` ID 16
+zelf al in tweeën had geknipt (27–35 tegen 43–136) — de kop was dus qua pakkleur niet meer
+dezelfde als de rest van dat ID.
+
+**De schade was hier nul**: beide frames vallen in de bocht, dus ze leveren geen `lm_data`
+en geen meting op. Dat is geluk van deze clip. In een fragment zonder bocht zet zo'n kop
+meteen aan het begin een skelet op de verkeerde persoon, en dat is precies een plek waar de
+eerste stand-run begint.
+
+**Richtingen** (nog niets van gekozen): een **plafond** op de poort, zoals de MediaPipe-
+tracker dat met `TRACK_GATE_MAX` al doet; of de groei koppelen aan de **voorspelde
+verplaatsing** in plaats van lineair aan het aantal frames; of de kleureis strenger maken
+naarmate het gat groeit. Let op dat dit de spiegeling is van de nearest-first-regel die in
+`_stik_keten` al zit: die koos bewust het kleinste gat omdat een verre sprong te veel
+vrijheid geeft — hier krijgt diezelfde verre sprong die vrijheid alsnog via de poort.
+
+**Omvang**: klein qua code, maar de A/B is het werk — dit raakt elke bestaande analyse, dus
+meten op meerdere clips (dekking, events, L-R-alternantie, botlengte-CV) vóór en ná, met
+`schaats_eval.py vergelijk`.
+
+### 2. De MediaPipe-backend kent het klik-zoekmechanisme niet
+
+`DoelTracker._seed` (in `schaats_analyse.py`) pakt bij een muisklik de pose die het dichtst
+bij het klikpunt ligt in het **eerste frame waarin überhaupt iemand gedetecteerd is** —
+zonder afstandspoort, zonder zoekvenster en zonder melding. Een klik "lukt" daar dus altijd,
+desnoods op een omstander tien meter verderop, en de gebruiker hoort er niets over. De
+YOLO-backend heeft sinds 26 augustus 2026 wél een venster (`KLIK_ZOEK_S`), een poort
+(`KLIK_POORT_BASIS`/`_GROEI`) en een waarschuwing.
+
+**Lage prioriteit**, want deze backend wordt in de praktijk niet gebruikt: de GUI kiest YOLO
+zodra torch/ultralytics er is (`IS_YOLO`) en in de gebundelde app zit MediaPipe niet eens.
+Het blijft de terugval voor een omgeving zonder torch, dus wegwerken hoeft niet — weten dat
+het verschil er is wel, want een analyse uit die backend is dan op een ander doel gebaseerd
+dan de trainer aanwees.
+
+**Omvang**: klein (dezelfde poort/venster-logica in `_seed`), maar zonder testmateriaal in
+die venv is er weinig te valideren.
+
 ## Volgorde & omvang (grove inschatting)
 
 | Fase | Wat | Omvang |
@@ -604,6 +663,7 @@ analyse … + bron_id, bron_start_frame, bron_eind_frame   -- NULL bij een losse
 | 6 | Sneller analyseren | **stap 3 (lichter pass-1-model) eerst** — 1 sessie incl. A/B tegen de gouden referentie; export/DirectML apart experiment. Stappen 1/2/6 zijn randwerk (zie de meting in fase 6) |
 | 7 | Perspectiefcorrectie via baanlijnen | *nice-to-have (niet nu — frontale, horizontale camera)*; groot, 2–3 sessies (stap 3, de 3D-reconstructie, is onderzoekswerk — eerst valideren op testmateriaal) |
 | 8 | Fragmenten knippen in de app + `bronvideo`/opnames in de bibliotheek | ✅ **af** (11 aug 2026) |
+| — | Losse eindjes in de doelkeuze (stitch-poort, MediaPipe-klik) | **open** — code klein, de A/B is het werk; zie de eigen sectie hierboven |
 
 ## Openstaande vragen (beslissen wanneer de fase begint)
 
