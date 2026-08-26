@@ -282,6 +282,12 @@ class _DmlYolo:
         self._pt_pad = pt_pad
         self._waarschuwing = waarschuwing_callback
         self._dml = True
+        # Hoe vaak de ByteTrack-toestand opnieuw is begonnen. `BYTETracker.__init__` roept
+        # `reset_id()` aan, dus na een modelwissel tellen de ID's weer vanaf 1 en zou
+        # `_bouw_tracklets` (dat puur op ID groepeert) een oud en een nieuw spoor aan
+        # elkaar plakken. `_detecteer_alles` leest deze teller en houdt de ID-ruimtes
+        # daarom uit elkaar.
+        self.generatie = 0
         with _dml_sessies():
             self._model = YOLO(onnx_pad, task='pose')
             # Op de volle DETECT_IMGSZ, ook al is dit maar een dummy: het model is
@@ -292,6 +298,16 @@ class _DmlYolo:
             self._model.predict(np.zeros((DETECT_IMGSZ, DETECT_IMGSZ, 3), np.uint8),
                                 imgsz=DETECT_IMGSZ, verbose=False, device='cpu')
 
+    def __getattr__(self, naam):
+        # Alles wat deze schil niet zelf afhandelt gaat naar het onderliggende model —
+        # `predictor` bijvoorbeeld, want daar hangt ultralytics de trackers aan en die
+        # moet `_herstart_tracker` kunnen bereiken. Via `__dict__` i.p.v. `self._model`,
+        # anders zou een opzoeking vóórdat `_model` bestaat zichzelf eindeloos aanroepen.
+        model = self.__dict__.get('_model')
+        if model is None:
+            raise AttributeError(naam)
+        return getattr(model, naam)
+
     def track(self, *args, **kw):
         return self._roep('track', *args, **kw)
 
@@ -301,15 +317,46 @@ class _DmlYolo:
     def _roep(self, naam, *args, **kw):
         try:
             return getattr(self._model, naam)(*args, **kw)
+        except np.linalg.LinAlgError:
+            # Niet de GPU: dit komt uit de Kalman-update van ByteTrack, die met
+            # `np.linalg.solve` op de geprojecteerde covariantie werkt en op een ontaarde
+            # matrix afgaat met "Singular matrix" (ultralytics/trackers/utils/
+            # kalman_filter.py). Dat is rekenwerk ná de inferentie en zegt niets over het
+            # apparaat. Doorlaten, zodat `_detecteer_alles` de tracker kan herstarten en
+            # het apparaat houdt wat het is — de brede tak hieronder schreef zo'n
+            # rekenfout op naam van DirectML, meldde dat aan de gebruiker en zette de rest
+            # van de analyse op de CPU (hier ~2x trager) terwijl er niets mis was.
+            raise
         except Exception as exc:
             if not self._dml:
                 raise
             self._dml = False
             self._model = YOLO(self._pt_pad)
+            self.generatie += 1        # nieuw model = nieuwe BYTETracker = ID's vanaf 1
             _meld(self._waarschuwing,
                   f"De GPU (DirectML) haakte af ({exc}); de analyse gaat verder op de "
                   "CPU en duurt daardoor langer.")
             return getattr(self._model, naam)(*args, **kw)
+
+
+def _herstart_tracker(model):
+    """Maakt de ByteTrack-toestand leeg, zonder van model of apparaat te wisselen.
+
+    Ultralytics hangt de trackers aan de predictor (`on_predict_start`), dus ze bestaan pas
+    ná de eerste `track()` — precies het moment waarop ze stuk kunnen gaan. Retourneert
+    False als er niets te herstarten valt; de caller gooit de fout dan door in plaats van
+    hem stil te slikken.
+    """
+    trackers = getattr(getattr(model, 'predictor', None), 'trackers', None)
+    if not trackers:
+        return False
+    gedaan = False
+    for t in trackers:
+        reset = getattr(t, 'reset', None)
+        if callable(reset):
+            reset()
+            gedaan = True
+    return gedaan
 
 
 def _meld(waarschuwing_callback, tekst):
@@ -401,7 +448,9 @@ REF_HIST_N      = 25         # referentie = gemiddelde van de recentste N doel-h
 STITCH_MAX_GAP_S  = 2.0      # max. tijdsgat dat gestitcht mag worden
 STITCH_GATE_BASIS = 0.06     # afstandspoort (genormaliseerd) bij gat 0 ...
 STITCH_GATE_GROEI = 0.015    # ... die per gat-frame groeit (onzekerheid van de voorspelling)
-STITCH_MAX_OVERLAP = 2       # frames dat een kandidaat met de keten mag overlappen
+STITCH_OVERLAP_GATE = 0.05   # overlapt een kandidaat de keten, dan moet hij op de gedeelde
+                             # frames binnen deze afstand liggen: dezelfde schaatser onder
+                             # twee ID's, en niet de omstander die de hele clip in beeld staat
 SNELHEID_VENSTER  = 5        # aantal detecties waarover de snelheid wordt geschat
 MIN_VERPLAATSING  = 0.06     # tracklet-padlengte hieronder = statische omstander
 KLIK_ZOEK_FRAMES  = 60       # zolang zoeken we (in frames) naar de aangeklikte schaatser
@@ -683,6 +732,11 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
     """
     w, h = info.w, info.h
     frames, buiten_meting = [], []
+    # ByteTrack begint na elke herstart weer bij ID 1, en `_bouw_tracklets` groepeert puur
+    # op ID — zonder eigen ID-ruimte per generatie zou een oud en een nieuw spoor tot één
+    # tracklet samensmelten, wat in het ergste geval twee verschillende schaatsers aan
+    # elkaar plakt. Vandaar: elke generatie begint boven de hoogste ID die al vergeven is.
+    herstarts, vorige_gen, id_basis, hoogste_tid = 0, 0, 0, 0
     wacht = _BochtWacht(info.fps, w, h, aan=bocht)
     cap = cv2.VideoCapture(input_pad)
     if not cap.isOpened():
@@ -698,9 +752,33 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
         else:
             # Stond de wacht in de overslaan-stand, dan is dít een controleframe.
             buiten_meting.append(wacht.skip)
-            res = _infereer(lambda dev: model.track(
-                frame, persist=True, imgsz=imgsz, tracker='bytetrack.yaml',
-                classes=[0], verbose=False, device=dev), waarschuwing_callback)[0]
+
+            def volg(dev, _f=frame):
+                return model.track(_f, persist=True, imgsz=imgsz,
+                                   tracker='bytetrack.yaml', classes=[0],
+                                   verbose=False, device=dev)
+
+            try:
+                res = _infereer(volg, waarschuwing_callback)[0]
+            except np.linalg.LinAlgError as exc:
+                # De Kalman-update van ByteTrack loopt op een ontaarde covariantie stuk
+                # ("Singular matrix"). Eén frame is dat niet waard: tracker leegmaken en
+                # dit frame overdoen, op hetzelfde apparaat. Bewust **geen** melding aan
+                # de gebruiker — er wisselt geen apparaat, er verandert niets aan de
+                # meting, en het enige dat echt breekt zijn de ByteTrack-ID's, waar de
+                # offline doelkeuze juist op gebouwd is (tracklets worden aaneengeregen
+                # op pakkleur en rijrichting). Wél in het logboek: als dit vaak gebeurt
+                # zegt dat iets over de opname, en dan wil je het kunnen terugzien.
+                if not _herstart_tracker(model):
+                    raise
+                herstarts += 1
+                print(f"[tracker] frame {f}: {exc}; ByteTrack opnieuw gestart "
+                      f"({herstarts}x in deze analyse)")
+                res = _infereer(volg, waarschuwing_callback)[0]
+
+            gen = getattr(model, 'generatie', 0) + herstarts
+            if gen != vorige_gen:
+                vorige_gen, id_basis = gen, hoogste_tid
             dets = []
             kps, boxes = res.keypoints, res.boxes
             if kps is not None and boxes is not None and kps.xy is not None and len(boxes) > 0:
@@ -715,7 +793,7 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
                     hist, uit_masker = _torso_hist(frame, xy[i], conf[i], bbox_px)
                     dets.append(Detectie(
                         frame=f,
-                        tid=int(ids[i]) if ids is not None else None,
+                        tid=(id_basis + int(ids[i])) if ids is not None else None,
                         centroid=(cx / w, cy / h),
                         bbox=(bbox_px[0] / w, bbox_px[1] / h, bbox_px[2] / w, bbox_px[3] / h),
                         area=(bw * bh) / (w * h),
@@ -723,6 +801,9 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
                         hist=hist,
                         hist_masker=uit_masker,
                     ))
+            for d in dets:
+                if d.tid is not None and d.tid > hoogste_tid:
+                    hoogste_tid = d.tid
             wacht.voed(f, dets)
             frames.append(dets)
         f += 1
@@ -854,9 +935,10 @@ def _stik_keten(seed, tracklets, fps):
       (begin bij vooruit stitchen, eind bij achteruit) — daar zijn belichting en schaal
       het best vergelijkbaar;
     - een kandidaat mag een paar frames met de keten **overlappen**
-      (`STITCH_MAX_OVERLAP`): rond een occlusie bestaan twee ID's kort naast elkaar, en
-      met een strikte "moet ná het einde beginnen"-eis bleef dat gat voorgoed staan.
-      Dubbele frames worden onderaan alsnog op kleur uitgedund;
+      rond een occlusie bestaan twee ID's een tijd naast elkaar, en met een strikte
+      "moet ná het einde beginnen"-eis bleef dat gat voorgoed staan. Toegestaan zolang
+      de kandidaat op de gedeelde frames vrijwel samenvalt met de keten
+      (`STITCH_OVERLAP_GATE`); dubbele frames worden onderaan op kleur uitgedund;
     - een **korte seed** (fragment van 1–2 detecties, goed mogelijk ná `_splits_op_kleur`)
       geeft een kleurreferentie van één histogram; die wordt eerst op positie aangedikt
       (`_bootstrap`) vóór de kleur als poortwachter gaat dienen.
@@ -880,18 +962,49 @@ def _stik_keten(seed, tracklets, fps):
         return (float(np.median(sims)), False) if sims else (None, False)
 
     def _kandidaten(richting):
-        """[(tracklet, gat, aansluitende detectie)] voor deze richting. Een gat ≤ 0 is
-        overlap met de keten en mag tot STITCH_MAX_OVERLAP frames; de kandidaat moet de
-        keten wel écht verlengen."""
-        if richting > 0:
-            eind = keten[-1].frame
-            return [(t, t[0].frame - eind, t[0]) for t in rest
-                    if t[-1].frame > eind
-                    and -STITCH_MAX_OVERLAP <= t[0].frame - eind <= max_gap]
-        begin = keten[0].frame
-        return [(t, begin - t[-1].frame, t[-1]) for t in rest
-                if t[0].frame < begin
-                and -STITCH_MAX_OVERLAP <= begin - t[-1].frame <= max_gap]
+        """[(tracklet, gat, aansluitende detectie)] voor deze richting.
+
+        Het aansluitpunt is de eerste detectie **voorbij de ketenrand**, niet blind
+        `t[0]`/`t[-1]`. Dat verschil is wezenlijk. Vroeger moest een kandidaat vrijwel
+        helemaal buiten de keten liggen (de inmiddels vervallen `STITCH_MAX_OVERLAP`), en een tracklet
+        dat de rand overlápte viel daardoor in béide richtingen af: vooruit lag zijn
+        eerste frame te ver terug, achteruit eindigde hij ná het begin van de keten.
+        Zo'n tracklet kon dus nooit meedoen, ook al was het aantoonbaar dezelfde
+        schaatser — en dat kost dekking: op één clip bleven de tracklets 23-38, 41-66,
+        49-55 en 57-68 alle vier buiten de keten, samen een gat van 34 frames.
+
+        Overlap zomaar toestaan mag niet: er zijn tracklets die de héle clip beslaan
+        (stilstaande omstanders langs de boarding, `pad` ≈ 0,1). Daarom een **echte
+        toets op de gedeelde frames**: valt de kandidaat samen met frames die de keten
+        al heeft, dan moet hij daar op vrijwel dezelfde plek staan
+        (`STITCH_OVERLAP_GATE`). Twee detecties in hetzelfde frame zijn per definitie
+        twee verschillende boxen — liggen ze bovenop elkaar, dan is het dezelfde
+        schaatser die rond een occlusie kort twee ID's kreeg; liggen ze uit elkaar, dan
+        is het iemand anders en valt hij af. Dat is een scherpere toets dan welke
+        voorspelling over een gat ook, want er komt geen extrapolatie aan te pas.
+        """
+        op_frame = {}
+        for d in keten:
+            op_frame.setdefault(d.frame, d)
+        rand = keten[-1].frame if richting > 0 else keten[0].frame
+        uit = []
+        for t in rest:
+            verlengt = t[-1].frame > rand if richting > 0 else t[0].frame < rand
+            if not verlengt:
+                continue
+            gedeeld = [(d, op_frame[d.frame]) for d in t if d.frame in op_frame]
+            if gedeeld:
+                afw = float(np.median([np.hypot(a.centroid[0] - b.centroid[0],
+                                                a.centroid[1] - b.centroid[1])
+                                       for a, b in gedeeld]))
+                if afw > STITCH_OVERLAP_GATE:
+                    continue
+            d0 = next(d for d in (t if richting > 0 else reversed(t))
+                      if (d.frame > rand if richting > 0 else d.frame < rand))
+            g = (d0.frame - rand) if richting > 0 else (rand - d0.frame)
+            if g <= max_gap:
+                uit.append((t, g, d0))
+        return uit
 
     def _voorspel(richting, g):
         """Positie waar de keten na `g` frames verwacht wordt (constante snelheid)."""
@@ -931,9 +1044,22 @@ def _stik_keten(seed, tracklets, fps):
             _opneem(keuze[1], keuze[2])
 
     def _probeer(richting):
-        """richting=+1: aan het eind doorstikken; -1: vóór het begin."""
+        """richting=+1: aan het eind doorstikken; -1: vóór het begin.
+
+        Kiest de **dichtstbijzijnde** bruikbare kandidaat, niet de best scorende. Dat is
+        geen detail: de keten groeit met stapjes, en wie over een tussenliggend tracklet
+        heen springt maakt dat tracklet onbereikbaar — het ligt daarna middenin de keten
+        en verlengt hem dus in geen van beide richtingen meer. De oude score
+        (`sim − 0,5·afst/poort`) deelde de afstand door een poort die mét het gat
+        meegroeit en beloonde daarmee juist de grote sprong: op de testclip won
+        66-182 (gat 35, kleur 0,72, score 0,701) van 41-66 (gat 10, kleur 0,71, score
+        0,642), waarna 41-66 voorgoed buiten de keten viel en er een gat van 34 frames
+        overbleef — te groot voor `GAP_VUL_S`, dus 34 frames zonder skelet.
+
+        Kleur en afstand blijven poorten; bij een gelijk gat beslist de oude score.
+        """
         while True:
-            beste, beste_score = None, -1.0
+            beste, beste_sleutel = None, None
             for t, g, d0 in _kandidaten(richting):
                 sim, zeker = _kleur_sim(t, richting)
                 if zeker and sim < KLEUR_MATCH_MIN:
@@ -945,8 +1071,9 @@ def _stik_keten(seed, tracklets, fps):
                 if afst > poort:
                     continue
                 score = (sim if zeker else KLEUR_MATCH_MIN) - 0.5 * afst / poort
-                if score > beste_score:
-                    beste, beste_score = t, score
+                sleutel = (-g, score)          # klein gat eerst, dan pas de kwaliteit
+                if beste_sleutel is None or sleutel > beste_sleutel:
+                    beste, beste_sleutel = t, sleutel
             if beste is None:
                 return
             _opneem(beste, richting)

@@ -32,6 +32,16 @@ import schaats_omgeving
 
 LOGPAD = schaats_omgeving.start_logboek() if __name__ == "__main__" else None
 
+# Het vangnet daaronder, om dezelfde reden en op hetzelfde moment: een crash in Qt of in
+# een rekenbibliotheek gebeurt in C++ en laat zonder dit niets achter — geen traceback,
+# geen afsluitmelding, en bevroren ook geen console (25-8-2026: 0xc0000005 in Qt6Gui.dll
+# tijdens een batch-analyse, zie TODO_CRASH.md). `start_crashlog()` schrijft de stack naar
+# hetzelfde logbestand en vangt bovendien onafgehandelde fouten uit gewone threads af, die
+# hier anders spoorloos verdwijnen (de backend-warmup, de lokaal-proef op de opnames).
+# Anders dan het logboek gebeurt dit óók in de repo-omgeving: juist daar wordt gedebugd.
+if __name__ == "__main__":
+    schaats_omgeving.start_crashlog()
+
 # ── Qt eerst, en meteen een opstartscherm ───────────────────────────────────────
 # Bewust vóór alle andere imports: de rest van deze module trekt cv2/numpy binnen en
 # (bij het eerste gebruik) torch/ultralytics, en juist op een koude machine kost dat
@@ -40,7 +50,7 @@ LOGPAD = schaats_omgeving.start_logboek() if __name__ == "__main__" else None
 # fractie van een seconde een venstertje staat dat vertelt wat er gebeurt.
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QPointF, QEventLoop, QEvent, QSize, QRect, QPoint,
-    QMargins,
+    QMargins, QtMsgType, qInstallMessageHandler,
 )
 from PySide6.QtGui import (
     QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence, QFont,
@@ -109,7 +119,95 @@ def _start_opstartscherm():
     return app, scherm
 
 
+def _qt_naar_logboek():
+    """Stuurt Qt's eigen meldingen naar het logboek.
+
+    Nodig omdat Qt op Windows zónder console naar de debugger schrijft (OutputDebugString)
+    en niet naar stderr: juist de waarschuwingen die aan een crash in de tekenlaag
+    voorafgaan — "Cannot set parent, new parent is in a different thread", "It is not safe
+    to use pixmaps outside the GUI thread", "Timers cannot be stopped from another thread"
+    — zijn daardoor onzichtbaar, terwijl ze precies aanwijzen wát er misgaat. Bijgehouden
+    vanaf hier, dus ook tijdens de zware imports.
+    """
+    soorten = {QtMsgType.QtDebugMsg: "debug", QtMsgType.QtInfoMsg: "info",
+               QtMsgType.QtWarningMsg: "WAARSCHUWING", QtMsgType.QtCriticalMsg: "KRITIEK",
+               QtMsgType.QtFatalMsg: "FATAAL"}
+
+    def handler(soort, context, tekst):
+        try:
+            plek = ""
+            if context is not None and context.file:
+                plek = " (%s:%s)" % (context.file, context.line)
+            sys.stderr.write("[Qt %s] %s%s\n" % (soorten.get(soort, "?"), tekst, plek))
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    qInstallMessageHandler(handler)
+
+
+def _schermen_naar_logboek(app):
+    """Schrijft elke wijziging in de beeldschermlijst naar het logboek.
+
+    De crash uit TODO_CRASH.md is een `QScreen` die Qt al had weggegooid: `0xc0000005` op
+    `QScreen::geometry()`+0 en op `QScreen::virtualSiblings()`+0x29 — een crash op de éérste
+    bytes van een member-functie, dus een kapotte `this` en niet een lege verwijzing. Dat is
+    use-after-free, en Qt gooit een `QScreen` alléén weg als Windows de schermlijst herbouwt.
+
+    Op deze machine (twee beeldschermen) gebeurt dat óók zonder dat iemand iets doet: een
+    monitor die in energiebesparing zakt, een verbinding die opnieuw traint, een driver die
+    onder GPU-belasting een modus-wissel doet. Win+Shift+S was dus nooit de oorzaak, alleen
+    een handige manier om het uit te lokken — en dat verklaart waarom de crash ook optreedt
+    als er niets aangeraakt wordt.
+
+    Zonder deze regels is dat onzichtbaar: het logboek houdt gewoon op. Mét deze regels staat
+    er bij de volgende crash zwart op wit óf er vlak ervoor een scherm kwam, ging of van maat
+    veranderde, en hoeveel seconden ervoor. Puur meten — er wordt niets mee gerepareerd.
+    """
+    def schrijf(tekst):
+        try:
+            sys.stderr.write("[scherm %s] %s\n" % (time.strftime("%H:%M:%S"), tekst))
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def beschrijf(scherm):
+        # Bij 'eraf' is het QScreen-object nog geldig tijdens het signaal, maar we lezen het
+        # defensief: dit is diagnosecode en mag zelf nooit de oorzaak van een crash worden.
+        try:
+            g = scherm.geometry()
+            return "%s %dx%d op (%d,%d) @%.0fHz" % (scherm.name(), g.width(), g.height(),
+                                                    g.x(), g.y(), scherm.refreshRate())
+        except (RuntimeError, AttributeError):
+            return "<scherm niet meer leesbaar>"
+
+    def volg(scherm):
+        s = scherm      # default-argument in elke lambda: anders vangen ze de laatste lus-waarde
+        s.geometryChanged.connect(lambda _v, s=s: schrijf("geometrie: " + beschrijf(s)))
+        s.availableGeometryChanged.connect(lambda _v, s=s: schrijf("werkgebied: " + beschrijf(s)))
+        s.refreshRateChanged.connect(lambda _v, s=s: schrijf("ververssnelheid: " + beschrijf(s)))
+        s.logicalDotsPerInchChanged.connect(lambda _v, s=s: schrijf("DPI: " + beschrijf(s)))
+
+    for scherm in app.screens():
+        volg(scherm)
+    schrijf("bij start: " + " | ".join(beschrijf(s) for s in app.screens()))
+
+    def erbij(scherm):
+        volg(scherm)
+        schrijf("SCHERM ERBIJ: " + beschrijf(scherm))
+
+    app.screenAdded.connect(erbij)
+    app.screenRemoved.connect(lambda s: schrijf("SCHERM ERAF: " + beschrijf(s)))
+    app.primaryScreenChanged.connect(lambda s: schrijf("hoofdscherm nu: " + beschrijf(s)))
+
+
+if __name__ == "__main__":
+    _qt_naar_logboek()
+
 _APP, _SPLASH = _start_opstartscherm() if __name__ == "__main__" else (None, None)
+
+if _APP is not None:
+    # Meteen na het aanmaken van de QApplication, zodat ook een schermwijziging tijdens de
+    # zware imports zichtbaar wordt.
+    _schermen_naar_logboek(_APP)
 
 import cv2
 import numpy as np
@@ -469,6 +567,32 @@ def zet_venstergrootte(venster, gewenste_breedte, gewenste_hoogte, maximaliseer=
     x = beschikbaar.x() + (beschikbaar.width() - breedte) // 2
     y = beschikbaar.y() + (beschikbaar.height() - hoogte) // 2
     venster.move(x, y)
+
+
+def toon_dialoog(dlg):
+    """Draait een modale dialoog en ruimt hem daarna op. Retourneert de exec()-code.
+
+    Het opruimen is geen netheid maar een crash-fix (TODO_CRASH.md). Een `QDialog` met een
+    parent blijft na `exec()` gewoon bestaan — als **verborgen top-level venster**, inclusief
+    het native Windows-venster erachter en de `QScreen`-verwijzing daarin. Herbouwt Windows
+    de schermlijst (een knip-overlay via Win+Shift+S, een beeldscherm erbij, een DPI-wissel),
+    dan loopt Qt al die vensters af (`QWindowsWindow::checkForScreenChanged`) en valt het om
+    op een `QScreen` die er niet meer is: `0xc0000005` in `QScreen::geometry()` /
+    `QScreen::virtualSiblings()`, midden in `app.exec()` en dus buiten het bereik van welke
+    `try` dan ook. Eén knip→batch-ronde van zeven clips liet zo zestien van die vensters
+    achter (doel- en horizonkiezer per clip, plus knipvenster en batch-dialoog), waarvan een
+    paar met een eigen `VideoSpeler` en `VideoCapture` erin.
+
+    `deleteLater()` en niet `WA_DeleteOnClose`, want de caller leest de uitkomst
+    (`dlg.doel_punt`, `dlg.fragmenten`, ...) pás ná `exec()`. Nagemeten: de dialoog blijft
+    leven tot we terug zijn in de hoofd-event-lus — dwars door een `QProgressDialog` (die
+    `processEvents` doet) en door een geneste dialoog heen — dus elke aanroepplek kan hem
+    veilig uitlezen, terwijl hij ruim vóór de analyse begint opgeruimd is.
+    """
+    try:
+        return dlg.exec()
+    finally:
+        dlg.deleteLater()
 
 
 class FlowLayout(QLayout):
@@ -4203,7 +4327,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Opname", f"Kan de opname niet openen:\n{e}")
             return
         dlg = BekijkVenster(bron, info, self.bieb, self.trainer_naam, parent=self)
-        dlg.exec()
+        toon_dialoog(dlg)
         self._vernieuw_opnames()      # de puntentelling in de lijst bijwerken
 
     def _open_opnamesmap(self):
@@ -4708,7 +4832,7 @@ class MainWindow(QMainWindow):
 
     def _nieuwe_schaatser(self):
         dlg = SchaatserDialog(self)
-        if dlg.exec() != QDialog.Accepted or not dlg.naam:
+        if toon_dialoog(dlg) != QDialog.Accepted or not dlg.naam:
             return
         sid = schaats_db.maak_schaatser(self.bieb, dlg.naam, dlg.geboortejaar, dlg.notities)
         self._vernieuw_schaatsers(selecteer_id=sid)
@@ -4722,7 +4846,7 @@ class MainWindow(QMainWindow):
             return
         dlg = SchaatserDialog(self, naam=s["naam"], geboortejaar=s["geboortejaar"],
                               notities=s["notities"])
-        if dlg.exec() != QDialog.Accepted or not dlg.naam:
+        if toon_dialoog(dlg) != QDialog.Accepted or not dlg.naam:
             return
         schaats_db.wijzig_schaatser(self.bieb, sid, dlg.naam, dlg.geboortejaar, dlg.notities)
         self._vernieuw_schaatsers(selecteer_id=sid)
@@ -4805,7 +4929,7 @@ class MainWindow(QMainWindow):
             return
         dlg = NieuweAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
                                   parent=self)
-        if dlg.exec() != QDialog.Accepted:
+        if toon_dialoog(dlg) != QDialog.Accepted:
             return
         self.input_pad = dlg.video_pad
 
@@ -4935,7 +5059,7 @@ class MainWindow(QMainWindow):
                     config = invoer = None
 
         kdlg = KalibratieKiezer(frame0, self, invoer=invoer, config=config)
-        if kdlg.exec() != QDialog.Accepted:
+        if toon_dialoog(kdlg) != QDialog.Accepted:
             return None
         return kdlg.perspectief
 
@@ -5091,8 +5215,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Info", f"Kon de analysegegevens niet lezen:\n{e}")
             return
-        AnalyseInfoDialog(meta, self._schaatser_naam(meta.get("schaatser_id")),
-                          parent=self).exec()
+        toon_dialoog(AnalyseInfoDialog(
+            meta, self._schaatser_naam(meta.get("schaatser_id")), parent=self))
 
     def _vergelijk_met_deze(self):
         """Vanaf de weergavepagina rechtstreeks vergelijken: de geopende analyse gaat
@@ -5121,7 +5245,7 @@ class MainWindow(QMainWindow):
             voorkeur_id = self._geselecteerde_schaatser_id()
         dlg = AnalyseKiezer(self.bieb, titel=f"{kant.naam}: kies analyse",
                             voorkeur_schaatser_id=voorkeur_id, parent=self)
-        if dlg.exec() != QDialog.Accepted or dlg.analyse_id is None:
+        if toon_dialoog(dlg) != QDialog.Accepted or dlg.analyse_id is None:
             return False
         return self._zet_vergelijk_kant(kant, dlg.analyse_id, dlg.schaatser_naam)
 
@@ -5235,7 +5359,7 @@ class MainWindow(QMainWindow):
     def _kies_doelschaatser(self, frame0):
         """Toont het eerste frame in een kiezer. Retourneert (x,y), None, of False (afgebroken)."""
         dlg = DoelKiezer(frame0, self)
-        if dlg.exec() != QDialog.Accepted:
+        if toon_dialoog(dlg) != QDialog.Accepted:
             return False
         return dlg.doel_punt
 
@@ -5245,7 +5369,7 @@ class MainWindow(QMainWindow):
         False (afgebroken).
         """
         dlg = HorizonKiezer(frame0, self)
-        if dlg.exec() != QDialog.Accepted:
+        if toon_dialoog(dlg) != QDialog.Accepted:
             return False
         return dlg.horizon_deg, dlg.auto_per_frame
 
@@ -5445,7 +5569,7 @@ class MainWindow(QMainWindow):
 
         gedaan = schaats_db.bron_fragmenten(self.bieb, bron["id"])
         dlg = FragmentKiezer(bron["pad"], info, gedaan=gedaan, parent=self)
-        if dlg.exec() != QDialog.Accepted or not dlg.fragmenten:
+        if toon_dialoog(dlg) != QDialog.Accepted or not dlg.fragmenten:
             return
 
         paden = self._knip_naar_tijdelijk(bron["pad"], dlg.fragmenten, info)
@@ -5486,7 +5610,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Knippen mislukt", str(e))
             return []
         finally:
+            # close() verbergt alleen; zonder deleteLater blijft dit venster (mét zijn
+            # QScreen-verwijzing) achter in precies de flow die crashte — zie toon_dialoog.
             voortgang.close()
+            voortgang.deleteLater()
         return paden
 
     def _ruim_knipmap_op(self):
@@ -5504,7 +5631,7 @@ class MainWindow(QMainWindow):
             return
         dlg = BatchAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
                                  voorgevuld=voorgevuld, parent=self)
-        if dlg.exec() != QDialog.Accepted:
+        if toon_dialoog(dlg) != QDialog.Accepted:
             self._ruim_knipmap_op()      # geknipte clips zonder batch zijn nutteloos
             return
 
@@ -6670,6 +6797,10 @@ def main():
     venster._melding = lambda tekst: None    # het opstartscherm gaat nu dicht
     if _SPLASH:
         _SPLASH.finish(venster)
+        # finish() verbergt het opstartscherm alleen. Zonder dit blijft het de héle sessie
+        # als top-level venster bestaan — met een QScreen-verwijzing die bij een
+        # schermwijziging verouderd raakt; zie toon_dialoog.
+        _SPLASH.deleteLater()
     # Pas nu torch/ultralytics binnenhalen: het venster staat er, de gebruiker kan al door
     # de bibliotheek bladeren, en tegen de tijd dat hij een analyse start is de backend er.
     _warm_backend_op()
