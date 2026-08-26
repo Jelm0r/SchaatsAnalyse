@@ -1,6 +1,7 @@
 # SchaatsAnalyse als installeerbare .exe
 
-*Plan, opgesteld 24 augustus 2026. Stap 1 en 2 uitgevoerd op 24 augustus 2026; stap 3 t/m 6 nog niet.*
+*Plan, opgesteld 24 augustus 2026. Stap 1 en 2 uitgevoerd op 24 augustus 2026, stap 3 en 4 op
+25 augustus 2026; stap 5 en 6 nog niet.*
 
 ## Context
 
@@ -200,7 +201,74 @@ Let op de volgorde: dit moet vóór `_start_opstartscherm()` in
 
 ---
 
-## Stap 3 — PyInstaller-spec
+## Stap 3 — PyInstaller-spec ✅ *uitgevoerd 25 augustus 2026*
+
+### Wat er nu staat
+
+Drie nieuwe bestanden, en **geen enkele regel in de bestaande modules gewijzigd** — de losse
+scripts en beide venvs draaien onveranderd, de exe staat ernaast. Alles wat de bundel nodig
+heeft had de code al gekregen in stap 1 en 2.
+
+| bestand | wat |
+|---|---|
+| `schaatsanalyse.spec` | het PyInstaller-recept: onedir, windowed, noupx, modellen erbuiten |
+| `maak_versie.py` | genereert `_versie.py` met de git-stempel (commit/datum/vuil), zelfde vlaggen als `app_versie()` |
+| `bouw.bat` | versiestempel → PyInstaller → de modellen naast de exe zetten |
+
+Bouwen: **`bouw.bat`** in de repomap (PyInstaller 6.22.2, geïnstalleerd in `.venv-yolo`).
+Duurt ~5 minuten en levert `dist\SchaatsAnalyse\SchaatsAnalyse.exe`.
+
+**Gemeten (25 augustus 2026):** app zonder modellen **787 MB** (`_internal` 740 MB + exe
+47 MB), met de drie modellen erbij 1,3 GB. Grootste brokken: torch 365, cv2 112, PySide6 104,
+onnxruntime 64, numpy.libs 21, matplotlib 15, PIL 13, torchvision 11 MB. Daarmee onder de
+geschatte 1,3–1,6 GB, door twee excludes die allebei zijn nagemeten:
+
+- **PySide6: 634 → 104 MB.** De app gebruikt vier Qt-modules (QtCore/QtGui/QtWidgets/QtCharts);
+  de rest staat expliciet in `excludes` omdat matplotlib graag Qt- en tk-backends meesleept.
+- **polars weg: −180 MB.** De polars-runtime (177 MB) komt via ultralytics mee, maar álle
+  polars-imports daar staan in trainings-, benchmark-, plot- en dataframe-exportpaden — in
+  ultralytics zelf becommentarieerd als *"scope for faster 'import ultralytics'"* — en deze app
+  doet alleen inferentie. Nagemeten met polars hard geblokkeerd via `sys.meta_path`:
+  `import schaats_yolo`, `_laad_yolo()` (de DirectML-route) en daarna `model.track()` én
+  `model.predict()` op een frame draaien alle drie zonder polars ooit te laden.
+
+**Wat aangetoond is dat werkt** (twee keer, vóór en ná de polars-exclude):
+
+- De exe **start bevroren**: het kopblok in het logboek meldt `bevroren=True` en `app_dir` =
+  de distmap, dus stap 1 lost daar naar de meegeleverde modellen. Geen traceback in het logboek.
+- **De luie backend-import slaagt in de bundel** — de riskantste plek van deze stap. 30 s na de
+  start zitten `Qt6Charts.dll`, `torch_cpu.dll` en `onnxruntime_pybind11_state.pyd` in het
+  proces (`Get-Process ... .Modules`). Dat is meteen het bewijs dat de `find_spec`-vraag van
+  `_backend_beschikbaar()` onder PyInstaller's FrozenImporter werkt (anders zou `IS_YOLO` stil
+  op False vallen en zou er nóóit torch geladen zijn) en dat `_warm_backend_op()` z'n
+  `import schaats_yolo` erdoorheen krijgt.
+- De **analyse-kritieke databestanden** zitten erin: `ultralytics/cfg/default.yaml`,
+  `ultralytics/cfg/trackers/bytetrack.yaml` en `onnxruntime/capi/DirectML.dll`. rtmlib heeft
+  geen hook maar is pure Python en zit compleet in de PYZ.
+- **`_versie` staat als PYMODULE in de bundel**, dus de exe kan een versiestempel meegeven aan
+  elke analyse (het gedrag van `_versie_uit_bundel()` zelf is in stap 1 al gesimuleerd getest).
+
+**Wat hiermee nog níet bewezen is:** dat een échte analyse in de exe dezelfde meting oplevert,
+en dat DirectML aanstaat in plaats van stilzwijgend CPU. Dat valt niet met een startcheck te
+doen — dat is stap 5, en het is niet voor niets de belangrijkste stap.
+
+**Vijf dingen om te onthouden:**
+
+- **`--noconfirm` wist de hele uitvoermap**, dus `bouw.bat` kopieert de 557 MB modellen bij elke
+  build opnieuw (~30 s van schijf naar schijf). Dat is de prijs voor het buiten de bundel houden:
+  ze hoeven niet door de PyInstaller-molen, en een model vervangen kan zonder opnieuw te bouwen.
+- **`torch.distributed` is bewust níet uitgesloten**, hoewel het plan het noemde: ultralytics'
+  trainer importeert het en die keten hangt aan `from ultralytics import YOLO`. De winst zou
+  hooguit **6 MB** zijn (het is Python-broncode; de 315 MB in `torch/lib` zijn de DLL's en die
+  moeten mee), dus dat risico is de moeite niet.
+- **matplotlib blijft** (31 → 15 MB): `ultralytics.utils.plotting` importeert het bij het laden,
+  maar PyInstaller ontdekte zelf dat alleen de **Agg**-backend gebruikt wordt.
+- **Geen icoon**: de exe draagt het standaard PyInstaller-icoon. Een `.ico` erbij zetten en
+  `icon=` in de spec invullen is genoeg — cosmetisch, dus voor stap 4 bewaard.
+- De waarschuwing **`Library nvcuda.dll required via ctypes not found`** hoort erbij: dit is de
+  DirectML-build, er zit geen CUDA in. Idem `Hidden import "tzdata" not found` (polars-restant).
+
+### Het oorspronkelijke plan
 
 Bouwen ín `.venv-yolo` (Python 3.11), met `pip install pyinstaller`. Een `schaatsanalyse.spec`
 in de repo (niet een lange commandoregel), zodat de build reproduceerbaar is en in git staat.
@@ -227,7 +295,60 @@ Inno aanroept.
 
 ---
 
-## Stap 4 — Inno Setup-script
+## Stap 4 — Inno Setup-script ✅ *uitgevoerd 25 augustus 2026*
+
+### Wat er nu staat
+
+`installer.iss` verpakt de map uit stap 3 tot **één download van 649 MB**
+(`dist\SchaatsAnalyse-setup.exe`, 1.313 MB uitgepakt). Compileren duurt ~5 minuten en hangt
+als stap 4/4 achter `bouw.bat`; ontbreekt Inno Setup, dan wordt die stap overgeslagen met een
+melding en is de gebouwde map nog gewoon te starten. Inno Setup 6.7, per gebruiker
+geïnstalleerd (`winget install JRSoftware.InnoSetup`).
+
+Drie kleine dingen eromheen:
+
+- **`maak_versie.py --toon`** drukt de stempel **ASCII** af (`2026-08-24.a4be1f2a+`) zonder iets
+  te schrijven. `bouw.bat` geeft die als `/DVersie=` aan de compiler, zodat "Apps en onderdelen"
+  laat zien wélke build er staat. De middenstip van `label` overleeft de console-codepage en een
+  `for /f`-lus in cmd.exe niet; het label in de bibliotheek blijft ongewijzigd.
+- **`schaatsanalyse.ico`** (het bewaarde punt uit stap 3): `icon=` in de spec, `SetupIconFile` in
+  de installer, en daarmee ook het icoon van elke snelkoppeling. Vervangen = het bestand
+  overschrijven en opnieuw bouwen.
+- **De installer weigert te compileren als de build niet compleet is.** Vier
+  `#if !FileExists`-controles op de exe en de drie modellen; zonder die controles zou er een
+  installer uitrollen die er goed uitziet en bij de eerste analyse stilzwijgend 178 MB gaat
+  downloaden (stap 1.5).
+
+**Rooktest** (stil installeren naar een tijdelijke map, starten, weer verwijderen):
+
+| | uitkomst |
+|---|---|
+| installeren (`/VERYSILENT`) | exitcode 0, **43 s**, 3.313 bestanden, 1.313 MB |
+| modellen | alle drie aanwezig, met de namen die `app_dir()` verwacht |
+| snelkoppeling startmenu | wijst naar de geïnstalleerde exe (bureaublad-vinkje overgeslagen met `/TASKS=""`) |
+| Apps en onderdelen | `SchaatsAnalyse` · versie `2026-08-24.a4be1f2a+` |
+| app starten | draait, venster "Schaats Analyse"; logboek meldt `bevroren=True` en `app_dir` = de installatiemap, geen traceback |
+| verwijderen | exitcode 0, map weg, beide snelkoppelingen weg |
+
+**Wat hiermee nog níet bewezen is:** dat een analyse uit de installatie dezelfde meting oplevert
+en dat DirectML aanstaat in plaats van stilzwijgend CPU — dat is stap 5. En dat het op een
+schone machine werkt (ook stap 5) of hoe SmartScreen zich gedraagt (stap 6).
+
+**Vier dingen om te onthouden:**
+
+- **Sluit een draaiende `dist\SchaatsAnalyse\SchaatsAnalyse.exe` vóór een herbouw.** PyInstaller
+  wist met `--noconfirm` de uitvoermap, loopt op de vergrendelde exe stuk met
+  `PermissionError: [WinError 5]` — en heeft dan de rest van de map al half opgeruimd.
+- **De installatiemap is `{localappdata}\Programs\SchaatsAnalyse`** (`PrivilegesRequired=lowest`):
+  geen beheerdersrechten nodig, en schrijfbaar, dus de terugval uit stap 1.4 komt er niet aan te pas.
+- **Verwijderen raakt `%LOCALAPPDATA%\SchaatsAnalyse` niet aan** (logboek, en een eventuele eigen
+  ONNX-export) en de bibliotheek in Drive al helemaal niet. Het logboek overleeft dus een
+  herinstallatie, en `config.json` in `%APPDATA%` houdt het pad naar de Drive-map vast.
+- **Inno Setup 6.3 of nieuwer is nodig**: `ArchitecturesAllowed=x64compatible` bestaat daarvóór
+  niet. `SetupLogging=yes` staat aan, dus bij een mislukte installatie is er een
+  `Setup Log*.txt` in `%TEMP%` om naar te vragen — zelfde gedachte als het logboek uit stap 2.
+
+### Het oorspronkelijke plan
 
 `installer.iss`, resultaat `SchaatsAnalyse-setup.exe`.
 
@@ -248,7 +369,119 @@ Inno aanroept.
 
 ---
 
-## Stap 5 — Verificatie: bewijzen dat het dezelfde meting is
+## Stap 5 — Verificatie: bewijzen dat het dezelfde meting is ✅ *meetdeel uitgevoerd 25 augustus 2026*
+
+### Wat er nu staat
+
+De kernvraag van deze stap — **levert de gebundelde app dezelfde meting als de venv?** — is
+beantwoord op de vaste testclip (`Schaats frontaal.MOV`, 103 frames, zónder doelklik,
+`bocht=True`, smoothing 5 / drempel 0,015, dus exact de instellingen van de opgeslagen
+analyse). Drie runs naast elkaar gelegd: een verse referentie in `.venv-yolo` op DirectML, een
+tegenproef met `SCHAATSANALYSE_CPU=1`, en de analyse die via `dist\SchaatsAnalyse\SchaatsAnalyse.exe`
+in de bibliotheek belandde.
+
+| | venv · DirectML | **exe · DirectML** | venv · CPU (tegenproef) |
+|---|---|---|---|
+| Analysetijd | 90,7 s | **~90 s** (gestopwatcht) | 202,5 s |
+| Per frame | **0,88 s** | **~0,9 s** | **1,97 s** |
+| Dekking | 103/103 | 103/103 | 103/103 |
+| Afzetten | 6 · RLRLRL | 6 · RLRLRL | 6 · RLRLRL |
+| Framegrenzen | 0-11, 12-30, 36-47, 48-66, 67-83, 84-102 | idem | idem |
+| Hoeken | 42,2 / 42,5 / 42,9 / 40,0 / 45,6 / 50,0\* | idem | idem |
+
+\* = `afgekapt`, telt niet mee in de statistiek.
+
+**Dit zijn 6 afzetten en niet de 8 uit [GPU.md](GPU.md) hoofdstuk 3-4**: die referentie draaide
+*mét* doelklik en met `bocht=False`. Hier telt niet welke van de twee "beter" is, maar dat alle
+drie de runs hierboven **dezelfde** instellingen gebruiken — die van de opgeslagen analyse, want
+anders vergelijk je twee verschillende metingen (GPU.md hoofdstuk 5, valkuil twee).
+
+**De exe-analyse is niet "vergelijkbaar" maar identiek**: alle x/y-landmarks van alle 33
+punten over alle 103 frames wijken **≤0,0001 px** af van de verse venv-run (het enige noemens-
+waardige verschil zit in de derde kolom, `visibility`, op ≤6·10⁻⁵ — float-afronding, en die
+kolom voedt geen enkele meting; `middellijn_dev` heeft hetzelfde NaN-patroon en verschilt 0,0).
+Twee exe-runs gemeten: een die op 0,0000 px uitkwam en de controle-run van 25 augustus 20:33 op
+0,0001 px — het verschil tussen twee DirectML-runs onderling is dus van dezelfde orde als tussen
+exe en venv, oftewel een tienduizendste pixel. `schaats_eval.py vergelijk` geeft dan ook 0,0 px mediaan én p95 op knieën en
+enkels. De CPU-tegenproef wijkt zoals verwacht wél een fractie af (mediaan 0,0001 px, max
+0,48 px op een hiel, 0,28 px op de metingspunten) **zonder dat de meting verandert** — precies
+het beeld uit [GPU.md](GPU.md) hoofdstuk 4.
+
+**Waarom dat geen toeval is, en de reden dat deze stap zo goed afliep**: de bundel bevat
+letterlijk dezelfde code en dezelfde rekenkern als de venv. Nagemeten:
+
+- **Alle projectmodules bytecode-identiek.** `_versie`, `schaats_analyse`, `schaats_yolo`,
+  `schaats_db`, `schaats_omgeving` en `schaats_perspectief` uit de PYZ, plus het entry-script
+  `schaats_gui` uit het CArchive, tegen een verse `compile()` van de repo-bron: alle zeven
+  gelijk op de instructiebytes. `_versie` zit er dus ook echt in — zonder die module zou elke
+  analyse uit de exe "onbekend" in de Info-dialoog krijgen (stap 3).
+- **Alle binaries byte-identiek.** 122 `.dll`/`.pyd` in `_internal` die ook in
+  `.venv-yolo\Lib\site-packages` staan: **0 verschillen**, inclusief `DirectML.dll`,
+  `onnxruntime.dll`, `onnxruntime_pybind11_state.pyd`, de negen torch-DLL's, `cv2.pyd` en de
+  vijftien numpy-binaries.
+
+**DirectML staat aan in de exe.** Het logboek van een exe-analyse toont
+`Loading …\yolo26x-pose-dml.onnx for ONNX Runtime inference…`, en dat pad wordt in `_laad_yolo`
+**alleen** genomen als `yolo_dml()` waar is; mislukt de route, dan komt er een expliciete
+"GPU-route (DirectML) kon niet worden opgezet"-melding in datzelfde logboek, en die staat er
+niet. **Let op de regel eronder:** `Using ONNX Runtime 1.24.4 with CPUExecutionProvider` is
+géén bewijs van het tegendeel — ultralytics logt daar zijn eigen aanvraag, vlak vóór de
+`_dml_sessies()`-patch de provider vervangt (ultralytics kent DirectML niet, zie CLAUDE.md).
+Wie hier alsnog aan twijfelt, meet de tijd: 0,88 vs. 1,97 s/frame is geen subtiel verschil — en
+dat is precies wat de stopwatch op een analyse uit de exe zelf bevestigde (**~90 s** voor 103
+frames, niet ~200 s).
+
+**Opstarttijd** (drie starts achter elkaar, warme machine, bibliotheek op de Drive-map):
+opstartscherm na **1,6 s**, hoofdvenster na **2,7 s** — naast de 1,3 s / 2,5 s van de losse
+scripts, dus de bundel kost ~0,2 s extra. Het logboek klopt: één kopblok per start, twaalf
+starts, **nul tracebacks**.
+
+**Zelftest** `python schaats_db.py` na de `app_versie`-wijziging: *Zelftest OK*.
+
+**Alvast voor de schone machine (punt 5):** de C-runtime zit in de bundel — `vcruntime140.dll`,
+`vcruntime140_1.dll`, `msvcp140.dll`, `MSVCP140_ATOMIC_WAIT.dll`, `ucrtbase.dll` en 40
+`api-ms-win-*`-stubs. Een pc zonder Visual C++ redistributable hoort dus gewoon te starten.
+
+### Functionele rondgang: hoever gekomen (25 augustus 2026)
+
+| handeling | uitkomst |
+|---|---|
+| bibliotheek in Drive openen | ✅ opnames + analyses zichtbaar, statuswijziging ("bezig") opgeslagen |
+| analyse heropenen | ✅ `IMG_9001.mov` geladen — dus npz, videokopie én **QtCharts** werken bevroren |
+| opname bekijken (kijkvenster) | ✅ twee punten gezet en teruggelezen uit `bron_markering` |
+| **fragment knippen** | ✅ `00005 13-16.mp4`: 84 frames, 1920×1080 @ 25 fps, 5,0 MB, leesbaar — de `mp4v`-`VideoWriter` uit `opencv_videoio_ffmpeg500_64.dll` doet het in de bundel. Dit was het enige pad dat geen enkele andere test raakt |
+| batch-analyse op het fragment | ✅ drie keer gedraaid en opgeslagen (84, 252 en 62 frames) — ❌ maar hij **crasht** als er tijdens de analyse een schermgebeurtenis komt, zie hieronder |
+| Info-dialoog | ✅ |
+| twee analyses vergelijken | ✅ |
+| logboek achteraf | ✅ één kopblok per start, geen tracebacks |
+
+**De rondgang is dus geslaagd**, met één uitzondering die géén bundelprobleem is.
+
+**De crash.** Foutmodule `Qt6Gui.dll`, `0xc0000005` — en met het vangnet uit TODO_CRASH punt 3
+(nu ingebouwd) viel hij te lokaliseren: de **hoofdthread valt om in `app.exec()`** met een
+Python-stack van één regel, en de offsets wijzen op `QScreen::geometry()` en
+`QScreen::virtualSiblings()`. Het is dus Qt-interne code die op een Windows-bericht reageert —
+een schermwijziging — en niet onze code; de analyse-worker stond ondertussen gewoon in
+`cap.read()`. Reproduceerbaar door tijdens de analyse Win+Shift+S te doen; drie runs zonder
+schermafbeelding liepen door. Dezelfde flow crashte op 13 augustus al met de losse scripts.
+Volledige waarneming, de offsetanalyse en vier mislukte pogingen tot een minimale reproductie
+staan in [TODO_CRASH.md](TODO_CRASH.md).
+
+Wat de bundeling er wél mee te maken heeft: bevroren is er geen console, dus zo'n C++-crash
+liet **niets** achter — Python komt er niet aan te pas — en het antwoord moest uit het
+Windows-gebeurtenislogboek komen. Daarom staat `faulthandler` nu naast `start_logboek()` in
+`schaats_omgeving.py`, samen met de Qt-meldingen die op Windows anders naar de debugger gaan.
+Elke sessie eindigt met `=== netjes afgesloten … ===`; ontbreekt die regel, dan is de app daar
+gecrasht.
+
+### Nog te doen (kan alleen met de hand)
+
+**Alleen de schone machine** — een pc zonder Python, zonder VC++ runtime, zonder
+GPU-pakketten. Installeren met `dist\SchaatsAnalyse-setup.exe`, starten, één analyse draaien.
+Let op: de installer in `dist\` is van 17:54 en bevat de crashlog nog niet; draai `bouw.bat`
+opnieuw voordat je hem meeneemt.
+
+### Het oorspronkelijke plan
 
 Dit is de belangrijkste stap. Een andere omgeving mag de metingen niet verschuiven — precies
 de discipline uit [GPU.md](GPU.md), en die is hier één-op-één herbruikbaar.
@@ -278,7 +511,57 @@ de discipline uit [GPU.md](GPU.md), en die is hier één-op-één herbruikbaar.
 
 ---
 
-## Stap 6 — SmartScreen
+## Stap 6 — SmartScreen + installatie-instructie ✅ *uitgevoerd 25 augustus 2026*
+
+### Wat er nu staat
+
+[INSTALLEREN.md](INSTALLEREN.md) — de instructie voor de trainers, geschreven voor iemand
+zonder Python en zonder beheerdersrechten. Volgorde van het document is de volgorde waarin een
+collega tegen dingen aanloopt: downloaden → browserwaarschuwing → SmartScreen → installeren →
+eerste start → Drive offline zetten.
+
+Vier keuzes die er inhoudelijk toe doen:
+
+- **De SmartScreen-stap staat al in de inleiding**, niet pas halverwege. Wie het venster
+  onverwacht ziet, stopt — en belt of hij een virus binnenhaalt. De uitleg is dus niet "klik
+  op Toch uitvoeren" maar **waarom** het venster er is: een certificaat kost €200–400 per jaar,
+  onbekend ≠ onveilig. Met erbij het enige wat écht fout kan gaan: *zet nooit je virusscanner
+  uit*; bij een quarantaine staat de route via Beveiligingsgeschiedenis → Toestaan op apparaat
+  erin, en anders eerst bellen.
+- **Downloaden vanaf de Drive-map**, dus staat er meteen bij dat je het bestand eerst offline
+  beschikbaar maakt: een setup van 650 MB starten vanaf de streaming-schijf gaat traag en kan
+  halverwege afbreken. Dezelfde valkuil als bij de opnames, alleen dan bij de installatie.
+- **De bibliotheekmap is als "de belangrijkste stap" gemarkeerd**, met erbij wat er misgaat
+  als je hem overslaat (je werkt dan in je Documenten-map en niemand ziet je analyses). Dat is
+  de enige instelling waarbij een verkeerde keuze stil blijft en pas weken later opvalt.
+- **Het logboek is als eerste-hulpmiddel opgeschreven, niet als voetnoot**: hoe je de map
+  opent (`Windows + R` → `%LOCALAPPDATA%\SchaatsAnalyse`), wat je erbij vermeldt, en het
+  criterium uit stap 2 — ontbreekt `=== netjes afgesloten ... ===` achter je laatste sessie,
+  dan is de app gecrasht. Een trainer kan daarmee zélf zien of er iets te melden valt.
+
+Verder staan de dingen erin die geen instructie zijn maar wel de eerste vragen: analysetijd
+(~1 s/frame, GPU automatisch via DirectML, CPU is ~2× trager), de bocht die wordt overgeslagen,
+bijwerken (over de oude heen installeren, bibliotheek blijft), verwijderen (raakt Drive en
+logboek niet) en de crash bij Win+Shift+S tijdens een analyse uit [TODO_CRASH.md](TODO_CRASH.md)
+— als bekende hebbelijkheid mét de workaround, want die vinden ze anders zelf en dan is het een
+mysterie.
+
+**Geen certificaat gekocht.** ~€200–400 per jaar voor een handvol trainers weegt niet op tegen
+één keer doorklikken, en een EV-certificaat (dat SmartScreen wél meteen vertrouwt) is nog
+duurder. Als het aantal gebruikers ooit groeit is dit de plek om terug te komen.
+
+### Nog te doen (kan alleen met de hand)
+
+1. **`bouw.bat` opnieuw draaien** — de installer in `dist\` is van 25 aug 17:54 en bevat de
+   crashlog uit TODO_CRASH punt 3 nog niet (zelfde punt als bij stap 5).
+2. **De setup in Drive zetten**: `Mijn Drive\SchaatsAnalyse\app\SchaatsAnalyse-setup.exe` —
+   dat pad staat letterlijk in INSTALLEREN.md. De map `app\` bestaat daar nog niet; hij zit de
+   bibliotheek niet in de weg (`synchroniseer_bronmap` kijkt alleen in `opnames\`, de
+   conflictcheck alleen naar `schaats*.db` in de hoofdmap).
+3. **INSTALLEREN.md meesturen** — bij de setup in dezelfde Drive-map, want een collega die het
+   venster van SmartScreen ziet heeft de uitleg op dát moment nodig.
+
+### Het oorspronkelijke plan
 
 De exe is niet gesigneerd, dus Windows toont bij de eerste start "Windows heeft uw pc
 beschermd" (doorklikken via *Meer informatie → Toch uitvoeren*), en Defender markeert
@@ -302,10 +585,12 @@ logboek staat: `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log` (stap 2).
 | [schaats_yolo.py](schaats_yolo.py) | modelpad, `_onnx_pad`, RTMPose-pad |
 | [schaats_db.py](schaats_db.py) | `app_versie()` leest `_versie.py` als bevroren |
 | `schaatsanalyse.spec` | nieuw — PyInstaller-recept |
-| `installer.iss` | nieuw — Inno Setup |
-| `bouw.bat` | nieuw — versie genereren → PyInstaller → Inno |
+| `schaatsanalyse.ico` | nieuw — icoon van de exe, de installer en de snelkoppelingen; vervangbaar |
+| `installer.iss` | nieuw — Inno Setup: PyInstaller-uitvoer + modellen → `dist\SchaatsAnalyse-setup.exe` |
+| `maak_versie.py` | nieuw — schrijft de git-stempel in `_versie.py`; `--toon` drukt hem ASCII af voor de installer |
+| `bouw.bat` | nieuw — versie genereren → PyInstaller → modellen erbij → Inno Setup |
 | `_versie.py` | nieuw, **gegenereerd**, in `.gitignore` |
-| `INSTALLEREN.md` | nieuw — instructie voor de trainers |
+| [INSTALLEREN.md](INSTALLEREN.md) | nieuw — instructie voor de trainers: downloaden uit Drive, de SmartScreen-stap, bibliotheekmap kiezen, Drive offline zetten, waar het logboek staat |
 | `.gitignore` | `build/`, `dist/`, `_versie.py`, `*-setup.exe` |
 
 ## Tijdsinschatting
