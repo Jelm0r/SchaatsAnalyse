@@ -113,6 +113,31 @@ deze pc"** dat, en krijg je bij het openen een melding met deze instructie erbij
 
 ---
 
+## Video kijken: overal dezelfde toetsen
+
+Of je nu een ruwe opname bekijkt, fragmenten knipt, een analyse terugkijkt of twee schaatsers
+naast elkaar zet — de bediening is overal hetzelfde:
+
+| Toets | Wat het doet |
+| --- | --- |
+| **spatie** | afspelen / pauze |
+| **.** (punt) | doorspoelen op 6× zolang je hem ingedrukt houdt |
+| **,** (komma) | terugspoelen op 6× |
+| **← →** | één frame terug / verder |
+| **Home / End** | naar het begin / het eind |
+| **F11** | volledig scherm aan of uit |
+| **muiswiel** | in- en uitzoomen op het beeld |
+
+Eén tikje op de punt of komma schuift precies één frame op; vasthouden spoelt door. De toetsen
+staan ook onder in beeld en in de tips bij de knoppen, dus je hoeft ze niet uit je hoofd te
+leren.
+
+Per venster komen daar de knoppen bij die alleen daar bestaan: **P** zet een punt in een
+opname (**1**–**9** springt erheen, **Del** haalt hem weg), en in het knipvenster markeren
+**S** en **E** het begin en het eind van een fragment.
+
+---
+
 ## Met z'n tweeën in dezelfde bibliotheek
 
 - Klik op **Vernieuwen** om te zien wat een collega intussen heeft toegevoegd — dat gaat niet

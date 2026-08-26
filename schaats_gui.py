@@ -50,7 +50,7 @@ if __name__ == "__main__":
 # fractie van een seconde een venstertje staat dat vertelt wat er gebeurt.
 from PySide6.QtCore import (
     Qt, QTimer, QThread, Signal, QPointF, QEventLoop, QEvent, QSize, QRect, QPoint,
-    QMargins, QtMsgType, qInstallMessageHandler,
+    QMargins, QObject, QtMsgType, qInstallMessageHandler,
 )
 from PySide6.QtGui import (
     QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence, QFont,
@@ -402,12 +402,39 @@ def _snelheid_idx(factor):
 
 SNELHEID_DEFAULT_IDX = _snelheid_idx(1.0)
 
-# Doorspoelen met . en , in het handmatige kijkvenster. 6× de opnamesnelheid: snel genoeg
-# om een half uur door te komen, langzaam genoeg om te zien wanneer je erlangs schiet. De
-# tik is een bovengrens op de vloeiendheid — het doelframe volgt uit de wandklok, dus het
-# blijft 6× ook als de decoder het niet bijhoudt (zie BekijkVenster._spoel_tick).
+# Doorspoelen met . en , — overal in de app, zie `SpelerToetsen`. 6× de opnamesnelheid:
+# snel genoeg om een half uur door te komen, langzaam genoeg om te zien wanneer je erlangs
+# schiet. De tik is een bovengrens op de vloeiendheid — het doelframe volgt uit de wandklok,
+# dus het blijft 6× ook als de decoder het niet bijhoudt (zie SpelerToetsen._spoel_tick).
 SPOEL_FACTOR = 6.0
 SPOEL_TICK_MS = 40
+
+# Eén opsomming van de standaardtoetsen, zodat elk videovenster dezelfde regel kan tonen en
+# er nergens een eigen (en dus na verloop van tijd afwijkende) lijst ontstaat. De extra's
+# van een venster komen er met `toetsen_hulp()` achter.
+VIDEO_TOETSEN_HULP = (
+    "<b>Spatie</b> afspelen/pauze · <b>.</b> doorspoelen 6× · <b>,</b> terugspoelen 6× · "
+    "<b>&larr;/&rarr;</b> één frame · <b>Home/End</b> begin/eind · muiswiel zoomt · "
+    "<b>F11</b> volledig scherm")
+
+# Dezelfde opsomming als platte tekst, voor een tooltip (die geen HTML-opmaak kent).
+VIDEO_TOETSEN_TOOLTIP = (
+    "Toetsen: spatie = afspelen/pauze, ← → = één frame, . en , = spoelen op 6×\n"
+    "zolang je de toets ingedrukt houdt, Home/End = begin/eind, F11 = volledig scherm.")
+
+
+def toetsen_hulp(*extra):
+    """De standaardtoetsen plus de venster-eigen toetsen, in één hulpregel."""
+    return " · ".join((VIDEO_TOETSEN_HULP,) + tuple(extra))
+
+
+def wissel_volledig_scherm(venster):
+    """F11 op elk videovenster. Bewust `setWindowState` en niet `showNormal()`: dat laatste
+    haalt ook een maximalisatie weg, zodat het hoofdvenster na F11-uit ineens klein is."""
+    if venster.isFullScreen():
+        venster.setWindowState(venster.windowState() & ~Qt.WindowFullScreen)
+    else:
+        venster.setWindowState(venster.windowState() | Qt.WindowFullScreen)
 
 # Breedte van de transportknoppen (⏮ ⏪ ▶ ⏩ ⏭): ze dragen één teken, dus de
 # Qt-standaardbreedte voor tekstknoppen is verspilde ruimte op een smal scherm.
@@ -2157,6 +2184,15 @@ class VideoSpeler(QWidget):
         self.btn_frame_verder.clicked.connect(lambda: self.ga_naar(self.huidige_idx + 1))
         self.btn_eind.clicked.connect(lambda: self.ga_naar(len(self.resultaten) - 1))
 
+        # De sneltoets bij de knop zetten is de enige plek waar iedereen hem tegenkomt:
+        # deze balk staat op alle vier de plekken waar een video te zien is.
+        for knop, tip in ((self.btn_start, "Naar het begin (Home)"),
+                          (self.btn_frame_terug, "Eén frame terug (←)"),
+                          (self.btn_play, "Afspelen / pauze (spatie)"),
+                          (self.btn_frame_verder, "Eén frame verder (→)"),
+                          (self.btn_eind, "Naar het eind (End)")):
+            knop.setToolTip(f"{tip}\n\n{VIDEO_TOETSEN_TOOLTIP}")
+
         for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
                   self.btn_frame_verder, self.btn_eind):
             # Eén teken breed: de Qt-standaardbreedte (81 px) is bedoeld voor knoppen mét
@@ -2186,6 +2222,7 @@ class VideoSpeler(QWidget):
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 0)
+        self.slider.setToolTip(f"Sleep om door de video te scrubben.\n\n{VIDEO_TOETSEN_TOOLTIP}")
         # Op een lange opname kost één sprong ~80 ms (seek) + tekenen, terwijl een sleep over
         # de tijdlijn honderden valueChanged-signalen afvuurt. Die stapelen zich op en de GUI
         # lijkt vast te lopen. `_scrub_gevraagd` bewaart alleen het laatst gevraagde frame en
@@ -2772,6 +2809,212 @@ class VideoSpeler(QWidget):
         self._toon_frame(volgende)
 
 
+class SpelerToetsen(QObject):
+    """
+    De toetsen waarmee je een video bekijkt — op elke plek in de app dezelfde.
+
+    Er wordt op vier plekken beeld afgespeeld (de weergavepagina, de vergelijkpagina, het
+    knipvenster en het kijkvenster) en die deelden alleen de muis: het kijkvenster had
+    spatie/`.`/`,`/pijltjes, het knipvenster alleen `S` en `E`, en de twee pagina's in het
+    hoofdvenster niets — daar moest álles met de knoppen. Deze klasse ís die afhandeling,
+    één keer geschreven; per plek blijven alleen de eigen extra's over (`extra`).
+
+    Waarom een filter op de **applicatie** en geen `keyPressEvent` of `QShortcut`: na één
+    muisklik staat de focus op een knop of op de tijdlijn, en die slikken respectievelijk
+    spatie en de pijltjestoetsen voordat het venster ze ziet. Een filter op QApplication
+    krijgt ze als eerste. Drie dingen horen daarbij:
+      * de niet-toets-tak moet **kort** zijn — hier komt élk event van de hele app langs;
+      * een gefocust **tekstveld** houdt zijn toetsen, anders is er geen naam meer in te
+        typen en belandt een punt niet in de tekst;
+      * toetsen **mét modifier** gaan er ongemoeid doorheen, zodat Ctrl+Z (undo) en Alt+F4
+        blijven werken en Ctrl+← niet stilzwijgend een frame terugspoelt.
+
+    `spelers` is een callable, want welke spelers er te bedienen zijn hangt van de stand van
+    het venster af (op de vergelijkpagina: welke kanten er gevuld zijn); `actief` is de
+    voorwaarde daarboven — staat de juiste pagina wel open. Is `op_afspelen` gezet, dan gaat
+    afspelen/pauzeren dáárheen in plaats van naar de spelers los: de vergelijkpagina loopt op
+    één masterklok en die mag niet met twee losse timers omzeild worden. Wie `op_afspelen`
+    meegeeft moet ook `speelt` meegeven, want dan zegt de speeltimer van een speler niets
+    meer: onder de masterklok staat die stil terwijl het beeld gewoon loopt, en zonder dat
+    antwoord zou spatie het afspelen opnieuw starten in plaats van het te pauzeren.
+    """
+
+    def __init__(self, venster, spelers, extra=None, actief=None,
+                 op_afspelen=None, speelt=None, op_spoel=None):
+        super().__init__(venster)
+        self._venster = venster
+        self._spelers = spelers
+        self._extra = dict(extra or {})
+        self._actief = actief
+        self._op_afspelen = op_afspelen
+        self._speelt = speelt
+        self._op_spoel = op_spoel
+
+        self._richting = 0      # −1 terug, 0 stil, +1 vooruit
+        self._lopend = []       # [(speler, startframe)] tijdens het spoelen
+        self._t0 = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._spoel_tick)
+        QApplication.instance().installEventFilter(self)
+
+    def losmaken(self):
+        """Bij het sluiten van het venster: spoelen stoppen en het app-filter loslaten."""
+        self.stop_spoelen()
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    # ── Welke spelers ────────────────────────────────────────────────────
+    def _actieve_spelers(self):
+        spelers = self._spelers() if callable(self._spelers) else self._spelers
+        if isinstance(spelers, VideoSpeler):
+            spelers = [spelers]
+        return [sp for sp in spelers if sp is not None and sp.resultaten]
+
+    def _loopt(self, spelers):
+        """Loopt er beeld? Met een eigen afspeelroute is de speeltimer geen antwoord meer —
+        onder de masterklok van de vergelijkpagina staat die stil terwijl het beeld loopt."""
+        if self._speelt is not None:
+            return self._speelt()
+        return any(sp.speelt() for sp in spelers)
+
+    def _pauzeer(self, spelers):
+        if self._op_afspelen is not None:
+            self._op_afspelen(False)
+        for sp in spelers:
+            sp.pauzeer()
+
+    # ── Doorspoelen met . en , ───────────────────────────────────────────
+    def start_spoelen(self, richting):
+        """Begint te spoelen zolang de toets ingedrukt blijft. Het eerste frame gaat er
+        meteen af, zodat een tíkje op de toets één frame opschuift en vasthouden 6× spoelt —
+        allebei manieren waarop zo'n toets gebruikt wordt."""
+        if self._richting == richting:
+            return
+        spelers = self._actieve_spelers()
+        if not spelers:
+            return
+        # Eerst stoppen en pauzeren, dán pas de eigen state zetten: `_pauzeer` komt via
+        # `op_afspelen` bij de eigenaar uit, en die roept van daaruit `stop_spoelen()` aan
+        # (`_pauzeer_alles` doet dat). Andersom zou dat de zojuist gezette richting meteen
+        # weer op 0 zetten en zou er niets gaan spoelen.
+        self.stop_spoelen()
+        self._pauzeer(spelers)
+        self._richting = richting
+        self._lopend = [(sp, sp.huidige_idx) for sp in spelers]
+        self._t0 = time.monotonic()
+        for sp, vanaf in self._lopend:
+            sp.ga_naar(vanaf + richting)
+        self._timer.start(SPOEL_TICK_MS)
+        self._meld(f"{'▶▶' if richting > 0 else '◀◀'} {SPOEL_FACTOR:g}×")
+
+    def stop_spoelen(self, richting=None):
+        if self._richting == 0 or (richting is not None and richting != self._richting):
+            return
+        self._timer.stop()
+        self._richting = 0
+        self._lopend = []
+        self._meld("")
+
+    def _spoel_tick(self):
+        """Het doelframe volgt uit de **wandkloktijd** sinds de toetsdruk, niet uit een vaste
+        stap per tik — hetzelfde motief als de masterklok van de vergelijkpagina. Zo is het
+        echt 6× de opnamesnelheid: haalt de decoder dat niet (achteruit kost elke stap een
+        seek), dan worden er meer frames overgeslagen in plaats van dat het spoelen
+        vertraagt, en er stapelt zich niets op."""
+        verstreken = time.monotonic() - self._t0
+        klaar = True
+        for sp, vanaf in self._lopend:
+            info = sp.video_info
+            fps = (info.fps if info is not None else 0) or 30.0
+            stap = max(1, int(round(verstreken * fps * SPOEL_FACTOR)))
+            laatste = len(sp.resultaten) - 1
+            doel = vanaf + self._richting * stap
+            sp.ga_naar(max(0, min(doel, laatste)))
+            if 0 < doel < laatste:
+                klaar = False
+        if klaar:
+            self.stop_spoelen()     # begin/eind bereikt: er valt niets meer te spoelen
+
+    def _meld(self, tekst):
+        if self._op_spoel is not None:
+            self._op_spoel(tekst)
+
+    # ── Het filter zelf ──────────────────────────────────────────────────
+    def eventFilter(self, obj, event):
+        # Deze eerste tak moet kort zijn: hier komt élk event van de hele applicatie langs.
+        # False = "niet afgehandeld", precies wat QObject.eventFilter ook zou doen.
+        soort = event.type()
+        if soort not in (QEvent.KeyPress, QEvent.KeyRelease):
+            return False
+        if not self._venster.isActiveWindow():
+            return False
+        if self._actief is not None and not self._actief():
+            return False
+        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
+            return False
+        if event.modifiers() & ~Qt.KeypadModifier:
+            return False
+
+        toets = event.key()
+        richting = {Qt.Key_Period: 1, Qt.Key_Comma: -1}.get(toets)
+        if richting is not None:
+            # Autorepeat overslaan: tijdens het vasthouden stuurt Windows een stroom
+            # press/release-paren, en die zouden het spoelen elke ~30 ms opnieuw starten —
+            # waarmee de wandklok telkens op nul valt en er niets meer opschiet.
+            if not event.isAutoRepeat():
+                if soort == QEvent.KeyPress:
+                    self.start_spoelen(richting)
+                else:
+                    self.stop_spoelen(richting)
+            return True
+        if soort != QEvent.KeyPress:
+            return False
+
+        # Venster-eigen toetsen gaan vóór: een plek mag een standaardtoets overnemen.
+        handler = self._extra.get(toets)
+        if handler is not None:
+            handler()
+            return True
+
+        if toets == Qt.Key_F11:
+            wissel_volledig_scherm(self._venster)
+            return True
+
+        spelers = self._actieve_spelers()
+        if not spelers:
+            return False
+
+        if toets == Qt.Key_Space:
+            self.stop_spoelen()
+            # Eén beslissing voor alle spelers: loopt er beeld, dan stopt het allemaal.
+            # Per speler los beslissen laat twee video's naast elkaar uit de pas lopen.
+            if self._loopt(spelers):
+                self._pauzeer(spelers)
+            elif self._op_afspelen is not None:
+                self._op_afspelen(True)
+            else:
+                for sp in spelers:
+                    sp.speel()
+        elif toets in (Qt.Key_Left, Qt.Key_Right):
+            self.stop_spoelen()
+            self._pauzeer(spelers)
+            stap = 1 if toets == Qt.Key_Right else -1
+            for sp in spelers:
+                sp.ga_naar(sp.huidige_idx + stap)
+        elif toets == Qt.Key_Home:
+            self.stop_spoelen()
+            for sp in spelers:
+                sp.ga_naar(0)
+        elif toets == Qt.Key_End:
+            self.stop_spoelen()
+            for sp in spelers:
+                sp.ga_naar(len(sp.resultaten) - 1)
+        else:
+            return False
+        return True
+
+
 class VergelijkKant(QWidget):
     """
     Eén kant van de vergelijkpagina: kop met de gekozen analyse, een eigen VideoSpeler,
@@ -3077,6 +3320,9 @@ class FragmentKiezer(QDialog):
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
+        self.lbl_spoel = QLabel("")
+        self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
+
         self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
                                   toon_overlay=False)
         self.speler.op_frame_getoond = self._frame_getoond
@@ -3106,6 +3352,7 @@ class FragmentKiezer(QDialog):
         knop_ga.setMaximumWidth(48)
         knop_ga.clicked.connect(self._ga_naar_tijd)
         rij_nav.addWidget(knop_ga)
+        rij_nav.addWidget(self.lbl_spoel)
         rij_nav.addStretch(1)
         v.addWidget(rij_nav)
 
@@ -3154,9 +3401,11 @@ class FragmentKiezer(QDialog):
         v.addWidget(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
 
-        QShortcut(QKeySequence("S"), self, activated=self._start_fragment)
-        QShortcut(QKeySequence("E"), self, activated=self._stop_fragment)
-        QShortcut(QKeySequence(Qt.Key_Delete), self, activated=self._verwijder_selectie)
+        hulp = QLabel(toetsen_hulp("<b>S</b> start fragment", "<b>E</b> stop fragment",
+                                   "<b>Del</b> fragment weg"))
+        hulp.setWordWrap(True)
+        hulp.setStyleSheet("color: #888;")
+        v.addWidget(hulp)
 
         # Lege FrameResultaat-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is nog niets geanalyseerd. `kader_reeks` geeft dan None en de zoom blijft handmatig.
@@ -3167,6 +3416,15 @@ class FragmentKiezer(QDialog):
                                f["titel"] or "") for f in gedaan])
         self.speler.ga_naar(0)
         self._werk_bij()
+
+        # Dezelfde toetsen als overal, plus S/E/Del voor het markeren. Bewust géén QShortcut
+        # meer voor die drie: een letter-shortcut vuurt óók terwijl je in het "ga naar"-veld
+        # typt, en het filter laat een gefocust tekstveld juist met rust.
+        self.toetsen = SpelerToetsen(
+            self, lambda: [self.speler],
+            extra={Qt.Key_S: self._start_fragment, Qt.Key_E: self._stop_fragment,
+                   Qt.Key_Delete: self._verwijder_selectie},
+            op_spoel=self.lbl_spoel.setText)
 
         # Pas nadat alles er staat: dan kan de klem in zet_venstergrootte tegen een
         # definitieve layout aan rekenen (en een `resize()` wordt genegeerd zodra de inhoud
@@ -3289,9 +3547,17 @@ class FragmentKiezer(QDialog):
         return [(start, eind, f"{self._stam} {_tijd_tekst(start, self.fps).replace(':', '-')}")
                 for start, eind in sorted(self._fragmenten)]
 
+    def changeEvent(self, event):
+        # Niet meer actief (alt-tab, een melding ervoor) → de key-release komt nooit binnen
+        # en het spoelen zou eindeloos doorlopen.
+        if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
+            self.toetsen.stop_spoelen()
+        super().changeEvent(event)
+
     def done(self, resultaat):
         # Niet closeEvent: een modale dialoog die via accept()/reject() sluit krijgt er geen.
         # Het videobestand moet los, anders houdt Windows de opname vast.
+        self.toetsen.losmaken()
         self.speler.sluit()
         super().done(resultaat)
 
@@ -3378,8 +3644,8 @@ class BekijkVenster(QDialog):
       * **volledig scherm** — je kijkt naar techniek, niet naar knoppen (F11 → venster);
       * **inzoomen en vertragen** komen ongewijzigd uit `VideoSpeler` (muiswiel/zoomregelaar
         en de snelheidcombo tot 1/16×);
-      * **`.` en `,` spoelen op 6×** door de opname, met de wandklok als maat (zie
-        `_spoel_tick`), zodat het echt 6× is en niet "zo snel als de decoder toevallig kan";
+      * de **standaardtoetsen** (spatie, `.`/`,`, pijltjes, Home/End) uit `SpelerToetsen` —
+        hier bedacht, maar sindsdien overal in de app dezelfde;
       * **punten** die je op een frame zet en die bewaard blijven (`bron_markering`), zodat
         dezelfde sprong of afzet er de volgende sessie nog staat — en in de gedeelde
         bibliotheek ook voor een collega.
@@ -3401,9 +3667,6 @@ class BekijkVenster(QDialog):
         self.fps = info.fps or 30.0
         self._punten = []           # rijen uit bron_markering, op framenummer gesorteerd
         self._vullen = False        # onderdrukt itemChanged tijdens het opbouwen
-        self._spoel_richting = 0    # −1 terug, 0 stil, +1 vooruit
-        self._spoel_vanaf = 0
-        self._spoel_t0 = 0.0
 
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
@@ -3442,17 +3705,11 @@ class BekijkVenster(QDialog):
         self.splitter.setStretchFactor(1, 0)
         v.addWidget(self.splitter, stretch=1)
 
-        hulp = QLabel(
-            "<b>Spatie</b> pauze · <b>.</b> doorspoelen 6× · <b>,</b> terugspoelen 6× · "
-            "<b>&larr;/&rarr;</b> één frame · <b>P</b> punt zetten · <b>1&ndash;9</b> naar "
-            "punt · <b>Del</b> punt weg · muiswiel zoomt · <b>F11</b> venster · "
-            "<b>Esc</b> sluiten")
+        hulp = QLabel(toetsen_hulp("<b>P</b> punt zetten", "<b>1&ndash;9</b> naar punt",
+                                   "<b>Del</b> punt weg", "<b>Esc</b> sluiten"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         v.addWidget(hulp)
-
-        self._spoel_timer = QTimer(self)
-        self._spoel_timer.timeout.connect(self._spoel_tick)
 
         # Lege FrameResultaat-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is hier per definitie niets geanalyseerd — dat is de hele bedoeling.
@@ -3462,9 +3719,12 @@ class BekijkVenster(QDialog):
         self._vernieuw_punten()
         self.speler.ga_naar(0)
 
-        # De toetsen moeten werken waar de focus ook staat (een knop slikt spatie, een
-        # slider de pijltjes), dus filteren we op app-niveau zolang dit venster actief is.
-        QApplication.instance().installEventFilter(self)
+        # De standaardtoetsen, plus de punten-toetsen die alleen hier bestaan.
+        extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
+        for n in range(9):
+            extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
+        self.toetsen = SpelerToetsen(self, lambda: [self.speler], extra=extra,
+                                     op_spoel=self.lbl_spoel.setText)
 
         # Eerst een normale maat zetten en dán pas volledig scherm: F11 heeft anders geen
         # zinnige geometrie om naar terug te vallen.
@@ -3604,45 +3864,6 @@ class BekijkVenster(QDialog):
             self.tabel.selectRow(index)
             self._ga_naar_punt(index)
 
-    # ── Doorspoelen met . en , (6×) ──────────────────────────────────────
-    def _start_spoelen(self, richting):
-        """Begint te spoelen zolang de toets ingedrukt blijft. Het eerste frame gaat er
-        meteen af, zodat een tíkje op de toets één frame opschuift en vasthouden 6× spoelt —
-        allebei manieren waarop zo'n toets gebruikt wordt."""
-        if self._spoel_richting == richting or not self.speler.resultaten:
-            return
-        self.speler.pauzeer()
-        self._spoel_richting = richting
-        self._spoel_vanaf = self.speler.huidige_idx
-        self._spoel_t0 = time.monotonic()
-        self.speler.ga_naar(self._spoel_vanaf + richting)
-        self._spoel_timer.start(SPOEL_TICK_MS)
-        self.lbl_spoel.setText(f"{'▶▶' if richting > 0 else '◀◀'} {SPOEL_FACTOR:g}×")
-
-    def _stop_spoelen(self, richting=None):
-        if self._spoel_richting == 0 or (richting is not None
-                                         and richting != self._spoel_richting):
-            return
-        self._spoel_timer.stop()
-        self._spoel_richting = 0
-        self.lbl_spoel.setText("")
-
-    def _spoel_tick(self):
-        """Het doelframe volgt uit de **wandkloktijd** sinds de toetsdruk, niet uit een vaste
-        stap per tik — hetzelfde motief als de masterklok van de vergelijkpagina. Zo is het
-        echt 6× de opnamesnelheid: haalt de decoder dat niet (achteruit kost elke stap een
-        seek), dan worden er meer frames overgeslagen in plaats van dat het spoelen
-        vertraagt, en er stapelt zich niets op."""
-        verstreken = time.monotonic() - self._spoel_t0
-        stap = max(1, int(round(verstreken * self.fps * SPOEL_FACTOR)))
-        doel = self._spoel_vanaf + self._spoel_richting * stap
-        laatste = len(self.speler.resultaten) - 1
-        if doel <= 0 or doel >= laatste:
-            self.speler.ga_naar(max(0, min(doel, laatste)))
-            self._stop_spoelen()          # begin/eind bereikt: er valt niets meer te spoelen
-            return
-        self.speler.ga_naar(doel)
-
     # ── Weergave ─────────────────────────────────────────────────────────
     def _frame_getoond(self, idx):
         self.balk.zet(cursor=idx)
@@ -3653,85 +3874,19 @@ class BekijkVenster(QDialog):
         self.btn_paneel.setText("Punten verbergen" if zichtbaar else "Punten tonen")
 
     def _toggle_volledig_scherm(self):
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
-
-    # ── Toetsen ──────────────────────────────────────────────────────────
-    def eventFilter(self, obj, event):
-        """App-brede toetsafhandeling zolang dít venster het actieve is.
-
-        Waarom geen gewone `keyPressEvent`: na één muisklik staat de focus op een knop of op
-        de tijdlijn, en die slikken respectievelijk spatie en de pijltjestoetsen voordat het
-        venster ze ziet. Een filter op de applicatie krijgt ze als eerste. Tekstinvoer is de
-        uitzondering — daar hoort een punt of komma gewoon in de tekst te belanden.
-        """
-        # Dit filter krijgt élk event van de hele applicatie langs, dus deze eerste tak
-        # moet kort zijn: geen toets → meteen terug (False = "niet afgehandeld", precies wat
-        # QObject.eventFilter ook zou doen).
-        soort = event.type()
-        if soort not in (QEvent.KeyPress, QEvent.KeyRelease) or not self.isActiveWindow():
-            return False
-        if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
-            return False
-
-        toets = event.key()
-        richting = {Qt.Key_Period: 1, Qt.Key_Comma: -1}.get(toets)
-        if richting is not None:
-            # Autorepeat overslaan: tijdens het vasthouden stuurt Windows een stroom
-            # press/release-paren, en die zouden het spoelen elke ~30 ms opnieuw starten —
-            # waarmee de wandklok telkens op nul valt en er niets meer opschiet.
-            if not event.isAutoRepeat():
-                if soort == QEvent.KeyPress:
-                    self._start_spoelen(richting)
-                else:
-                    self._stop_spoelen(richting)
-            return True
-        if soort != QEvent.KeyPress:
-            return False
-
-        if toets == Qt.Key_Space:
-            self._stop_spoelen()
-            if self.speler.speelt():
-                self.speler.pauzeer()
-            else:
-                self.speler.speel()
-        elif toets in (Qt.Key_Left, Qt.Key_Right):
-            self._stop_spoelen()
-            self.speler.pauzeer()
-            self.speler.ga_naar(self.speler.huidige_idx
-                                + (1 if toets == Qt.Key_Right else -1))
-        elif toets == Qt.Key_Home:
-            self.speler.ga_naar(0)
-        elif toets == Qt.Key_End:
-            self.speler.ga_naar(len(self.speler.resultaten) - 1)
-        elif toets == Qt.Key_P:
-            self._zet_punt()
-        elif toets == Qt.Key_Delete:
-            self._verwijder_punt()
-        elif toets == Qt.Key_F11:
-            self._toggle_volledig_scherm()
-        elif Qt.Key_1 <= toets <= Qt.Key_9:
-            self._ga_naar_punt(toets - Qt.Key_1)
-        else:
-            return False
-        return True
+        wissel_volledig_scherm(self)
 
     def changeEvent(self, event):
         # Gaat het venster van actief naar inactief (alt-tab, een melding ervoor), dan komt
         # de key-release nooit meer binnen en zou het spoelen eindeloos doorlopen.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
-            self._stop_spoelen()
+            self.toetsen.stop_spoelen()
         super().changeEvent(event)
 
     def done(self, resultaat):
         # Niet closeEvent: een modale dialoog die via accept()/reject() sluit krijgt er geen.
         # Het videobestand moet los, anders houdt Windows de opname vast.
-        self._stop_spoelen()
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
+        self.toetsen.losmaken()
         self.speler.sluit()
         super().done(resultaat)
 
@@ -3816,6 +3971,10 @@ class MainWindow(QMainWindow):
         self._handmatig = {}        # {frame_idx: set(landmark_idx)} — alleen voor de overlay-markering
         self._plaats = None         # lopende plaats-reeks, zie _start_plaatsen
 
+        # De toetsafhandeling van de twee pagina's met beeld (gevuld in _bouw_ui). Als lijst,
+        # want `changeEvent` kan door Qt aangeroepen worden vóórdat het venster er staat.
+        self._toetsen = []
+
         # Vergelijkpagina: één masterklok voor "Start alles" (zie _alles_tick)
         self._alles_timer = QTimer(self)
         self._alles_timer.timeout.connect(self._alles_tick)
@@ -3859,6 +4018,49 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.pagina_analyse)
         self.stack.addWidget(self.pagina_vergelijk)
         self.stack.setCurrentWidget(self.pagina_start)
+
+        # Drie permanente statusbalk-widgets: hoeveel frames een skelet hebben (dekking), of
+        # er gespoeld wordt, en de live-status van het huidige frame. Permanent, want
+        # showMessage() overschrijft de gewone statusbalk-tekst en de dekking moet altijd
+        # afleesbaar blijven.
+        self.lbl_dekking = QLabel("")
+        self.lbl_dekking.setToolTip(
+            "Aantal frames met een skelet (gedetecteerd of handmatig geplaatst).\n"
+            "Frames zonder skelet breken een afzetmeting af — met '✏ Bewerken' zijn ze "
+            "handmatig aan te vullen.")
+        self.statusBar().addPermanentWidget(self.lbl_dekking)
+        self.lbl_spoel = QLabel("")
+        self.lbl_spoel.setStyleSheet("color: #5aaaf0; padding-right: 10px;")
+        self.statusBar().addPermanentWidget(self.lbl_spoel)
+        self.lbl_live = QLabel("")
+        self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
+        self.statusBar().addPermanentWidget(self.lbl_live)
+        self.statusBar().showMessage(
+            f"Kies een schaatser en start of open een analyse.  ·  backend: {BACKEND_NAAM}")
+
+        # Dezelfde toetsen als in het kijk- en knipvenster, hier voor de twee pagina's met
+        # beeld. Twee losse objecten en niet één met een pagina-tak halverwege de
+        # afhandeling: op de vergelijkpagina zijn er twee spelers tegelijk te sturen en
+        # bedient spatie de masterklok (anders lopen de kanten binnen seconden uit de pas),
+        # en dat verschil hoort in de opbouw te staan.
+        #
+        # Beide moeten bestaan vóór de `currentChanged`-haak hieronder, want die loopt via
+        # `_pauzeer_alles` en dat stopt ook een lopende spoelactie.
+        self.toetsen_analyse = SpelerToetsen(
+            self, lambda: [self.speler], op_spoel=self.lbl_spoel.setText,
+            actief=lambda: self.stack.currentWidget() is self.pagina_analyse)
+        self.toetsen_vergelijk = SpelerToetsen(
+            self,
+            lambda: [k.speler for k in (self.kant_links, self.kant_rechts)
+                     if k.heeft_analyse()],
+            op_spoel=self.lbl_spoel.setText,
+            op_afspelen=self._toetsen_vergelijk_afspelen,
+            speelt=lambda: (self._alles_timer.isActive()
+                            or self.kant_links.speler.speelt()
+                            or self.kant_rechts.speler.speelt()),
+            actief=lambda: self.stack.currentWidget() is self.pagina_vergelijk)
+        self._toetsen = [self.toetsen_analyse, self.toetsen_vergelijk]
+
         # Eén haak i.p.v. bij elke setCurrentWidget-aanroep: een verlaten pagina mag niet
         # doordecoderen op de achtergrond.
         self.stack.currentChanged.connect(self._paginawissel)
@@ -3876,25 +4078,20 @@ class MainWindow(QMainWindow):
         cv.addWidget(self.voortgang_balk)
         self.setCentralWidget(centraal)
 
-        # Twee permanente statusbalk-widgets: hoeveel frames een skelet hebben (dekking) en
-        # de live-status van het huidige frame. Permanent, want showMessage() overschrijft
-        # de gewone statusbalk-tekst en de dekking moet altijd afleesbaar blijven.
-        self.lbl_dekking = QLabel("")
-        self.lbl_dekking.setToolTip(
-            "Aantal frames met een skelet (gedetecteerd of handmatig geplaatst).\n"
-            "Frames zonder skelet breken een afzetmeting af — met '✏ Bewerken' zijn ze "
-            "handmatig aan te vullen.")
-        self.statusBar().addPermanentWidget(self.lbl_dekking)
-        self.lbl_live = QLabel("")
-        self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
-        self.statusBar().addPermanentWidget(self.lbl_live)
-        self.statusBar().showMessage(
-            f"Kies een schaatser en start of open een analyse.  ·  backend: {BACKEND_NAAM}")
+    def _toetsen_vergelijk_afspelen(self, speel):
+        """Spatie op de vergelijkpagina bedient de masterklok, niet de twee spelers los —
+        twee losse frame-timers lopen binnen seconden uit de pas (zie `_start_alles`)."""
+        if speel:
+            self._start_alles()
+        else:
+            self._pauzeer_alles()
 
     def _pauzeer_alles(self):
-        """Stopt elke lopende weergave (analysepagina én beide vergelijk-spelers).
-        Idempotent, dus veilig om overal aan te roepen."""
+        """Stopt elke lopende weergave (analysepagina én beide vergelijk-spelers), inclusief
+        een lopende spoelactie. Idempotent, dus veilig om overal aan te roepen."""
         self._stop_alles()
+        for toetsen in self._toetsen:
+            toetsen.stop_spoelen()
         self.speler.pauzeer()
         for kant in (self.kant_links, self.kant_rechts):
             kant.speler.pauzeer()
@@ -4408,6 +4605,13 @@ class MainWindow(QMainWindow):
 
         balk.addStretch(1)
         v.addLayout(balk)
+
+        # Dezelfde toetsen als elders, maar ze sturen hier beide kanten tegelijk — dat is
+        # het enige wat op deze pagina anders is en hoort er dus bij te staan.
+        hulp = QLabel(toetsen_hulp("beide kanten tegelijk"))
+        hulp.setWordWrap(True)
+        hulp.setStyleSheet("color: #888;")
+        v.addWidget(hulp)
         return paneel
 
     def _bouw_videopaneel(self):
@@ -4529,6 +4733,13 @@ class MainWindow(QMainWindow):
         self.plaats_balk.addWidget(self.btn_plaats_annuleer)
         self.plaats_balk.setVisible(False)
         self.speler.voeg_onderbalk(self.plaats_balk)
+
+        # Dezelfde regel als onder het knip- en kijkvenster: de toetsen zijn overal gelijk,
+        # dus hoort de opsomming dat ook te zijn (zie VIDEO_TOETSEN_HULP).
+        hulp = QLabel(toetsen_hulp("<b>Ctrl+Z / Ctrl+Y</b> bewerking terug/opnieuw"))
+        hulp.setWordWrap(True)
+        hulp.setStyleSheet("color: #888;")
+        self.speler.voeg_onderbalk(hulp)
 
         # Sneltoetsen voor undo/redo (alleen actief in bewerk-modus, zie de handlers).
         QShortcut(QKeySequence.Undo, self).activated.connect(self._undo_edit)
@@ -6773,6 +6984,14 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    def changeEvent(self, event):
+        # Niet meer het actieve venster (alt-tab, een modale dialoog ervoor): de key-release
+        # van . of , komt dan nooit binnen en het spoelen zou eindeloos doorlopen.
+        if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
+            for toetsen in self._toetsen:
+                toetsen.stop_spoelen()
+        super().changeEvent(event)
+
     def closeEvent(self, event):
         if not self._stop_workers():
             event.ignore()
@@ -6780,6 +6999,8 @@ class MainWindow(QMainWindow):
         self._stop_lokaal_proef()
         self._stop_plaatsen()   # een lopende reeks nog vastleggen of terugdraaien
         self._pauzeer_alles()
+        for toetsen in self._toetsen:
+            toetsen.losmaken()
         self.speler.sluit()
         self.kant_links.leeg()
         self.kant_rechts.leeg()
