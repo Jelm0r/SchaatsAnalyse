@@ -222,7 +222,22 @@ from schaats_analyse import (
     torso_centroid, kader_reeks, maak_voorvulling, bepaal_bocht_reeks,
     FrameResultaat, video_info, knip_fragmenten, KnipAfgebroken,
     ONV_AFGEKAPT, ONV_GEEN_PUSH, app_dir, is_bevroren,
+    open_video, is_interlaced,
 )
+
+# Interlacing (kamtanden): een camcorder die 1080i opneemt weeft twee momenten van 1/50 s
+# uit elkaar in één frame. Een mediaspeler deïnterlacet bij het afspelen, OpenCV niet —
+# dus zonder filter ziet zowel de trainer als de pose-detector de kam. Zie `deinterlace`
+# in schaats_analyse voor de meting die erachter zit.
+DEINT_TOOLTIP = (
+    "Camcorderbeeld (1080i) bestaat uit twee halve beelden van 1/50 s uit elkaar,\n"
+    "samengeweven tot één frame. Op een bewegend been staan die twee helften op een\n"
+    "andere plek — de kamtanden die je in beeld ziet.\n\n"
+    "Gemeten op dit soort materiaal liggen de twee helften op knieën en enkels 6 px\n"
+    "uit elkaar; met '2 px keypointfout = 2-4° hoekfout' is dat de grootste ruisbron\n"
+    "die er in zulke opnames zit. Het filter haalt ze eruit.\n\n"
+    "Wordt per video zelf vastgesteld; progressief materiaal (telefoon, GoPro) wordt\n"
+    "niet aangeraakt. Uitzetten alleen om een A/B te draaien.")
 
 # Skelet-editor (fase 3)
 # De handle-/grijpradius schaalt mee met de schaatser: een vaste fractie van de torso-lengte
@@ -1414,7 +1429,8 @@ class AnalyseWorker(QThread):
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
                  perspectief=None, bieb=None, schaatser_id=None, titel=None,
-                 instellingen=None, backend=None, aangemaakt_door="", bocht=True):
+                 instellingen=None, backend=None, aangemaakt_door="", bocht=True,
+                 deinterlacen=False):
         super().__init__()
         self.input_pad = input_pad
         self.model_pad = model_pad
@@ -1426,6 +1442,7 @@ class AnalyseWorker(QThread):
         self.auto_horizon = auto_horizon
         self.smooth_landmarks = smooth_landmarks
         self.bocht = bocht
+        self.deinterlacen = deinterlacen
         self.perspectief = perspectief
         self.bieb = bieb
         self.schaatser_id = schaatser_id
@@ -1453,6 +1470,7 @@ class AnalyseWorker(QThread):
                 horizon_deg=self.horizon_deg, auto_horizon=self.auto_horizon,
                 smooth_landmarks=self.smooth_landmarks, perspectief=self.perspectief,
                 waarschuwing_callback=self.waarschuwing.emit, bocht=self.bocht,
+                deinterlacen=self.deinterlacen,
             )
             events = segmenteer_afzetten(resultaten)
         except AnalyseAfgebroken:
@@ -1534,6 +1552,7 @@ class BatchWorker(QThread):
                     smooth_landmarks=taak["smooth_landmarks"],
                     perspectief=taak.get("perspectief"),
                     waarschuwing_callback=_waarschuw, bocht=taak.get("bocht", True),
+                    deinterlacen=taak.get("deinterlacen", False),
                 )
                 events = segmenteer_afzetten(resultaten)
                 if resultaten and all(r.bocht for r in resultaten):
@@ -1673,6 +1692,11 @@ class NieuweAnalyseDialog(QDialog):
         self.chk_bocht.setToolTip(BOCHT_TOOLTIP)
         fv.addWidget(self.chk_bocht)
 
+        self.chk_deint = QCheckBox("Interlacing wegfilteren (kamtanden)")
+        self.chk_deint.setToolTip(DEINT_TOOLTIP)
+        self.chk_deint.setEnabled(False)         # pas te bedienen als er een video ligt
+        fv.addWidget(self.chk_deint)
+
         self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (experimenteel)")
         self.chk_perspectief.setToolTip(PERSPECTIEF_TOOLTIP)
         fv.addWidget(self.chk_perspectief)
@@ -1705,10 +1729,31 @@ class NieuweAnalyseDialog(QDialog):
         if not self.veld_titel.text().strip():
             self.veld_titel.setText(os.path.splitext(os.path.basename(pad))[0])
         self._ok.setEnabled(True)
+        self._toets_interlacing(pad)
+
+    def _toets_interlacing(self, pad):
+        """Zet het kamfilter-vinkje op wat deze video nodig heeft. Meteen hier en niet pas
+        tijdens de analyse, zodat de gebruiker ziet wat er gaat gebeuren en het kan
+        overrulen — en zodat de keuze als expliciete waarde in de instellingen belandt."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            interlaced = is_interlaced(pad)
+        except Exception:
+            interlaced = False                   # niet kunnen meten is geen reden om te filteren
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.chk_deint.setEnabled(True)
+        self.chk_deint.setChecked(interlaced)
+        self.lbl_video.setText(os.path.basename(pad)
+                               + ("  —  interlaced" if interlaced else ""))
 
     @property
     def schaatser_id(self):
         return self.combo_schaatser.currentData()
+
+    @property
+    def deinterlacen(self):
+        return self.chk_deint.isChecked()
 
     @property
     def titel(self):
@@ -1795,6 +1840,13 @@ class BatchAnalyseDialog(QDialog):
         self.chk_bocht.setChecked(True)
         self.chk_bocht.setToolTip(BOCHT_TOOLTIP)
         fv.addWidget(self.chk_bocht)
+
+        # Per clip bepalen en niet één keer voor de hele batch: een batch kan clips uit
+        # verschillende camera's bevatten, en het antwoord is per bestand goedkoop.
+        self.chk_deint = QCheckBox("Interlacing automatisch wegfilteren (kamtanden)")
+        self.chk_deint.setToolTip(DEINT_TOOLTIP)
+        self.chk_deint.setChecked(True)
+        fv.addWidget(self.chk_deint)
 
         self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (experimenteel)")
         self.chk_perspectief.setToolTip(PERSPECTIEF_TOOLTIP_BATCH)
@@ -2063,6 +2115,11 @@ class AnalyseInfoDialog(QDialog):
             ("Drempel:", f"{inst.get('threshold', '?')}", None),
         ] + heavy_rij + [
             ("Bocht overslaan:", _ja_nee(inst.get("bocht_overslaan")), None),
+            ("Interlacing gefilterd:",
+             _ja_nee(inst.get("deinterlaced")) if "deinterlaced" in inst
+             else "onbekend (van vóór deze functie)",
+             "Camcorderbeeld (1080i) weeft twee momenten van 1/50 s uit elkaar in één\n"
+             "frame. Stond dit aan, dan zijn die kamtanden vóór de detectie weggefilterd."),
             ("Horizon:", horizon, None),
             ("Perspectiefcorrectie:", _ja_nee(inst.get("perspectief_gebruikt")), None),
         ] + _kalibratie_rijen(inst)
@@ -2106,6 +2163,11 @@ class VideoSpeler(QWidget):
         # gedetecteerd" zetten. `toon_overlay=False` slaat het tekenen over en verbergt de
         # laag-vinkjes, die daar toch niets doen.
         self.toon_overlay = toon_overlay
+
+        # Kamfilter voor interlaced bron (zie DEINT_TOOLTIP). Staat het aan, dan krijgt de
+        # speler exact de pixels te zien waarop ook gemeten is — anders zou het skelet op een
+        # ánder beeld liggen dan waaruit het berekend is.
+        self.deinterlacen = False
 
         # `snel_zoeken` ruilt frame-exactheid in voor bruikbaarheid op een lange opname —
         # zie _lees_frame_exact. Alleen aanzetten waar het beeld een kijkje is en geen meting
@@ -2320,7 +2382,7 @@ class VideoSpeler(QWidget):
     def weergave_scaled(self):
         return self._weergave_scaled
 
-    def laad(self, info, resultaten, video_pad):
+    def laad(self, info, resultaten, video_pad, deinterlacen=False):
         """
         Neemt een analyse in gebruik: capture heropenen, zoom resetten, besturing aan.
 
@@ -2356,7 +2418,8 @@ class VideoSpeler(QWidget):
 
         if self.cap is not None:
             self.cap.release()
-        self.cap = cv2.VideoCapture(video_pad)
+        self.deinterlacen = bool(deinterlacen)
+        self.cap = open_video(video_pad, self.deinterlacen)
         self._weergave_pos = 0
         self._laatste_frame = None
         self.huidige_idx = -1
@@ -2476,7 +2539,7 @@ class VideoSpeler(QWidget):
             # Mislukt de seek, dan valt de code hieronder terug op sequentieel spoelen.
         if idx < self._weergave_pos:
             self.cap.release()
-            self.cap = cv2.VideoCapture(self.video_pad)
+            self.cap = open_video(self.video_pad, self.deinterlacen)
             self._weergave_pos = 0
         while self._weergave_pos < idx:
             if not self.cap.grab():
@@ -3095,7 +3158,8 @@ class VergelijkKant(QWidget):
         self.sync_frame = (min(self.sync_frame, max(0, len(data["resultaten"]) - 1))
                            if zelfde else 0)
         self.lbl_titel.setText(f"{schaatser_naam} — {data['titel']}")
-        self.speler.laad(data["info"], data["resultaten"], data["video_pad"])
+        self.speler.laad(data["info"], data["resultaten"], data["video_pad"],
+                         data.get("deinterlaced", False))
         self._vul_tabel()
         self.btn_kies.setText("Wisselen...")
         self.btn_sync.setEnabled(True)
@@ -3298,7 +3362,7 @@ class FragmentKiezer(QDialog):
     geen meting — en `toon_overlay=False`, want er is geen analyse om te tekenen.
     """
 
-    def __init__(self, bron_pad, info, gedaan=(), parent=None):
+    def __init__(self, bron_pad, info, gedaan=(), deinterlacen=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Fragmenten knippen — {os.path.basename(bron_pad)}")
         self.info = info
@@ -3410,7 +3474,7 @@ class FragmentKiezer(QDialog):
         # Lege FrameResultaat-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is nog niets geanalyseerd. `kader_reeks` geeft dan None en de zoom blijft handmatig.
         resultaten = [FrameResultaat(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.laad(info, resultaten, bron_pad)
+        self.speler.laad(info, resultaten, bron_pad, deinterlacen)
         self.balk.zet(totaal=len(resultaten),
                       gedaan=[(f["start_frame"], f["eind_frame"],
                                f["titel"] or "") for f in gedaan])
@@ -3714,7 +3778,7 @@ class BekijkVenster(QDialog):
         # Lege FrameResultaat-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is hier per definitie niets geanalyseerd — dat is de hele bedoeling.
         resultaten = [FrameResultaat(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.laad(info, resultaten, bron["pad"])
+        self.speler.laad(info, resultaten, bron["pad"], bool(bron.get("interlaced")))
         self.balk.zet(totaal=len(resultaten))
         self._vernieuw_punten()
         self.speler.ga_naar(0)
@@ -3936,6 +4000,7 @@ class MainWindow(QMainWindow):
         self.perspectief = None
         self.geen_smoothing = False
         self.bocht_overslaan = True   # bochtframes niet analyseren/meten (checkbox in de dialoog)
+        self.deinterlacen = False     # kamfilter voor interlaced bron (per video vastgesteld)
         # video_info / resultaten / huidige_idx wonen in self.speler (zie de properties
         # hieronder); die wordt in _bouw_ui() aangemaakt en niets vóór die aanroep leest ze.
         self.events = []
@@ -4456,7 +4521,33 @@ class MainWindow(QMainWindow):
                 "toevoegde — de cloudsync is er nog mee bezig.\n\n"
                 "Probeer het opnieuw zodra de download klaar is.")
             return False
-        return self._waarschuw_niet_lokaal(bron)
+        if not self._waarschuw_niet_lokaal(bron):
+            return False
+        # Nu vaststellen, zodat zowel het kijkvenster als het knipvenster het antwoord al
+        # heeft en er niet halverwege een meting van een paar seconden tussen valt.
+        self._bron_interlaced(bron)
+        return True
+
+    def _bron_interlaced(self, bron):
+        """Is deze opname interlaced (kamtanden)? Eén keer meten per opname en het antwoord
+        in de bibliotheek bewaren: het kost een paar seconden — op een streaming Drive meer —
+        terwijl het antwoord nooit verandert. Lukt het meten niet, dan niet filteren: liever
+        het ruwe beeld dan pixels aanraken op grond van een mislukte meting."""
+        if bron.get("interlaced") is not None:
+            return bool(bron["interlaced"])
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            uitkomst = is_interlaced(bron["pad"])
+        except Exception:
+            uitkomst = False
+        finally:
+            QApplication.restoreOverrideCursor()
+        try:
+            schaats_db.zet_bron_interlaced(self.bieb, bron["id"], uitkomst)
+        except Exception:
+            pass                      # meten lukte; alleen het onthouden niet
+        bron["interlaced"] = 1 if uitkomst else 0
+        return uitkomst
 
     def _waarschuw_niet_lokaal(self, bron):
         """Waarschuwt als de opname niet offline op deze pc staat; True = doorgaan.
@@ -5197,6 +5288,7 @@ class MainWindow(QMainWindow):
         self.threshold = dlg.spin_threshold.value()
         self.geen_smoothing = dlg.chk_geen_smoothing.isChecked()
         self.bocht_overslaan = dlg.chk_bocht.isChecked()
+        self.deinterlacen = dlg.deinterlacen
 
         # Wat het .npz níet bevat maar heropenen wél nodig heeft/wil documenteren.
         # (De bocht-vlag per frame zit wél in het npz; dit is puur de instelling.)
@@ -5205,6 +5297,7 @@ class MainWindow(QMainWindow):
             "threshold": self.threshold,
             "smooth_landmarks": not self.geen_smoothing,
             "bocht_overslaan": self.bocht_overslaan,
+            "deinterlaced": self.deinterlacen,
             "doel_punt": list(self.doel_punt) if self.doel_punt else None,
             "horizon_deg": self.horizon_deg,
             "auto_horizon": self.auto_horizon,
@@ -5349,6 +5442,10 @@ class MainWindow(QMainWindow):
             "perspectief_gebruikt": bool(inst.get("perspectief_gebruikt")),
             "perspectief": perspectief,
             "perspectief_fout": persp_fout,
+            # Zo krijgt de speler exact de pixels te zien waarop gemeten is. Een analyse
+            # van vóór deze functie mist de sleutel en toont dus het ruwe beeld — precies
+            # wat er toen ook gemeten is.
+            "deinterlaced": bool(inst.get("deinterlaced")),
         }
 
     def _open_analyse_uit_bibliotheek(self, analyse_id=None):
@@ -5364,6 +5461,7 @@ class MainWindow(QMainWindow):
         # Deze twee stuurt de skelet-editor aan (_na_edit herberekent ermee).
         self.smooth_n = data["smooth_n"]
         self.threshold = data["threshold"]
+        self.deinterlacen = data["deinterlaced"]
         self.perspectief = data["perspectief"]
         if data["perspectief_fout"]:
             QMessageBox.warning(
@@ -5640,7 +5738,8 @@ class MainWindow(QMainWindow):
                                     instellingen=opslag.get("instellingen"),
                                     backend=BACKEND_NAAM,
                                     aangemaakt_door=self.trainer_naam,
-                                    bocht=self.bocht_overslaan)
+                                    bocht=self.bocht_overslaan,
+                                    deinterlacen=self.deinterlacen)
         self.worker.voortgang.connect(self._analyse_voortgang)
         self.worker.status.connect(self._analyse_status)
         self.worker.opslag_fout.connect(self._opslag_fout)
@@ -5779,11 +5878,13 @@ class MainWindow(QMainWindow):
             return
 
         gedaan = schaats_db.bron_fragmenten(self.bieb, bron["id"])
-        dlg = FragmentKiezer(bron["pad"], info, gedaan=gedaan, parent=self)
+        dlg = FragmentKiezer(bron["pad"], info, gedaan=gedaan,
+                             deinterlacen=self._bron_interlaced(bron), parent=self)
         if toon_dialoog(dlg) != QDialog.Accepted or not dlg.fragmenten:
             return
 
-        paden = self._knip_naar_tijdelijk(bron["pad"], dlg.fragmenten, info)
+        paden = self._knip_naar_tijdelijk(bron["pad"], dlg.fragmenten, info,
+                                          deinterlacen=self._bron_interlaced(bron))
         if not paden:
             return
         voorgevuld = [
@@ -5792,7 +5893,7 @@ class MainWindow(QMainWindow):
             for pad, (start, eind, naam) in zip(paden, dlg.fragmenten)]
         self._nieuwe_batch_analyse(voorgevuld=voorgevuld)
 
-    def _knip_naar_tijdelijk(self, bron_pad, fragmenten, info):
+    def _knip_naar_tijdelijk(self, bron_pad, fragmenten, info, deinterlacen=False):
         """Schrijft de gemarkeerde stukken naar een tijdelijke map en retourneert de paden
         (of [] bij afbreken/fout). `sla_analyse_op` kopieert ze daarna zoals altijd naar
         `media/<uuid>/` — één extra kopie van een kort bestandje, niet de moeite om die
@@ -5812,7 +5913,8 @@ class MainWindow(QMainWindow):
         try:
             paden = knip_fragmenten(bron_pad, fragmenten, self._knip_tmpmap,
                                     progress_callback=_melden,
-                                    stop_check=voortgang.wasCanceled, fps=info.fps)
+                                    stop_check=voortgang.wasCanceled, fps=info.fps,
+                                    deinterlacen=deinterlacen)
         except KnipAfgebroken:
             self._ruim_knipmap_op()
             return []
@@ -5868,6 +5970,7 @@ class MainWindow(QMainWindow):
         smooth_n, threshold = dlg.smooth_n, dlg.threshold
         geen_smoothing = dlg.geen_smoothing
         bocht = dlg.chk_bocht.isChecked()
+        deint_auto = dlg.chk_deint.isChecked()
 
         # Perspectiefkalibratie: één keer voor de héle batch. Alle clips van een batch
         # komen in de praktijk uit dezelfde opname (fase 8 knipt ze zo aan), dus dezelfde
@@ -5919,11 +6022,21 @@ class MainWindow(QMainWindow):
                     return
                 horizon_deg, auto_horizon = horizon
 
+            # Per clip, want een batch kan clips uit verschillende camera's bevatten.
+            # Uitgezet in de dialoog = nergens filteren (om een A/B te kunnen draaien).
+            deint = False
+            if deint_auto:
+                try:
+                    deint = is_interlaced(pad)
+                except Exception:
+                    deint = False
+
             instellingen = {
                 "smooth_n": smooth_n,
                 "threshold": threshold,
                 "smooth_landmarks": not geen_smoothing,
                 "bocht_overslaan": bocht,
+                "deinterlaced": deint,
                 "doel_punt": list(doel) if doel else None,
                 "horizon_deg": horizon_deg,
                 "auto_horizon": auto_horizon,
@@ -5937,7 +6050,7 @@ class MainWindow(QMainWindow):
                 "doel_punt": doel, "horizon_deg": horizon_deg, "auto_horizon": auto_horizon,
                 "smooth_landmarks": not geen_smoothing, "smooth_n": smooth_n,
                 "threshold": threshold, "model_pad": model_pad, "instellingen": instellingen,
-                "bocht": bocht, "perspectief": batch_perspectief,
+                "bocht": bocht, "perspectief": batch_perspectief, "deinterlacen": deint,
                 # Fase 8: uit welk stuk van welke opname deze clip komt (None bij een
                 # losse video) — levert straks de grijze blokken in het knipvenster.
                 "bron_id": taak.get("bron_id"),
@@ -6066,7 +6179,7 @@ class MainWindow(QMainWindow):
         self._sluit_plaats_balk()
 
         # Capture heropenen, zoom resetten, besturing aan — toont nog géén frame.
-        self.speler.laad(info, resultaten, self.input_pad)
+        self.speler.laad(info, resultaten, self.input_pad, self.deinterlacen)
 
         self._vul_tabel()
         self._vul_grafiek()

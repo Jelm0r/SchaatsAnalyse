@@ -355,6 +355,168 @@ def video_info(input_pad, force_fps=None):
     return VideoInfo(w, h, fps, totaal)
 
 
+# ---------------------------------------------------------------------------
+# Interlacing (kamtanden)
+# ---------------------------------------------------------------------------
+# Een camcorder die 1080i50 opneemt schiet 50 keer per seconde een hálf beeld (eerst de
+# even rijen, dan de oneven) en weeft die twee 1/50 s uit elkaar liggende momenten tot
+# één frame. Op stilstaande delen zie je daar niets van; op een bewegend been staan de
+# even en de oneven rijen op een ándere plek — de kamtanden. Een mediaspeler deïnterlacet
+# bij het afspelen (via de GPU), OpenCV niet: die levert het geweven frame precies zoals
+# het in het bestand staat, dus zowel het beeld áls de pose-detectie krijgt de kam te zien.
+#
+# Gemeten op `00005.MTS` (AVCHD 1080i50) tegen de progressieve telefoonclips: de twee
+# velden liggen op knieën en enkels **6,1 px** uit elkaar (p90 13,4; max 44), tegen
+# 0,06 px op progressief materiaal. Met "2 px keypointfout = 2–4° hoekfout" (OPNAME.md)
+# is dat in dat materiaal de grootste ruisbron die er is — groter dan wat er
+# algoritmisch nog te winnen valt.
+DEINT_DREMPEL       = 8      # per-pixel kamdrempel op grijswaarden
+DEINT_MIN_KAMPIXELS = 2000   # minder kam in een frame = te weinig beweging om te oordelen
+DEINT_PROEF_FRAMES  = 24     # metingen die `is_interlaced` verzamelt
+DEINT_PROEF_MAX     = 300    # frames die het daarvoor hoogstens doorleest
+DEINT_VERSCHUIVING  = 0.5    # px veldverschuiving waarboven een video interlaced heet
+_DEINT_VENSTER      = 64     # halve venstermaat voor de faseCorrelatie
+_DEINT_KERN = np.ones((7, 3), np.uint8)
+
+
+def _kam_masker(grijs_i16, drempel=DEINT_DREMPEL):
+    """
+    Per pixel: wijkt deze rij van BEIDE verticale buren dezelfde kant op af? Dat is de
+    handtekening van een kam — bij gewoon beelddetail ligt een rij tússen zijn buren in.
+    Verwacht int16 (uint8 loopt over op het verschil).
+    """
+    m = grijs_i16[1:-1]
+    return ((m - grijs_i16[:-2]) * (m - grijs_i16[2:])) > drempel * drempel
+
+
+def deinterlace(frame, drempel=DEINT_DREMPEL):
+    """
+    Haalt de kamtanden uit één frame: waar het beeld kamt worden de **oneven** rijen
+    weggegooid en uit de even rijen geïnterpoleerd, zodat het bewegende deel uit precies
+    één moment komt. Stilstaande delen blijven onaangeroerd op volle verticale resolutie.
+
+    **Eén veld moet winnen.** De voor de hand liggende variant — beide velden middelen —
+    haalt de kam er wél uit maar laat het temporele mengsel staan: elke uitvoerrij is dan
+    nog steeds een mengsel van twee momenten. Gemeten ging de veldverschuiving op
+    knie/enkel daarmee van 6,07 naar 5,52 px, tegen **0,03 px** met deze versie (ffmpeg's
+    `yadif` haalt 0,07 px). Kosten ~18 ms per 1080p-frame — verwaarloosbaar naast de
+    ~2 s/frame van de detectiepass en binnen het budget van 40 ms voor afspelen op 25 fps.
+    """
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
+    # Verticaal uitsmeren zodat een kamgebied als geheel behandeld wordt en er geen losse
+    # rijen tussenuit vallen; [0::2] houdt daarna de oneven absolute rijen over.
+    kam = cv2.dilate(_kam_masker(g, drempel).view(np.uint8), _DEINT_KERN).view(bool)[0::2]
+    uit = frame.copy()
+    interp = cv2.addWeighted(frame[0:-2:2], 0.5, frame[2::2], 0.5, 0.0)
+    uit[1:-1:2] = np.where(kam[:, :, None], interp, frame[1:-1:2])
+    return uit
+
+
+def _veldverschuiving(grijs_i16, cy, cx):
+    """
+    Hoeveel pixels het beeld tussen de twee velden opschuift, gemeten rond (cy, cx) door
+    de even en de oneven rijen met faseCorrelatie op elkaar te leggen. None als het frame
+    te klein is of de correlatie niets oplevert.
+    """
+    h, w = grijs_i16.shape
+    if h < 2 * _DEINT_VENSTER or w < 2 * _DEINT_VENSTER:
+        return None
+    cy = int(np.clip(cy, _DEINT_VENSTER, h - _DEINT_VENSTER))
+    cx = int(np.clip(cx, _DEINT_VENSTER, w - _DEINT_VENSTER))
+    crop = grijs_i16[cy - _DEINT_VENSTER:cy + _DEINT_VENSTER,
+                     cx - _DEINT_VENSTER:cx + _DEINT_VENSTER].astype(np.float32)
+    a, b = crop[0::2], crop[1::2]
+    n = min(len(a), len(b))
+    venster = cv2.createHanningWindow((a.shape[1], n), cv2.CV_32F)
+    (dx, _), respons = cv2.phaseCorrelate(a[:n] * venster, b[:n] * venster, venster)
+    return abs(dx) if respons > 0.15 else None
+
+
+def is_interlaced(input_pad, drempel_px=DEINT_VERSCHUIVING):
+    """
+    Bepaalt of een video interlaced is: liggen de twee velden van een frame op hetzelfde
+    moment (progressief) of 1/50 s uit elkaar (interlaced)?
+
+    Per frame wordt de **dichtste kamcluster** opgezocht — dat is het bewegende object —
+    en daar worden de even en de oneven rijen met faseCorrelatie op elkaar gelegd. Mikken
+    op de mediáne kampixel werkt niet: bij weinig beweging is de kam verspreide
+    compressieruis en landt het venster op stilstaand ijs (gemeten: 6 van 27 clips fout).
+
+    De **kamfractie alleen volstaat evenmin**, hoe verleidelijk goedkoop ook: een kleine,
+    sterk gecomprimeerde clip (832×464) haalde daarop 0,035 tegen ≤ 0,0025 voor al het
+    andere progressieve materiaal, en zou dus onterecht gefilterd worden. Alleen de
+    verschuiving zelf scheidt de twee gevallen; die is per definitie 0 als beide velden
+    van hetzelfde moment komen, wat er ook aan compressie overheen is gegaan.
+
+    Gekalibreerd over de 27 video's in de bibliotheek (26-8-2026): de elf
+    camcorderfragmenten meten 1,59–17,41 px, de zestien progressieve clips 0,00–0,15 px —
+    0 fouten, ~3× marge aan beide kanten van de drempel. Te weinig bewegende frames om te
+    oordelen → False: liever niet filteren dan onnodig pixels aanraken.
+    """
+    cap = cv2.VideoCapture(input_pad)
+    if not cap.isOpened():
+        raise IOError(f"Kan video niet openen: {input_pad}")
+    metingen, bekeken = [], 0
+    try:
+        while len(metingen) < DEINT_PROEF_FRAMES and bekeken < DEINT_PROEF_MAX:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            bekeken += 1
+            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
+            kam = _kam_masker(g)
+            if kam.sum() < DEINT_MIN_KAMPIXELS:
+                continue                      # te weinig beweging: dit frame zegt niets
+            dichtheid = cv2.blur(kam.astype(np.float32), (2 * _DEINT_VENSTER,) * 2)
+            _, _, _, (mx, my) = cv2.minMaxLoc(dichtheid)
+            d = _veldverschuiving(g, my + 1, mx)   # +1: `kam` begint op rij 1
+            if d is not None:
+                metingen.append(d)
+    finally:
+        cap.release()
+    if len(metingen) < 5:
+        return False
+    # p75 en niet de mediaan: de vraag is of het beeld óóit veldverschuiving vertoont, en
+    # een deel van de frames vangt nu eenmaal een moment waarop er weinig beweegt.
+    return float(np.percentile(metingen, 75)) > drempel_px
+
+
+class VideoLezer:
+    """
+    `cv2.VideoCapture` met het kamfilter op read()/retrieve().
+
+    Al het andere (`grab`, `set`, `get`, `isOpened`, `release`) gaat via `__getattr__`
+    door naar de capture, zodat elke bestaande leeslus onveranderd blijft werken —
+    hetzelfde doorgeefluik-patroon als de DirectML-schil in schaats_yolo.
+    """
+
+    def __init__(self, input_pad, drempel=DEINT_DREMPEL):
+        self._cap = cv2.VideoCapture(input_pad)
+        self._drempel = drempel
+
+    def read(self):
+        ret, frame = self._cap.read()
+        return (True, deinterlace(frame, self._drempel)) if ret else (ret, frame)
+
+    def retrieve(self, *args):
+        ret, frame = self._cap.retrieve(*args)
+        return (True, deinterlace(frame, self._drempel)) if ret else (ret, frame)
+
+    def __getattr__(self, naam):
+        if naam == "_cap":                    # nog niet gezet: geen oneindige recursie
+            raise AttributeError(naam)
+        return getattr(self._cap, naam)
+
+
+def open_video(input_pad, deinterlacen=False):
+    """
+    Opent een video, met of zonder kamfilter. **Zonder is het letterlijk een
+    `cv2.VideoCapture`** — voor progressief materiaal verandert er dus niets, ook geen
+    extra Python-aanroep per frame.
+    """
+    return VideoLezer(input_pad) if deinterlacen else cv2.VideoCapture(input_pad)
+
+
 def bereken_hoek_tov_ijs(enkel_xy, knie_xy, horizon_deg=0.0):
     """
     Bereken de hoek van het been t.o.v. het ijs.
@@ -910,7 +1072,7 @@ class DoelTracker:
 
 
 def analyseer_frames(input_pad, model_pad, force_fps=None, num_poses=NUM_POSES_DEFAULT,
-                      doel_punt=None, progress_callback=None):
+                      doel_punt=None, progress_callback=None, deinterlacen=False):
     """
     Generator: detecteert per frame álle schaatsers (multi-pose) en volgt met een
     DoelTracker de doelschaatser. Yield't per frame een FrameResultaat met alleen de
@@ -923,7 +1085,7 @@ def analyseer_frames(input_pad, model_pad, force_fps=None, num_poses=NUM_POSES_D
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision as mp_vision
 
-    cap = cv2.VideoCapture(input_pad)
+    cap = open_video(input_pad, deinterlacen)
     if not cap.isOpened():
         raise IOError(f"Kan video niet openen: {input_pad}")
 
@@ -1268,7 +1430,8 @@ def smooth_landmarks_offline(resultaten, w, h, window_s=SMOOTH_WINDOW_S,
             ]
 
 
-def bepaal_horizon_reeks(input_pad, n_frames, fps, force_fps=None, progress_callback=None):
+def bepaal_horizon_reeks(input_pad, n_frames, fps, force_fps=None, progress_callback=None,
+                         deinterlacen=False):
     """
     Detecteert de ijslijn-kanteling **per frame** (voor een schommelende camera) en
     maakt er een stabiel signaal van: elke frame krijgt `detecteer_ijslijn()`, daarna
@@ -1280,7 +1443,7 @@ def bepaal_horizon_reeks(input_pad, n_frames, fps, force_fps=None, progress_call
     Draait als losse video-pass (backend-onafhankelijk); de decode-kosten vallen weg
     tegen de pose-detectie. Bij géén enkele betrouwbare lijn: alles 0.0.
     """
-    cap = cv2.VideoCapture(input_pad)
+    cap = open_video(input_pad, deinterlacen)
     ruw = []
     while True:
         ret, frame = cap.read()
@@ -1518,7 +1681,7 @@ def _veilige_bestandsnaam(naam):
 
 
 def knip_fragmenten(bron_pad, fragmenten, doelmap, progress_callback=None,
-                    stop_check=None, fps=None):
+                    stop_check=None, fps=None, deinterlacen=False):
     """
     Schrijft de gemarkeerde stukken van een lange opname weg als losse videobestanden
     (ROADMAP fase 8) en retourneert de paden, in dezelfde volgorde als `fragmenten`.
@@ -1544,7 +1707,7 @@ def knip_fragmenten(bron_pad, fragmenten, doelmap, progress_callback=None,
     `progress_callback(frame_nr, totaal)` en `stop_check() -> bool` (afbreken; de reeds
     geschreven bestanden worden dan opgeruimd).
     """
-    cap = cv2.VideoCapture(bron_pad)
+    cap = open_video(bron_pad, deinterlacen)
     if not cap.isOpened():
         raise IOError(f"Kan video niet openen: {bron_pad}")
     fps = fps or cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -2023,7 +2186,8 @@ def fase_voortgang(progress_callback, fase, n_fasen):
 def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, horizon_deg=0.0, auto_horizon=False,
-              perspectief=None, waarschuwing_callback=None, bocht=True):
+              perspectief=None, waarschuwing_callback=None, bocht=True,
+              deinterlacen=None):
     """
     Volledige analyse-pijplijn: multi-pose detectie + doel-tracking (streaming),
     daarna offline landmark-smoothing en het berekenen van de afgeleide grootheden.
@@ -2047,6 +2211,10 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
     machinerie volledig (zie `zet_horizon`/`verwerk_afgeleiden`).
     """
     info = video_info(input_pad, force_fps)
+    # None = zelf uitzoeken (CLI-gemak); de GUI bepaalt het in de dialoog en geeft een
+    # expliciete bool, zodat de keuze zichtbaar is en in de instellingen belandt.
+    if deinterlacen is None:
+        deinterlacen = is_interlaced(input_pad)
     if perspectief is not None:
         auto_horizon = False     # vaste camera per aanname; kalibratie kent de kanteling al
 
@@ -2056,7 +2224,7 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
 
     resultaten = list(analyseer_frames(
         input_pad, model_pad, force_fps=force_fps, num_poses=num_poses,
-        doel_punt=doel_punt, progress_callback=det_cb))
+        doel_punt=doel_punt, progress_callback=det_cb, deinterlacen=deinterlacen))
 
     if smooth_landmarks:
         smooth_landmarks_offline(resultaten, info.w, info.h, fps=info.fps)
@@ -2065,14 +2233,14 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
         bepaal_bocht_reeks(resultaten, info.w, info.h, info.fps)
 
     zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps, hor_cb,
-                perspectief=perspectief)
+                perspectief=perspectief, deinterlacen=deinterlacen)
     verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, smooth_n, threshold,
                        perspectief=perspectief)
     return info, resultaten
 
 
 def zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps=None,
-                progress_callback=None, perspectief=None):
+                progress_callback=None, perspectief=None, deinterlacen=False):
     """
     Vult `r.horizon_deg` per frame: per-frame gedetecteerd bij `auto_horizon`
     (`bepaal_horizon_reeks`), anders de constante `horizon_deg` overal. Gedeeld door
@@ -2090,7 +2258,8 @@ def zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fp
         return
     if auto_horizon:
         horizons = bepaal_horizon_reeks(input_pad, len(resultaten), info.fps,
-                                        force_fps=force_fps, progress_callback=progress_callback)
+                                        force_fps=force_fps, progress_callback=progress_callback,
+                                        deinterlacen=deinterlacen)
         for r, hz in zip(resultaten, horizons):
             r.horizon_deg = hz
     else:
@@ -2331,7 +2500,7 @@ def segmenteer_afzetten(resultaten, min_lengte=3, alternerend=True):
 def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                     num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
                     horizon_deg=0.0, auto_horizon=False, save_npz=None, from_npz=None,
-                    bocht=True):
+                    bocht=True, deinterlacen=None):
     """
     CLI-analyse in twee passes: eerst detecteren/tracken/smoothen (nodig omdat de
     offline smoothing álle frames vereist), daarna de video opnieuw lezen en de
@@ -2349,6 +2518,13 @@ def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.01
             pct = min(100.0, frame_nr / totaal * 100) if totaal > 0 else 0
             print(f"  {frame_nr}/{max(totaal, frame_nr)} frames ({pct:.0f}%)")
 
+    # Eén keer bepalen en aan beide passes meegeven: tekent pass 2 de overlay op ándere
+    # pixels dan pass 1 gemeten heeft, dan klopt het skelet niet meer met het beeld.
+    if deinterlacen is None:
+        deinterlacen = is_interlaced(input_pad)
+    if deinterlacen:
+        print("[INFO] Interlaced bron gedetecteerd: kamtanden worden weggefilterd.")
+
     if from_npz:
         print(f"[INFO] Landmarks laden uit {from_npz} (geen detectie) ...")
         info, resultaten = laad_landmarks(from_npz)
@@ -2360,7 +2536,7 @@ def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.01
             input_pad, model_pad, smooth_n, threshold, force_fps,
             num_poses=num_poses, doel_punt=doel_punt, smooth_landmarks=smooth_landmarks,
             progress_callback=toon_voortgang, horizon_deg=horizon_deg, auto_horizon=auto_horizon,
-            bocht=bocht)
+            bocht=bocht, deinterlacen=deinterlacen)
         n_bocht = sum(1 for r in resultaten if r.bocht)
         if n_bocht:
             print(f"[INFO] {n_bocht} van {len(resultaten)} frames als bocht gemarkeerd "
@@ -2374,7 +2550,7 @@ def analyseer_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.01
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out    = cv2.VideoWriter(output_pad, fourcc, info.fps, (info.w, info.h))
-    cap    = cv2.VideoCapture(input_pad)
+    cap    = open_video(input_pad, deinterlacen)
     idx    = 0
     while cap.isOpened():
         ret, frame = cap.read()
@@ -2421,6 +2597,12 @@ if __name__ == "__main__":
     parser.add_argument("--auto-horizon", action="store_true",
                         help="Detecteer de ijslijn-kanteling automatisch, per frame (voor een "
                              "schommelende camera); overschrijft --horizon.")
+    parser.add_argument("--deinterlace", dest="deinterlace", action="store_true", default=None,
+                        help="Filter kamtanden weg (interlaced camcorderbeeld). Standaard "
+                             "wordt dit per video zelf bepaald; deze vlag forceert het aan.")
+    parser.add_argument("--no-deinterlace", dest="deinterlace", action="store_false",
+                        help="Nooit deinterlacen, ook niet als de video interlaced lijkt "
+                             "(om een A/B te draaien).")
     parser.add_argument("--no-bocht", action="store_true",
                         help="Bochtdetectie uitzetten; ook bochtframes leveren dan (onbruikbare) "
                              "afzetmetingen op.")
@@ -2471,6 +2653,7 @@ if __name__ == "__main__":
         smooth_landmarks=not args.no_smooth,
         horizon_deg=args.horizon,
         auto_horizon=args.auto_horizon,
+        deinterlacen=args.deinterlace,
         save_npz=args.save_npz,
         from_npz=args.from_npz,
         bocht=not args.no_bocht,

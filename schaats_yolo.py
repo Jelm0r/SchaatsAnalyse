@@ -71,7 +71,7 @@ from schaats_analyse import (
     FrameResultaat, Landmark, VideoInfo, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
     bocht_ratio, bepaal_bocht_reeks, NUM_POSES_DEFAULT, BOCHT_IN, BOCHT_UIT,
-    app_dir, data_dir,
+    app_dir, data_dir, open_video, is_interlaced,
 )
 
 BACKEND_NAAM = ("YOLO-pose + ByteTrack + RTMPose-verfijning" if IS_RTMPOSE
@@ -709,7 +709,7 @@ class _BochtWacht:
 
 
 def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callback=None,
-                     bocht=True, waarschuwing_callback=None):
+                     bocht=True, waarschuwing_callback=None, deinterlacen=False):
     """
     Pass 1: YOLO-pose + ByteTrack over de video op hoge resolutie. Retourneert
     `(frames, buiten_meting)`: per frame een lijst Detectie's (alle personen, met
@@ -738,7 +738,7 @@ def _detecteer_alles(input_pad, model, info, imgsz=DETECT_IMGSZ, progress_callba
     # elkaar plakt. Vandaar: elke generatie begint boven de hoogste ID die al vergeven is.
     herstarts, vorige_gen, id_basis, hoogste_tid = 0, 0, 0, 0
     wacht = _BochtWacht(info.fps, w, h, aan=bocht)
-    cap = cv2.VideoCapture(input_pad)
+    cap = open_video(input_pad, deinterlacen)
     if not cap.isOpened():
         raise IOError(f"Kan video niet openen: {input_pad}")
     f = 0
@@ -1162,7 +1162,8 @@ def _maak_rtmpose(waarschuwing_callback=None):
 
 
 def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                       progress_callback=None, rtmpose=None, bocht=None):
+                       progress_callback=None, rtmpose=None, bocht=None,
+                       deinterlacen=False):
     """
     Pass 2: lees de video opnieuw en schat per doel-frame de pose opnieuw, nu met de
     schaatser beeldvullend in het inferentiebeeld → aanzienlijk nauwkeurigere
@@ -1178,7 +1179,7 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
     plan = _interpoleer_doel(doel_per_frame, info.fps, bocht)
     w, h = info.w, info.h
     uit, devs = {}, {}
-    cap = cv2.VideoCapture(input_pad)
+    cap = open_video(input_pad, deinterlacen)
     f = 0
     while True:
         ret, frame = cap.read()
@@ -1408,7 +1409,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, yolo_model=None, horizon_deg=0.0,
               auto_horizon=False, verfijn=True, perspectief=None,
-              waarschuwing_callback=None, bocht=True):
+              waarschuwing_callback=None, bocht=True, deinterlacen=None):
     """
     Volledige analyse via YOLO-pose + ByteTrack + offline doelkeuze + crop-verfijning.
     Signatuur-compatibel met schaats_analyse.analyseer() (`model_pad` — het MediaPipe
@@ -1429,6 +1430,12 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     meten. Met `bocht=False` wordt elk frame geïnfereerd en gemeten, zoals voorheen.
     """
     info = video_info(input_pad, force_fps)
+    # None = zelf uitzoeken (CLI-gemak); de GUI bepaalt het in de dialoog en geeft een
+    # expliciete bool, zodat de keuze zichtbaar is en in de instellingen belandt.
+    # Béíde passes moeten dezelfde pixels zien: verfijnt pass 2 op geweven beeld terwijl
+    # pass 1 gefilterd is, dan meet je twee verschillende video's door elkaar.
+    if deinterlacen is None:
+        deinterlacen = is_interlaced(input_pad)
     model = _laad_yolo(yolo_model or os.path.join(app_dir(), STANDAARD_YOLO_MODEL),
                        waarschuwing_callback)
     if perspectief is not None:
@@ -1447,7 +1454,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     # allebei staan ze in `buiten_meting` en gaan zo de rest van de pijplijn in.
     frames, buiten_meting = _detecteer_alles(input_pad, model, info,
                                              progress_callback=det_cb, bocht=bocht,
-                                             waarschuwing_callback=waarschuwing_callback)
+                                             waarschuwing_callback=waarschuwing_callback,
+                                             deinterlacen=deinterlacen)
     n_frames = len(frames)
 
     # Offline doelkeuze: tracklets → kleur-splits → seed → stitching.
@@ -1498,7 +1506,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
         verfijnd, devs = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
                                             progress_callback=ver_cb,
                                             rtmpose=_maak_rtmpose(waarschuwing_callback),
-                                            bocht=bocht_per_frame)
+                                            bocht=bocht_per_frame,
+                                            deinterlacen=deinterlacen)
     else:
         verfijnd, devs = {}, {}
 
@@ -1516,7 +1525,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
         # gevonden krijgen zo alsnog hun eigen oordeel.
         _bocht_met_controleframes(resultaten, buiten_meting, info)
     zet_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fps, hor_cb,
-                perspectief=perspectief)
+                perspectief=perspectief, deinterlacen=deinterlacen)
     verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, smooth_n, threshold,
                        perspectief=perspectief)
     return info, resultaten

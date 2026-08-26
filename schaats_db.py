@@ -43,7 +43,7 @@ MEDIA_MAP   = "media"
 OPNAMES_MAP = "opnames"              # ruwe, nog niet geknipte opnames (fase 8)
 NPZ_NAAM    = "landmarks.npz"
 NPZ_RUW_NAAM = "landmarks_ruw.npz"   # pristine landmarks vóór de eerste handmatige edit (fase 3)
-SCHEMA_VERSIE = 4   # v2 (fase 4): analyse.video_bytes; v3 (fase 8): bronvideo + analyse.bron_*;
+SCHEMA_VERSIE = 5   # v2 (fase 4): analyse.video_bytes; v3 (fase 8): bronvideo + analyse.bron_*;
                     # v4: bron_markering (punten van het handmatige kijkvenster)
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".wmv")
 
@@ -224,6 +224,7 @@ CREATE TABLE bronvideo(
     status          TEXT NOT NULL DEFAULT 'nog doen',
     notitie         TEXT NOT NULL DEFAULT '',
     bijgewerkt_door TEXT NOT NULL DEFAULT '',    -- wie de status/notitie het laatst zette
+    interlaced      INTEGER,                     -- 1/0, NULL = nog niet vastgesteld (v5)
     toegevoegd_op   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 CREATE TABLE bron_markering(
@@ -328,6 +329,21 @@ def _migreer(con, van):
         # bij de opname (niet bij een analyse), dus ze verdwijnen mee als die rij ooit weg
         # zou vallen. Oude bibliotheken krijgen simpelweg een lege tabel.
         con.execute(_tabel_ddl("bron_markering"))
+    if van < 5:
+        # v4 → v5: onthouden of een opname interlaced is. Het meten kost een paar seconden
+        # per bestand (en op een streaming Drive meer), terwijl het antwoord nooit verandert
+        # — dus één keer vaststellen en bewaren. NULL = nog niet gemeten; niets te raden
+        # voor bestaande rijen.
+        #
+        # Voorwaardelijk, want `_tabel_ddl` levert altijd de níeuwste definitie: een
+        # bibliotheek die `bronvideo` pas hierboven (v2 → v3) heeft gekregen, heeft de
+        # kolom al en zou op een dubbele kolomnaam stuklopen.
+        if not _heeft_kolom(con, "bronvideo", "interlaced"):
+            con.execute("ALTER TABLE bronvideo ADD COLUMN interlaced INTEGER")
+
+
+def _heeft_kolom(con, tabel, kolom):
+    return kolom in [r[1] for r in con.execute(f"PRAGMA table_info({tabel})")]
 
 
 def _tabel_ddl(naam):
@@ -722,6 +738,16 @@ def wijzig_bronvideo(bieb, bron_id, status=None, notitie=None, bijgewerkt_door="
                     waarden + [bron_id])
 
 
+def zet_bron_interlaced(bieb, bron_id, interlaced):
+    """Legt vast of deze opname interlaced is (kamtanden), zodat het niet elke sessie
+    opnieuw gemeten hoeft te worden. Bewust een aparte functie en niet een veld in
+    `wijzig_bronvideo`: dit is een gemeten eigenschap van het bestand, geen keuze van de
+    trainer, en `bijgewerkt_door` hoort er dus níet door te veranderen."""
+    with _verbind(bieb) as con:
+        con.execute("UPDATE bronvideo SET interlaced = ? WHERE id = ?",
+                    (1 if interlaced else 0, bron_id))
+
+
 def bron_fragmenten(bieb, bron_id):
     """De stukken van deze opname die al geanalyseerd zijn: [{analyse_id, titel, schaatser,
     start_frame, eind_frame}], op startframe gesorteerd. Dit levert de grijze blokken in het
@@ -1039,6 +1065,8 @@ if __name__ == "__main__":
             assert c.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSIE
             assert c.execute("SELECT COUNT(*) FROM bron_markering").fetchone()[0] == 0
             assert c.execute("SELECT naam FROM bronvideo").fetchone()[0] == "x.mp4"
+            assert _heeft_kolom(c, "bronvideo", "interlaced")
+            assert c.execute("SELECT interlaced FROM bronvideo").fetchone()[0] is None
 
         # Nieuwere DB (collega met een recentere app): weigeren, niét downgraden.
         nieuw = os.path.join(tmp, "nieuw_v99")
@@ -1179,6 +1207,14 @@ if __name__ == "__main__":
         bron = bronvideo(bieb, bron["id"])
         assert bron["status"] == "bezig" and bron["notitie"] == "tempo-serie"
         assert bron["bijgewerkt_door"] == "Coach Tester"
+
+        assert bron["interlaced"] is None            # nog niet gemeten
+        zet_bron_interlaced(bieb, bron["id"], True)
+        bron = bronvideo(bieb, bron["id"])
+        assert bron["interlaced"] == 1
+        assert bron["bijgewerkt_door"] == "Coach Tester"   # gemeten, niet gewijzigd
+        zet_bron_interlaced(bieb, bron["id"], False)
+        assert bronvideo(bieb, bron["id"])["interlaced"] == 0
 
         # Een analyse die uit een stuk van deze opname geknipt is → grijze blokken.
         assert bron_fragmenten(bieb, bron["id"]) == []
