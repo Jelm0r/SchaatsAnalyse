@@ -443,6 +443,18 @@ Fix: `raise` met een begrijpelijke melding, of een waarschuwing terug naar de GU
 > **Fix:** `_kies_seed` retourneert `(tracklet, klik_gemist)`; bij een gemiste klik gaat
 > er een melding via de nieuwe `waarschuwing_callback` van `analyseer()` naar de GUI
 > (`AnalyseWorker.waarschuwing` → box na afloop; batch → in het eindoverzicht).
+>
+> **Aanvulling 26 augustus 2026 — de klik miste veel te vaak.** Het zoekvenster van 60
+> frames was te kort: de schaatser die je aanwijst is op frame 0 vaak nog te ver weg om
+> gedetecteerd te worden. Op `00005 8-41` dook hij pas op frame 84 (3,4 s) op, dus de
+> klik kon per definitie niemand raken en de trainer kreeg de melding te zien terwijl er
+> niets mis was met zijn klik. Nu: venster `KLIK_ZOEK_S` (6 s, fps-onafhankelijk), en
+> raakt de klik daarbinnen nóg niemand, dan telt de detectie die er het dichtst *naast*
+> stond binnen een poort die per seconde meegroeit. Nagemeten op de gedumpte detecties
+> van die clip: de klik ligt op frame 84 binnen de bbox van de bedoelde schaatser
+> (afstand 0,000) en de keten is identiek aan die van de oude terugval (197 frames,
+> 27–280) — alleen de melding verdwijnt. Een klik die binnen 60 frames al raak was
+> gedraagt zich onveranderd: die lus keert terug op de eerste treffer.
 
 De klik wordt alleen in de eerste `KLIK_ZOEK_FRAMES` (60) frames gezocht. Raakt hij
 niemand, dan volgt zonder enige melding de grootste beweger — mogelijk de andere

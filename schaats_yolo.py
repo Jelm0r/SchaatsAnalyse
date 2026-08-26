@@ -453,7 +453,9 @@ STITCH_OVERLAP_GATE = 0.05   # overlapt een kandidaat de keten, dan moet hij op 
                              # twee ID's, en niet de omstander die de hele clip in beeld staat
 SNELHEID_VENSTER  = 5        # aantal detecties waarover de snelheid wordt geschat
 MIN_VERPLAATSING  = 0.06     # tracklet-padlengte hieronder = statische omstander
-KLIK_ZOEK_FRAMES  = 60       # zolang zoeken we (in frames) naar de aangeklikte schaatser
+KLIK_ZOEK_S       = 6.0      # zolang zoeken we (in seconden) naar de aangeklikte schaatser
+KLIK_POORT_BASIS  = 0.05     # zo ver mag de klik naast een schaatser liggen om hem nog te ...
+KLIK_POORT_GROEI  = 0.02     # ... bedoelen, plus dit per seconde die sinds de klik om is
 SEED_MIN_LEN      = 5        # detecties; een kortere seed geeft een te dunne kleurreferentie
 BOOTSTRAP_MAX_GAP = 3        # frames; zo dichtbij mag een fragment een korte seed aanvullen
 
@@ -871,26 +873,56 @@ def _pad_lengte(tracklet):
         for a, b in zip(tracklet, tracklet[1:])))
 
 
-def _kies_seed(tracklets, frames, doel_punt):
+def _afstand_tot_box(punt, bbox):
+    """Kortste afstand van een punt tot een bounding box; 0 als het punt erin ligt."""
+    x, y = punt
+    return float(np.hypot(max(bbox[0] - x, 0.0, x - bbox[2]),
+                          max(bbox[1] - y, 0.0, y - bbox[3])))
+
+
+def _kies_seed(tracklets, frames, doel_punt, fps=25.0):
     """
-    Kies het start-tracklet. Met muisklik: loop de eerste frames chronologisch af en
-    pak het eerste tracklet waarvan de bounding box het klikpunt bevat (dichtstbijzijnde
-    centroid bij meerdere). Zonder klik: de grootste *beweger* — mediane oppervlakte ×
-    padlengte — zodat statische omstanders langs de boarding nooit gekozen worden.
+    Kies het start-tracklet. Met muisklik in twee stappen; zonder klik: de grootste
+    *beweger* — mediane oppervlakte × padlengte — zodat statische omstanders langs de
+    boarding nooit gekozen worden.
+
+    De klik staat op het eerste frame, maar de schaatser die je aanwijst hoeft daar nog
+    niet gedetecteerd te zijn: ver weg en klein duurt het op echt materiaal secondenlang
+    voor het model hem oppikt (gemeten: 3,4 s op `00005 8-41`). Daarom wordt er
+    `KLIK_ZOEK_S` seconden lang doorgezocht op de plek waar geklikt is:
+
+    1. **Op de klik.** Loop die frames chronologisch af en pak het eerste tracklet waarvan
+       de bounding box het klikpunt bevat (dichtstbijzijnde centroid bij meerdere).
+    2. **Naast de klik.** Nog niemand? Dan wint de detectie waarvan de bounding box het
+       dichtst bij de klik ligt, binnen een poort die per seconde meegroeit — de schaatser
+       is sinds de klik immers opgeschoven. Van de kandidaten wint de kleinste afstand,
+       niet de afstand gedeeld door de poort: dat laatste beloont juist de late gok (zie
+       de nearest-first-regel in `_stik_keten`).
+
+    **Er wordt bewust niet met een constante snelheid teruggerekend** naar het klikframe,
+    zoals `_stik_keten` over zijn gaten doet. Over een gat van een paar frames klopt dat
+    model, maar over seconden niet: de romp zwaait met elke slag zijwaarts mee, en die
+    slagbeweging is veel groter dan de netto verplaatsing. Nagemeten op `00005 8-41`
+    (frontale opname, schaatser komt aanrijden): de x van de romp slingert tussen 0,33 en
+    0,50 terwijl hij netto nauwelijks opschuift, en de snelheid uit vijf frames zet hem
+    teruggerekend op x = −0,001 tot −1,563 — buiten beeld dus. De plek in beeld is hier
+    het betrouwbare signaal, en de klik zelf de beste schatting daarvan.
 
     Retourneert `(tracklet_of_None, klik_gemist)`. `klik_gemist` is True als er wél
-    geklikt is maar niemand onder de klik gevonden werd — dan is stilzwijgend de
-    grootste beweger gekozen en dat hoort de gebruiker te weten (het kan de verkeerde
-    schaatser zijn).
+    geklikt is maar ook stap 2 niemand opleverde — dan is stilzwijgend de grootste
+    beweger gekozen en dat hoort de gebruiker te weten (het kan de verkeerde schaatser
+    zijn).
     """
     klik_gemist = False
     if doel_punt is not None:
         dx, dy = doel_punt
+        venster = min(int(round(max(fps, 1.0) * KLIK_ZOEK_S)), len(frames))
         per_frame = {}
         for t in tracklets:
             for d in t:
-                per_frame.setdefault(d.frame, []).append((d, t))
-        for f in range(min(KLIK_ZOEK_FRAMES, len(frames))):
+                if d.frame < venster:
+                    per_frame.setdefault(d.frame, []).append((d, t))
+        for f in range(venster):
             raak = [(d, t) for d, t in per_frame.get(f, ())
                     if d.bbox[0] - 0.03 <= dx <= d.bbox[2] + 0.03
                     and d.bbox[1] - 0.03 <= dy <= d.bbox[3] + 0.03]
@@ -900,7 +932,18 @@ def _kies_seed(tracklets, frames, doel_punt):
                 lang = [dt for dt in raak if len(dt[1]) >= SEED_MIN_LEN]
                 return min(lang or raak, key=lambda dt: (dt[0].centroid[0] - dx) ** 2
                                                         + (dt[0].centroid[1] - dy) ** 2)[1], False
-        # Niemand onder de klik gevonden → val terug op de grootste beweger, maar meld het.
+        # Stap 2: niemand stond óp de klik — pak wie er het dichtst naast stond, binnen
+        # een poort die meegroeit met de tijd die sinds de klik verstreken is.
+        bij = []
+        for f in range(venster):
+            for d, t in per_frame.get(f, ()):
+                afstand = _afstand_tot_box((dx, dy), d.bbox)
+                if afstand <= KLIK_POORT_BASIS + KLIK_POORT_GROEI * f / max(fps, 1.0):
+                    bij.append((afstand, f, t))
+        if bij:
+            lang = [k for k in bij if len(k[2]) >= SEED_MIN_LEN]
+            return min(lang or bij, key=lambda k: (k[0], k[1]))[2], False
+        # Ook zo niemand → val terug op de grootste beweger, maar meld het.
         klik_gemist = True
     bewegers = [t for t in tracklets if _pad_lengte(t) >= MIN_VERPLAATSING]
     kandidaten = bewegers or tracklets
@@ -1462,7 +1505,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     tracklets = []
     for t in _bouw_tracklets(frames):
         tracklets.extend(_splits_op_kleur(t))
-    seed, klik_gemist = _kies_seed(tracklets, frames, doel_punt)
+    seed, klik_gemist = _kies_seed(tracklets, frames, doel_punt, info.fps)
     if seed is None:
         # Zonder seed blijft doel_per_frame leeg en loopt de rest van de pijplijn
         # gewoon door: geen enkel frame krijgt een pose en de GUI meldt "0 afzetten"
@@ -1473,9 +1516,10 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
             "video leesbaar is (codec/resolutie), en probeer eventueel een andere clip.")
     if klik_gemist and waarschuwing_callback is not None:
         waarschuwing_callback(
-            "Je klik kon niet aan een schaatser gekoppeld worden — op die plek is in "
-            "de eerste seconden niemand gedetecteerd. Er is nu de grootste beweger in "
-            "beeld gevolgd; controleer of dat de bedoelde schaatser is.")
+            f"Je klik kon niet aan een schaatser gekoppeld worden — op die plek is in "
+            f"de eerste {KLIK_ZOEK_S:.0f} seconden niemand gedetecteerd, ook niet vlak "
+            f"ernaast. Er is nu de grootste beweger in beeld gevolgd; controleer of dat "
+            f"de bedoelde schaatser is.")
 
     keten, ref = _stik_keten(seed, tracklets, info.fps)
     doel_per_frame = {d.frame: d for d in keten}
@@ -1635,5 +1679,74 @@ def _zelftest_bochtwacht():
     print("Zelftest _BochtWacht OK")
 
 
+def _zelftest_seed():
+    """
+    Toetst `_kies_seed` op synthetische tracklets — geen video, geen model. Het geval dat
+    ertoe doet is de schaatser die op het klikframe nog te ver weg is om gedetecteerd te
+    worden: dan moet de klik alsnog bij hém uitkomen en niet stilzwijgend bij de grootste
+    beweger. De cijfers hieronder zijn die van `00005 8-41`, de clip waarop dit misging.
+    Draaien met `python schaats_yolo.py`.
+    """
+    FPS = 25.0
+    KLIK = (0.391, 0.212)
+
+    def _tracklet(tid, start, n, x0, y0, zwaai=0.0, drift=(0.0, 0.0),
+                  breedte=0.03, hoogte=0.09):
+        """Schaatser die om (x0, y0) heen zwaait (één slag per 25 frames) en langzaam
+        wegdrijft — de beweging van een frontaal aanrijdende schaatser."""
+        dets = []
+        for k in range(n):
+            x = x0 + zwaai * float(np.sin(2 * np.pi * k / 25)) + drift[0] * k
+            y = y0 + drift[1] * k
+            dets.append(Detectie(frame=start + k, tid=tid, centroid=(x, y),
+                                 bbox=(x - breedte / 2, y - hoogte / 2,
+                                       x + breedte / 2, y + hoogte / 2),
+                                 area=breedte * hoogte,
+                                 lm=[Landmark(0.0, 0.0, 0.0, 0.0) for _ in range(33)]))
+        return dets
+
+    N = 281
+    frames = [[] for _ in range(N)]
+    # De aangeklikte schaatser: pas vanaf frame 84 (3,4 s) groot genoeg om gedetecteerd
+    # te worden, dan vlak naast de klik, zwaaiend met elke slag. Daarnaast een grotere
+    # schaatser die vanaf frame 0 wél gezien wordt — de oude terugval koos díe.
+    doel = _tracklet(1, 84, 197, 0.40, 0.23, zwaai=0.06, drift=(0.0, 0.0007))
+    ander = _tracklet(2, 0, 200, 0.75, 0.55, zwaai=0.05, drift=(-0.001, 0.0005),
+                      breedte=0.10, hoogte=0.30)
+    for t in (doel, ander):
+        for d in t:
+            frames[d.frame].append(d)
+
+    # 1. De klik hoort bij de schaatser die pas seconden later gedetecteerd wordt.
+    seed, gemist = _kies_seed([doel, ander], frames, KLIK, FPS)
+    assert not gemist, "klik op een nog niet gedetecteerde schaatser gold als gemist"
+    assert seed is doel, "de klik kwam bij de verkeerde schaatser uit"
+
+    # 2. Een klik op niemand blijft een gemiste klik: liever de grootste beweger mét
+    #    melding dan een willekeurige schaatser als 'jouw klik'.
+    seed, gemist = _kies_seed([doel, ander], frames, (0.03, 0.95), FPS)
+    assert gemist and seed is ander, "klik in het niets leverde geen nette terugval op"
+
+    # 3. Staat er wél iemand op de klik, dan wint die onverkort — het naast-de-klik-zoeken
+    #    mag een gewone treffer nooit overrulen.
+    seed, gemist = _kies_seed([doel, ander], frames, (0.75, 0.55), FPS)
+    assert not gemist and seed is ander, "directe treffer op de klik ging verloren"
+
+    # 4. De poort moet ook echt sluiten: een schaatser die aan de andere kant van het
+    #    beeld rijdt hoort niet alsnog als 'jouw klik' te gelden.
+    ver = _tracklet(3, 20, 100, 0.90, 0.80)
+    seed, gemist = _kies_seed([ver], frames, (0.10, 0.15), FPS)
+    assert gemist, "een schaatser ver buiten de poort werd toch als de klik gelezen"
+
+    # 5. En het zoekvenster is eindig: wie pas ná KLIK_ZOEK_S over de klik rijdt, is een
+    #    voorbijganger en niet de schaatser die je aanwees.
+    laat = _tracklet(4, int(FPS * KLIK_ZOEK_S) + 10, 60, KLIK[0], KLIK[1])
+    seed, gemist = _kies_seed([laat, ander], frames, KLIK, FPS)
+    assert gemist, "een schaatser buiten het zoekvenster werd toch als de klik gelezen"
+
+    print("Zelftest _kies_seed OK")
+
+
 if __name__ == '__main__':
     _zelftest_bochtwacht()
+    _zelftest_seed()
