@@ -53,7 +53,8 @@ from PySide6.QtCore import (
     QMargins, QObject, QtMsgType, qInstallMessageHandler,
 )
 from PySide6.QtGui import (
-    QImage, QPixmap, QAction, QColor, QPainter, QPen, QShortcut, QKeySequence, QFont,
+    QImage, QPixmap, QAction, QColor, QPainter, QPen, QPainterPath, QShortcut,
+    QKeySequence, QFont,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -297,6 +298,42 @@ KADER_MAX_VERGROTING = 2.5   # max. schermpixels per videopixel bij automatische
 # landmarks houden op bij de neus en de tenen, terwijl de bovenkant van het hoofd en de
 # ijzers er nog buiten steken — en een schaatser strak tegen de rand kijkt niet prettig.
 KADER_MARGE = 0.15
+
+# ── Tekenen op het beeld ────────────────────────────────────────────────────────
+# Aantekeningen van de trainer: een schets of een rechte lijn over het beeld heen ("kijk,
+# hier zakt je knie naar binnen"). Ze horen bij de clip en niet bij één frame — je tekent
+# iets aan en speelt dán door om te zien of het klopt — dus ze blijven staan terwijl de
+# video verder loopt. Ze staan in **frame-genormaliseerde** coördinaten (zoals de
+# landmarks), zodat ze bij zoomen en pannen op hun plek op het beeld blijven plakken; in
+# widget-coördinaten zouden ze bij de eerste zoomstap naast de schaatser komen te liggen.
+TEKEN_SCHUIVEN, TEKEN_SCHETS, TEKEN_LIJN = "schuiven", "schets", "lijn"
+TEKEN_MODI = (("✋ Schuiven", TEKEN_SCHUIVEN),
+              ("✏ Schetsen", TEKEN_SCHETS),
+              ("📏 Lijn", TEKEN_LIJN))
+TEKEN_TOOLTIP = (
+    "Wat de linkermuisknop op het beeld doet:\n"
+    "  ✋ Schuiven — het ingezoomde beeld verslepen (en in de bewerk-modus punten slepen)\n"
+    "  ✏ Schetsen — vrij tekenen zolang je de knop ingedrukt houdt\n"
+    "  📏 Lijn — een rechte lijn van indrukken tot loslaten\n"
+    "\n"
+    "Rechts slepen schuift het beeld altijd, ook midden in het tekenen.\n"
+    "Een tekening hoort bij de clip en niet bij één frame: hij blijft staan terwijl de\n"
+    "video doorloopt, en schuift mee met zoomen en pannen.")
+# Magenta botst niet met de overlay (wit skelet, groen/rood afzetbeen, gele handles) en
+# blijft zichtbaar op zowel wit ijs als een donker pak.
+TEKEN_KLEUR = (255, 45, 210)
+TEKEN_DIKTE = 3        # schermpixels, dus even dik op elke zoomstand (net als de handles)
+TEKEN_DEKKING = 0.7    # 70%: het beeld moet er doorheen te zien blijven
+# Onder deze verplaatsing (fractie van de beeldmaat) is een sleep gewoon een klik. Die
+# zou anders een stip achterlaten die alleen maar in de weg zit.
+TEKEN_MIN_SLEEP = 0.005
+
+
+def _sleep_afstand(punten):
+    """Grootste afstand tot het beginpunt van een streek (genormaliseerd)."""
+    x0, y0 = punten[0]
+    return max(math.hypot(x - x0, y - y0) for x, y in punten)
+
 
 # Bochtdetectie: uitleg bij de checkbox in beide analyse-dialogen (één tekst, twee plekken).
 BOCHT_TOOLTIP = (
@@ -2148,14 +2185,15 @@ class VideoSpeler(QWidget):
     De eigenaar haakt in met plain callables — géén signalen, want een QMouseEvent overleeft
     een queued connectie niet en er is per speler precies één eigenaar:
         op_frame_getoond(idx)     — ná het tekenen van een frame (grafiek/tabel/statusbalk)
-        overlay_tekenaar(pixmap)  — vlak vóór setPixmap (de skelet-editor tekent z'n handles)
+        overlay_tekenaar(pixmap)  — vlak vóór setPixmap (de skelet-editor tekent z'n handles;
+                                    de aantekeningen van de trainer liggen daar al onder)
         op_muis_druk/_beweeg/_los(event)
                                   — alleen als de speler het event niet zelf als pan-sleep
                                     heeft opgeslokt
     """
 
     def __init__(self, min_grootte=(480, 320), toon_snelheid=True, snel_zoeken=False,
-                 toon_overlay=True, parent=None):
+                 toon_overlay=True, toon_tekenen=False, parent=None):
         super().__init__(parent)
 
         # Zonder analyse valt er niets te tekenen: het knipvenster (fase 8) voedt de speler
@@ -2163,6 +2201,13 @@ class VideoSpeler(QWidget):
         # gedetecteerd" zetten. `toon_overlay=False` slaat het tekenen over en verbergt de
         # laag-vinkjes, die daar toch niets doen.
         self.toon_overlay = toon_overlay
+
+        # Tekenen op het beeld (zie TEKEN_TOOLTIP) is er alléén waar je puur kijkt: het
+        # kijkvenster. Standaard uit, en dan worden de regelaars niet eens aangemaakt —
+        # `FlowLayout` slaat verborgen items niet over, dus een onzichtbaar teken-blok zou
+        # in elk ander videovenster een gat én ~28 px venster-minimum kosten voor iets wat
+        # daar niet te gebruiken is.
+        self.tekenen_aan = bool(toon_tekenen)
 
         # Kamfilter voor interlaced bron (zie DEINT_TOOLTIP). Staat het aan, dan krijgt de
         # speler exact de pixels te zien waarop ook gemeten is — anders zou het skelet op een
@@ -2198,13 +2243,23 @@ class VideoSpeler(QWidget):
         self._crop_norm = (0.0, 0.0, 1.0, 1.0)  # (x0n, y0n, breedten, hoogten): getoonde crop
         self._pan_sleep = None      # laatste muispositie tijdens een handmatige pan-sleep
 
+        # Tekenen op het beeld (zie TEKEN_TOOLTIP). De streken zijn lijsten van
+        # frame-genormaliseerde punten en horen bij de clip, niet bij een frame: ze blijven
+        # dus staan terwijl de video doorloopt.
+        self.teken_modus = TEKEN_SCHUIVEN
+        self._tekening = []          # afgeronde streken: [[(nx, ny), ...], ...]
+        self._streek = None          # de streek die op dit moment gesleept wordt
+        self._basis_pixmap = None    # geschaald beeld zónder tekening (snelle hertekening)
+
         # Haken voor de eigenaar (zie de klasse-docstring)
         self.op_frame_getoond = None
         self.overlay_tekenaar = None
         self.op_muis_druk = None
         self.op_muis_beweeg = None
         self.op_muis_los = None
-        self.bewerk_modus = False     # stuurt de pan-vs-editor-voorrang van de muis
+        # Rechtstreeks het veld: de setter hieronder raakt `combo_teken` aan, en die
+        # bestaat pas na `_bouw_ui`.
+        self._bewerk_modus = False    # stuurt de pan-vs-editor-voorrang van de muis
         self.volgen_bevroren = False  # tijdens een editor-sleep: uitsnede niet laten verspringen
 
         # Scrub-samenvoeging (zie _scrub_gevraagd); moet vóór _bouw_ui bestaan, want die
@@ -2349,6 +2404,36 @@ class VideoSpeler(QWidget):
         zoom_rij.addWidget(self.btn_zoom_reset)
         self._rij_toggles.addWidget(zoom_blok)
 
+        # Tekenen op het beeld — alleen waar het aan staat (het kijkvenster). Eén blok in
+        # de balk (zelfde reden als bij zoom_blok: anders blijft het label achter op de
+        # vorige regel als de balk afbreekt). De combo bepaalt wat de línkerknop doet;
+        # rechts-slepen blijft altijd pannen.
+        self.combo_teken = self.btn_teken_terug = self.btn_teken_wis = None
+        if self.tekenen_aan:
+            teken_blok = QWidget()
+            teken_rij = QHBoxLayout(teken_blok)
+            teken_rij.setContentsMargins(0, 0, 0, 0)
+            teken_rij.addWidget(QLabel("Muis"))
+            self.combo_teken = QComboBox()
+            for label, modus in TEKEN_MODI:
+                self.combo_teken.addItem(label, modus)
+            self.combo_teken.setToolTip(TEKEN_TOOLTIP)
+            self.combo_teken.currentIndexChanged.connect(self._zet_teken_modus)
+            teken_rij.addWidget(self.combo_teken)
+            self.btn_teken_terug = QPushButton("↶")
+            self.btn_teken_terug.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
+            self.btn_teken_terug.setToolTip("Laatst getekende streek weghalen.")
+            self.btn_teken_terug.clicked.connect(self.wis_laatste_streek)
+            teken_rij.addWidget(self.btn_teken_terug)
+            self.btn_teken_wis = QPushButton("🧹")
+            self.btn_teken_wis.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
+            self.btn_teken_wis.setToolTip("Alle aantekeningen van het beeld halen.")
+            # lambda: clicked() geeft anders zijn `checked=False` door als `hertekenen`,
+            # waarmee de tekening wél gewist wordt maar in beeld blijft staan.
+            self.btn_teken_wis.clicked.connect(lambda: self.wis_tekening())
+            teken_rij.addWidget(self.btn_teken_wis)
+            self._rij_toggles.addWidget(teken_blok)
+
         self._hoofd.addWidget(self._balk_toggles)
 
         # Muis-events op het videolabel: pannen doet de speler zelf, de rest gaat naar de
@@ -2404,6 +2489,8 @@ class VideoSpeler(QWidget):
         self._volg_forceren = True     # bij het eerste frame meteen op de schaatser richten
         self._pan_sleep = None
         self._crop_norm = (0.0, 0.0, 1.0, 1.0)
+        # Aantekeningen horen bij de clip die eronder ligt: een andere analyse begint schoon.
+        self.wis_tekening(hertekenen=False)
         # Eén keer offline: welk kader heeft de schaatser per frame nodig? Kost een fractie
         # van een seconde en maakt de automatische zoom onafhankelijk van de afspeelrichting
         # (scrubben geeft exact dezelfde uitsnede als ernaartoe afspelen).
@@ -2453,6 +2540,7 @@ class VideoSpeler(QWidget):
         self._laatste_frame = None
         self._weergave_pos = 0
         self._kader = None
+        self.wis_tekening(hertekenen=False)
         self.video_info = None
         self.resultaten = []
         self.huidige_idx = -1
@@ -2469,6 +2557,11 @@ class VideoSpeler(QWidget):
                   self.btn_frame_verder, self.btn_eind, self.slider,
                   self.chk_volg, self.chk_auto, self.slider_zoom, self.btn_zoom_reset):
             w.setEnabled(actief)
+        if self.tekenen_aan:
+            self.btn_teken_terug.setEnabled(actief)
+            self.btn_teken_wis.setEnabled(actief)
+            # De combo hangt daarnaast aan de bewerk-modus (die claimt de linkerknop).
+            self.combo_teken.setEnabled(bool(actief) and not self._bewerk_modus)
         self._zet_handzoom_actief(actief)
 
     def _zet_handzoom_actief(self, actief=None):
@@ -2650,9 +2743,14 @@ class VideoSpeler(QWidget):
         # Volgorde is niet cosmetisch: de overlay-tekenaar (skelet-editor) rekent via
         # norm_naar_widget met _weergave_scaled, dus die moet al bijgewerkt zijn.
         self._weergave_scaled = pixmap.size()
-        if self.overlay_tekenaar is not None:
-            self.overlay_tekenaar(pixmap)
-        self.label.setPixmap(pixmap)
+        # Het kale geschaalde beeld bewaren, zodat een muisbeweging tijdens het tekenen
+        # alleen de tekenlaag hoeft over te doen (zie _ververs_tekening). Alleen als er
+        # ook echt getekend wordt of kan worden — anders kost het elk frame een kopie van
+        # de hele pixmap voor niets.
+        self._basis_pixmap = (pixmap.copy()
+                              if self._tekening or self.teken_modus != TEKEN_SCHUIVEN
+                              else None)
+        self._teken_lagen(pixmap)
 
     # ── Inzoomen op de schaatser ─────────────────────────────────────────────
     def _kader_op(self, idx):
@@ -2771,15 +2869,153 @@ class VideoSpeler(QWidget):
         x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 is dit (0,0,1,1) → oude formule
         return QPointF(offx + (nx - x0n) / wn * sw, offy + (ny - y0n) / hn * sh)
 
+    # ── Tekenen op het beeld ────────────────────────────────────────────────
+    @property
+    def bewerk_modus(self):
+        return self._bewerk_modus
+
+    @bewerk_modus.setter
+    def bewerk_modus(self, actief):
+        """De skelet-editor claimt de linkerknop, dus daar kan niet tegelijk mee getekend
+        worden. Een teken-stand die stilzwijgend niets meer doet (of erger: een sleep
+        opslokt die een landmark moest verplaatsen) is de slechtste van de twee uitkomsten,
+        dus zetten we de muis terug op schuiven en de combo op slot zolang de editor aan
+        staat. De tekening zelf blijft gewoon staan.
+
+        Speelt alleen waar tekenen aan staat (het kijkvenster) — en juist daar is er geen
+        skelet-editor, dus in de praktijk komen ze elkaar niet tegen. De regel staat er
+        omdat de vlag ergens anders aangezet kan worden."""
+        self._bewerk_modus = bool(actief)
+        if not self.tekenen_aan:
+            return
+        if self._bewerk_modus and self.teken_modus != TEKEN_SCHUIVEN:
+            self.combo_teken.setCurrentIndex(0)      # → _zet_teken_modus
+        self.combo_teken.setEnabled(not self._bewerk_modus and self.slider.isEnabled())
+
+    def _zet_teken_modus(self, _idx=None):
+        self.teken_modus = self.combo_teken.currentData() or TEKEN_SCHUIVEN
+        self._streek = None
+        # De cursor zegt wat de linkerknop nu doet.
+        self.label.setCursor(Qt.ArrowCursor if self.teken_modus == TEKEN_SCHUIVEN
+                             else Qt.CrossCursor)
+        self.toon_huidig_frame()      # zet meteen de basis-pixmap klaar (of ruimt hem op)
+
+    def wis_tekening(self, hertekenen=True):
+        """Alle aantekeningen van het beeld halen."""
+        bezig = bool(self._tekening) or self._streek is not None
+        self._tekening = []
+        self._streek = None
+        if hertekenen and bezig:
+            self._ververs_tekening()
+
+    def wis_laatste_streek(self):
+        """Alleen de laatst getekende streek terugnemen — de gewone correctie, want één
+        misgeslagen lijn hoort niet de hele aantekening te kosten."""
+        if not self._tekening:
+            return
+        self._tekening.pop()
+        self._ververs_tekening()
+
+    def _teken_punt(self, pos):
+        """Muispositie → frame-genormaliseerd punt, geklemd op het beeld.
+
+        Klemmen en niet weigeren: sleep je door tot in de zwarte rand naast het beeld, dan
+        hoort de lijn op de beeldrand te eindigen en niet buiten het frame te verdwijnen —
+        daar zou hij bij het uitzoomen ineens weer opduiken."""
+        punt = self.widget_naar_norm(pos)
+        if punt is None:
+            return None
+        return (min(1.0, max(0.0, punt[0])), min(1.0, max(0.0, punt[1])))
+
+    def _start_streek(self, pos):
+        punt = self._teken_punt(pos)
+        if punt is None:
+            return
+        self._streek = [punt, punt]   # het tweede punt loopt met de muis mee
+        self._ververs_tekening()
+
+    def _rek_streek(self, pos):
+        punt = self._teken_punt(pos)
+        if punt is None or not self._streek:
+            return
+        if self.teken_modus == TEKEN_LIJN:
+            self._streek[-1] = punt   # rechte lijn: alleen het eindpunt verplaatst
+        else:
+            self._streek.append(punt)
+        self._ververs_tekening()
+
+    def _stop_streek(self):
+        streek, self._streek = self._streek, None
+        if streek and _sleep_afstand(streek) >= TEKEN_MIN_SLEEP:
+            self._tekening.append(streek)
+        self._ververs_tekening()
+
+    def _teken_tekening(self, pixmap):
+        """Zet de aantekeningen op de geschaalde pixmap.
+
+        Genormaliseerd → pixmap-pixels via dezelfde uitsnede als de skelet-editor gebruikt,
+        zodat de tekening bij zoomen en pannen op het beeld blijft plakken. De dekking gaat
+        op de painter en niet in de pen: een streek wordt als één pad getekend, dus een
+        overlappende bocht wordt niet donkerder dan de rest van de lijn."""
+        streken = self._tekening + ([self._streek] if self._streek else [])
+        if not streken:
+            return
+        pw, ph = pixmap.width(), pixmap.height()
+        x0n, y0n, wn, hn = self._crop_norm   # bij zoom==1 (0,0,1,1) → nx*pw, ny*ph
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setOpacity(TEKEN_DEKKING)
+        pen = QPen(QColor(*TEKEN_KLEUR), TEKEN_DIKTE)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        try:
+            for streek in streken:
+                pad = QPainterPath()
+                pad.moveTo((streek[0][0] - x0n) / wn * pw, (streek[0][1] - y0n) / hn * ph)
+                for nx, ny in streek[1:]:
+                    pad.lineTo((nx - x0n) / wn * pw, (ny - y0n) / hn * ph)
+                painter.drawPath(pad)
+        finally:
+            painter.end()
+
+    def _teken_lagen(self, pixmap):
+        """De twee lagen op het geschaalde beeld en dan pas naar het scherm: eerst de
+        aantekeningen, daarna de haak van de eigenaar — de skelet-editor moet zijn handles
+        bovenop houden, want die zijn aanklikbaar."""
+        self._teken_tekening(pixmap)
+        if self.overlay_tekenaar is not None:
+            self.overlay_tekenaar(pixmap)
+        self.label.setPixmap(pixmap)
+
+    def _ververs_tekening(self):
+        """Alleen de tekenlaag opnieuw zetten, zonder de video aan te raken.
+
+        Tijdens het slepen komt er per muisbeweging een hertekening, en de volle weg
+        (frame kopiëren, uitsnede, QImage, schalen) kost op 4K-materiaal tientallen
+        milliseconden — dan loopt de lijn achter de cursor aan. `_basis_pixmap` is het al
+        geschaalde beeld zonder tekening; een kopie daarvan is een memcpy."""
+        if self._basis_pixmap is None:
+            self.toon_huidig_frame()
+            return
+        self._teken_lagen(self._basis_pixmap.copy())
+
     # ── Muis: pannen doet de speler zelf, de rest gaat naar de eigenaar ──────
     def _muis_druk(self, event):
-        # Deze takken moeten bovenaan blijven: buiten de bewerk-modus is links-slepen bedoeld
-        # om het ingezoomde beeld te verschuiven (pannen), in de bewerk-modus is het = punt
-        # verplaatsen of plaatsen (dat handelt de eigenaar af). Rechts-slepen pant áltijd —
-        # dat is de enige manier om te schuiven terwijl de linkerknop bezet is.
-        if self._zoom_eff > 1.0 and (event.button() == Qt.RightButton
-                                     or (not self.bewerk_modus
-                                         and event.button() == Qt.LeftButton)):
+        # Deze takken moeten bovenaan blijven, en in deze volgorde. Rechts-slepen pant
+        # áltijd — dat is de enige manier om te schuiven terwijl de linkerknop bezet is
+        # (door de skelet-editor of door het tekenen). Wat de línkerknop doet kiest de
+        # gebruiker in de muis-combo: in een teken-stand is dat tekenen, en anders het
+        # ingezoomde beeld verschuiven (buiten de bewerk-modus) of een punt verplaatsen
+        # (in de bewerk-modus, wat de eigenaar afhandelt).
+        if self._zoom_eff > 1.0 and event.button() == Qt.RightButton:
+            self._pan_sleep = event.position()
+            return
+        if event.button() == Qt.LeftButton and self.teken_modus != TEKEN_SCHUIVEN:
+            self._start_streek(event.position())
+            return
+        if (self._zoom_eff > 1.0 and event.button() == Qt.LeftButton
+                and not self.bewerk_modus):
             self._pan_sleep = event.position()
             return
         if self.op_muis_druk is not None:
@@ -2804,12 +3040,18 @@ class VideoSpeler(QWidget):
             self.chk_volg.blockSignals(False)
             self.toon_huidig_frame()
             return
+        if self._streek is not None:
+            self._rek_streek(event.position())
+            return
         if self.op_muis_beweeg is not None:
             self.op_muis_beweeg(event)
 
     def _muis_los(self, event):
         if self._pan_sleep is not None:
             self._pan_sleep = None
+            return
+        if self._streek is not None:
+            self._stop_streek()
             return
         if self.op_muis_los is not None:
             self.op_muis_los(event)
@@ -3754,8 +3996,12 @@ class BekijkVenster(QDialog):
         v.addLayout(kop)
 
         self.splitter = QSplitter(Qt.Horizontal)
+        # `toon_tekenen`: hier — en alleen hier — kan er over het beeld heen getekend
+        # worden. Dit is het venster waarin je kíjkt en aanwijst; op de weergave- en
+        # vergelijkpagina is de linkerknop al bezet (pannen, skelet-editor) en in het
+        # knipvenster ben je grenzen aan het zetten, geen techniek aan het bespreken.
         self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
-                                  toon_overlay=False)
+                                  toon_overlay=False, toon_tekenen=True)
         self.speler.op_frame_getoond = self._frame_getoond
         self.splitter.addWidget(self.speler)
 
