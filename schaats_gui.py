@@ -17,6 +17,7 @@ import csv
 import math
 import shutil
 import tempfile
+import queue
 import threading
 import time
 
@@ -2178,6 +2179,92 @@ class AnalyseInfoDialog(QDialog):
         form.addRow(knoppen)
 
 
+# Vooruitlezen tijdens het afspelen (zie `VooruitLezer`): hoeveel geheugen de buffer per
+# speler hoogstens mag kosten, en hoeveel frames er hoogstens in gaan. Een 1080p-frame is
+# 6,2 MB en een 4K-frame 24,9 MB, dus zonder byte-grens zou een vaste framegrens op 4K-
+# materiaal honderden megabytes kosten — en de vergelijkpagina heeft twéé spelers. Het doel
+# is een belastingpiek van een paar frames opvangen, niet de video inlezen: alles vooraf
+# uitrekenen zou voor een opname van 23 minuten 216 GB en 9 minuten wachten kosten.
+VOORUIT_MAX_BYTES = 96 * 1024 * 1024
+VOORUIT_MAX_FRAMES = 16
+
+
+class VooruitLezer(QThread):
+    """Leest tijdens het afspelen frames vooruit op een eigen thread.
+
+    Het tonen van een frame bestaat uit twee helften die niets van elkaar nodig hebben:
+    **lezen** (decoderen + eventueel het kamfilter, gemeten 15,9 ms op 1080i-camcorderbeeld)
+    en **tonen** (uitsnede + QImage + schalen naar een HiDPI-scherm, 12,0 ms). Achter elkaar
+    op de GUI-thread is dat 27,9 ms van de 40 ms die er bij 25 fps zijn — genoeg marge voor
+    het gemiddelde, te weinig voor een piek, en elke piek kost meteen een frame. Naast
+    elkaar is de vloer de traagste helft: 15,9 ms, oftewel ~63 fps aan ruimte.
+
+    Dat dit werkt is geen vanzelfsprekendheid in Python: het kan alleen omdat OpenCV de GIL
+    loslaat tijdens `read()` en tijdens de filterstappen, zodat er echt parallel gewerkt
+    wordt in plaats van om de beurt.
+
+    **Wie de capture heeft, leest.** Een `cv2.VideoCapture` is niet thread-safe, dus de
+    speler geeft hem bij het starten uit handen en krijgt hem bij het stoppen terug — er
+    zijn nooit twee lezers. Bij teruggave staat de capture ná het laatst gelezen frame,
+    dus verder dan wat er getoond is; de nog niet getoonde frames gaan mee terug
+    (`resterend()`) zodat ze niet opnieuw gedecodeerd hoeven te worden en de speler niet
+    hoeft terug te spoelen — op de weergavepagina zou dat de video heropenen en vanaf
+    frame 0 doorspoelen.
+    """
+
+    def __init__(self, cap, start_pos, aantal, voorraad=(), parent=None):
+        super().__init__(parent)
+        self.cap = cap
+        self.pos = start_pos          # index van het eerstvolgende te lezen frame
+        self.einde = False            # video op; de queue mag nog frames bevatten
+        self._q = queue.Queue(maxsize=max(2, aantal))
+        for idx, frame in voorraad:   # wat er van de vorige ronde over was
+            try:
+                self._q.put_nowait((idx, frame))
+            except queue.Full:
+                break
+
+    def run(self):
+        while not self.isInterruptionRequested():
+            ok, frame = self.cap.read()
+            if not ok:
+                self.einde = True
+                return
+            idx, self.pos = self.pos, self.pos + 1
+            while not self.isInterruptionRequested():
+                try:
+                    self._q.put((idx, frame), timeout=0.05)
+                    break
+                except queue.Full:
+                    pass              # buffer vol: wachten tot de speler er een afhaalt
+
+    def pak(self, gewenst):
+        """Het klaarstaande frame dat het dichtst bij `gewenst` ligt, of `(None, None)`.
+
+        Alles vóór `gewenst` wordt weggegooid — die frames zijn al gepasseerd volgens de
+        afspeelklok, en ze teruggeven zou de video juist láten achterlopen. Staat er alleen
+        iets ouders klaar (de lezer loopt achter), dan is het nieuwste daarvan het beste
+        antwoord: dat houdt het beeld in beweging."""
+        gepakt = (None, None)
+        while True:
+            try:
+                idx, frame = self._q.get_nowait()
+            except queue.Empty:
+                return gepakt
+            gepakt = (idx, frame)
+            if idx >= gewenst:
+                return gepakt
+
+    def resterend(self):
+        """Wat er nog in de buffer staat, op framenummer — voor de teruggave aan de speler."""
+        uit = []
+        while True:
+            try:
+                uit.append(self._q.get_nowait())
+            except queue.Empty:
+                return sorted(uit)
+
+
 class VideoSpeler(QWidget):
     """
     Videopaneel met een eigen capture, afspeeltimer en zoom/pan-state: beeldlabel +
@@ -2277,7 +2364,24 @@ class VideoSpeler(QWidget):
 
         self._bouw_ui(min_grootte, toon_snelheid, toon_overlay)
         self.speeltimer = QTimer(self)
+        # PreciseTimer, en dat is hier geen finetuning maar het verschil tussen vloeiend en
+        # schokkerig. Een gewone Qt-timer is een CoarseTimer en hangt op Windows aan de
+        # klokgranulariteit van ~15,6 ms: gemeten vuurt een timer van 40 ms er dan één per
+        # 46,5 ms. Op 25 fps is dat structureel 6,5 ms per frame te laat, en omdat
+        # `_speel_tick` op de wandklok telt betaalt hij dat met overgeslagen frames — 15%
+        # van alle frames, terwijl er rekentijd zat over is (27,9 ms werk van de 40 ms).
+        # Met PreciseTimer vuurt hij op 40,1 ms en zakt het overslaan naar 1%.
+        self.speeltimer.setTimerType(Qt.PreciseTimer)
         self.speeltimer.timeout.connect(self._speel_tick)
+        # IJkpunt van de afspeelklok (zie `_speel_tick`): vanaf welk frame en welk moment
+        # de verstreken tijd geteld wordt, en welk frame wíj het laatst toonden.
+        self._speel_basis_idx = 0
+        self._speel_basis_t = 0.0
+        self._speel_laatste = -1
+        # Vooruitlezen (zie `VooruitLezer`): de draaiende thread, en de frames die hij bij
+        # het stoppen teruggaf en die nog niet getoond zijn ({index: frame}).
+        self._lezer = None
+        self._vooruit_rest = {}
         self.zet_besturing_actief(False)
 
     # ── UI opbouw ────────────────────────────────────────────────────────
@@ -2509,11 +2613,13 @@ class VideoSpeler(QWidget):
         self.chk_volg.setChecked(True)
         self.chk_volg.blockSignals(False)
 
+        self._stop_vooruitlezen()      # eerst de capture terug, dán pas loslaten
         if self.cap is not None:
             self.cap.release()
         self.deinterlacen = bool(deinterlacen)
         self.cap = open_video(video_pad, self.deinterlacen)
         self._weergave_pos = 0
+        self._vooruit_rest = {}
         self._laatste_frame = None
         self.huidige_idx = -1
 
@@ -2539,12 +2645,13 @@ class VideoSpeler(QWidget):
     def sluit(self):
         """Laat het videobestand los (nodig voordat de mediamap gewist kan worden) en
         maakt het paneel leeg."""
-        self.pauzeer()
+        self.pauzeer()                 # geeft ook de capture terug van de vooruitlezer
         if self.cap is not None:
             self.cap.release()
             self.cap = None
         self._laatste_frame = None
         self._weergave_pos = 0
+        self._vooruit_rest = {}
         self._kader = None
         self.wis_tekening(hertekenen=False)
         self.video_info = None
@@ -2583,12 +2690,42 @@ class VideoSpeler(QWidget):
     def ga_naar(self, idx):
         if not self.resultaten:
             return
+        # Ergens anders heen springen is willekeurige toegang; daar heeft de vooruitlezer
+        # niets te zoeken (hij staat verderop en heeft de capture vast). Loopt de video
+        # door, dan start `_speel_tick` hem vanzelf weer op de nieuwe plek.
+        self._stop_vooruitlezen()
         idx = max(0, min(idx, len(self.resultaten) - 1))
         self._toon_frame(idx)
 
     def toon_huidig_frame(self):
         if self.huidige_idx >= 0:
             self._toon_frame(self.huidige_idx)
+
+    def toon_op_klok(self, idx):
+        """Een frame tonen onder een **externe** klok — de masterklok van de vergelijkpagina.
+
+        Anders dan `ga_naar` is dit geen willekeurige toegang maar sequentieel vooruit, dus
+        hier hoort de vooruitlezer juist wél aan te staan. Dat is op die pagina het hardst
+        nodig: er staan twee spelers naast elkaar, dus al het werk telt dubbel — gemeten
+        kostte één tik met twee 1080i-opnames op 1× **56,4 ms** bij een tik-interval van
+        30 ms. Loopt de lezer nog achter, dan tonen we niets en pakt de volgende tik het op;
+        de klok loopt door, dus dat kost hooguit een frame."""
+        if not self.resultaten:
+            return
+        idx = max(0, min(idx, len(self.resultaten) - 1))
+        if idx < self.huidige_idx:
+            self.ga_naar(idx)          # terug is wél willekeurige toegang
+            return
+        if idx == self.huidige_idx:
+            return
+        if self._lezer is None:
+            self._start_vooruitlezen()
+        if self._lezer is None:        # boven 1×: grab-overslaan is daar goedkoper
+            self._toon_frame(idx)
+            return
+        lees_idx, frame = self._lezer.pak(idx)
+        if frame is not None:
+            self._toon_frame(min(lees_idx, len(self.resultaten) - 1), frame)
 
     def _scrub_gevraagd(self, idx):
         """Scrub-aanvraag van de slider (alleen in `snel_zoeken`-modus). Zie de opmerking bij
@@ -2631,6 +2768,16 @@ class VideoSpeler(QWidget):
         """
         if self.cap is None:
             return None
+        # Frames die de vooruitlezer al gedecodeerd had toen hij de capture teruggaf: die
+        # liggen vóór de capture-positie, dus zonder deze tak zou een stap vooruit als een
+        # sprong terug gelden en de video heropend en doorgespoeld worden.
+        if self._vooruit_rest:
+            frame = self._vooruit_rest.pop(idx, None)
+            for oud in [i for i in self._vooruit_rest if i <= idx]:
+                del self._vooruit_rest[oud]
+            if frame is not None:
+                return frame
+            self._vooruit_rest = {}     # we gaan ergens anders heen
         if self.snel_zoeken and (idx < self._weergave_pos
                                  or idx - self._weergave_pos > SEEK_DREMPEL_FRAMES):
             if self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx):
@@ -2666,8 +2813,12 @@ class VideoSpeler(QWidget):
         else:
             self.lbl_tijd.setText(f"Frame {idx} kon niet gelezen worden")
 
-    def _toon_frame(self, idx):
-        if idx == self.huidige_idx and self._laatste_frame is not None:
+    def _toon_frame(self, idx, frame=None):
+        if frame is not None:                       # kant en klaar van de vooruitlezer
+            self._laatste_frame = frame
+            frame = frame.copy()
+            nieuw_frame = True
+        elif idx == self.huidige_idx and self._laatste_frame is not None:
             frame = self._laatste_frame.copy()      # alleen overlay opnieuw tekenen
             nieuw_frame = False
         else:
@@ -3064,7 +3215,9 @@ class VideoSpeler(QWidget):
 
     # ── Afspelen ─────────────────────────────────────────────────────────
     def _speel_stap(self):
-        """Hoeveel frames er per timer-tik opgeschoven wordt.
+        """Hoeveel frames er per timer-tik gemíddeld opgeschoven wordt — de tik-frequentie
+        volgt hieruit (`_speel_interval_ms`); wélk frame er getoond wordt bepaalt de
+        wandklok in `_speel_tick`.
 
         Tot en met 1× is dat er één en regelt de timer het tempo. Sneller dan echte snelheid
         kan geen decoder bijbenen (op een 1080p-opname ~9 ms per frame, dus 4× = 100 fps
@@ -3082,8 +3235,11 @@ class VideoSpeler(QWidget):
         return max(1, int(1000 / tikken_per_s))
 
     def _zet_snelheid(self, _idx=None):
-        # Draait de video al, herstart de timer meteen met het nieuwe tempo.
+        # Draait de video al, herstart de timer meteen met het nieuwe tempo. De afspeelklok
+        # moet mee opnieuw geijkt: hij rekent verstreken tijd × factor, en zonder herijking
+        # zou de nieuwe factor met terugwerkende kracht op de al verstreken tijd gelden.
         if self.speeltimer.isActive():
+            self._ijk_speelklok()
             self.speeltimer.start(self._speel_interval_ms())
 
     def speelt(self):
@@ -3094,12 +3250,54 @@ class VideoSpeler(QWidget):
             return
         if self.huidige_idx >= len(self.resultaten) - 1:
             self.ga_naar(0)
+        self._ijk_speelklok()
+        self._start_vooruitlezen()
         self.speeltimer.start(self._speel_interval_ms())
         self.btn_play.setText("⏸")
+
+    def _ijk_speelklok(self):
+        """Legt vast vanaf welk frame en welk moment `_speel_tick` de tijd telt."""
+        self._speel_basis_idx = self.huidige_idx
+        self._speel_basis_t = time.perf_counter()
+        self._speel_laatste = self.huidige_idx
+
+    # ── Vooruitlezen ─────────────────────────────────────────────────────
+    def _start_vooruitlezen(self):
+        """Geeft de capture aan een `VooruitLezer`, tenzij dat niets oplevert.
+
+        **Alleen tot en met 1×.** Daarboven slaat de speler frames over en leest
+        `_lees_frame_exact` de tussenliggende met een kale `grab()` (~3 ms) in plaats van
+        ze te decoderen; een vooruitlezer zou ze wél allemaal decoderen en zo juist de
+        rem worden — bij 8× zijn er 200 frames per seconde nodig en haalt hij er ~63."""
+        if (self._lezer is not None or self.cap is None or self.video_info is None
+                or (self.combo_snelheid.currentData() or 1.0) > 1.0):
+            return
+        beeld_bytes = max(1, self.video_info.w * self.video_info.h * 3)
+        aantal = max(2, min(VOORUIT_MAX_FRAMES, VOORUIT_MAX_BYTES // beeld_bytes))
+        # Wat er van de vorige ronde over is gaat mee terug de buffer in: die frames liggen
+        # vóór de capture-positie en zouden anders overgeslagen worden.
+        voorraad = sorted((i, f) for i, f in self._vooruit_rest.items() if i > self.huidige_idx)
+        self._vooruit_rest = {}
+        self._lezer = VooruitLezer(self.cap, self._weergave_pos, aantal, voorraad, self)
+        self._lezer.start()
+
+    def _stop_vooruitlezen(self):
+        """Neemt de capture terug van de vooruitlezer, mét wat hij al klaar had staan."""
+        if self._lezer is None:
+            return
+        lezer, self._lezer = self._lezer, None
+        lezer.requestInterruption()
+        lezer.wait(2000)
+        # De capture staat nu ná het laatst gelezen frame — verder dan wat er getoond is.
+        # De niet-getoonde frames bewaren, anders zou de eerstvolgende stap vooruit een
+        # sprong terug lijken en de video heropend en doorgespoeld worden.
+        self._weergave_pos = lezer.pos
+        self._vooruit_rest = {i: f for i, f in lezer.resterend() if i > self.huidige_idx}
 
     def pauzeer(self):
         if self.speeltimer.isActive():
             self.speeltimer.stop()
+        self._stop_vooruitlezen()
         self.btn_play.setText("▶")
 
     def _toggle_afspelen(self):
@@ -3109,15 +3307,48 @@ class VideoSpeler(QWidget):
             self.speel()
 
     def _speel_tick(self):
-        volgende = self.huidige_idx + self._speel_stap()
-        if volgende >= len(self.resultaten):
-            # Bij een stap > 1 zou het einde anders overgeslagen worden; nog even het
-            # laatste frame tonen en dan pas stoppen.
+        """Toont het frame dat op de **wandklok** aan de beurt is, niet simpelweg het
+        volgende.
+
+        "Vorige + 1 per tik" loopt goed zolang één frame binnen het tik-interval past, en
+        gaat er stilzwijgend onderuit zodra dat niet meer zo is: de video speelt dan
+        vertraagd én schokkerig af, want elke uitschieter in de decodeertijd komt er direct
+        bovenop. Dat is geen randgeval — een 1080i-camcorderopname kost ~8 ms decoderen,
+        ~12 ms kamfilter en op een HiDPI-scherm nog eens ~15 ms schalen, samen tegen de
+        40 ms die er bij 25 fps zijn. Door het doel uit de verstreken tijd af te leiden
+        blijft het tempo kloppen en wordt een tekort in frames betaald in plaats van in
+        vertraging; een overgeslagen frame kost alleen een `grab()` (~3 ms) omdat
+        `_lees_frame_exact` er toch al sequentieel langs spoelt. Zelfde motief (en zelfde
+        vorm) als de masterklok van de vergelijkpagina en het spoelen in `SpelerToetsen`.
+        """
+        if self.huidige_idx != self._speel_laatste:
+            self._ijk_speelklok()     # tussendoor gescrubd of gesprongen: opnieuw ijken
+        factor = self.combo_snelheid.currentData() or 1.0
+        fps = (self.video_info.fps if self.video_info else None) or 30.0
+        verstreken = time.perf_counter() - self._speel_basis_t
+        doel = self._speel_basis_idx + int(verstreken * fps * factor)
+        if doel >= len(self.resultaten):
+            # Het einde mag niet overgeslagen worden; nog even het laatste frame tonen.
             if self.huidige_idx < len(self.resultaten) - 1:
                 self._toon_frame(len(self.resultaten) - 1)
             self.pauzeer()
             return
-        self._toon_frame(volgende)
+        if doel <= self.huidige_idx:  # onder 1× staat het doel meerdere tikken stil
+            return
+        if self._lezer is not None:
+            idx, frame = self._lezer.pak(doel)
+            if frame is None:
+                # De vooruitlezer heeft nog niets klaar. Niets tonen en het bij de volgende
+                # tik opnieuw proberen: de klok loopt door, dus dit kost hooguit een frame.
+                if self._lezer.einde:
+                    self._toon_frame(len(self.resultaten) - 1)
+                    self.pauzeer()
+                return
+            self._toon_frame(min(idx, len(self.resultaten) - 1), frame)
+        else:
+            self._start_vooruitlezen()    # bv. na een sprong tijdens het afspelen
+            self._toon_frame(doel)
+        self._speel_laatste = self.huidige_idx
 
 
 class SpelerToetsen(QObject):
@@ -3165,6 +3396,7 @@ class SpelerToetsen(QObject):
         self._lopend = []       # [(speler, startframe)] tijdens het spoelen
         self._t0 = 0.0
         self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoSpeler.speeltimer
         self._timer.timeout.connect(self._spoel_tick)
         QApplication.instance().installEventFilter(self)
 
@@ -4313,6 +4545,7 @@ class MainWindow(QMainWindow):
 
         # Vergelijkpagina: één masterklok voor "Start alles" (zie _alles_tick)
         self._alles_timer = QTimer(self)
+        self._alles_timer.setTimerType(Qt.PreciseTimer)   # zie VideoSpeler.speeltimer
         self._alles_timer.timeout.connect(self._alles_tick)
         self._alles_lopend = []     # [(VergelijkKant, basisframe)] tijdens het samen afspelen
         self._alles_t0 = 0.0
@@ -5954,7 +6187,9 @@ class MainWindow(QMainWindow):
                 continue
             laatste = len(kant.speler.resultaten) - 1
             doel = basis + int(round(t * (info.fps or 30.0)))
-            kant.speler.ga_naar(min(doel, laatste))
+            # `toon_op_klok` en niet `ga_naar`: dit is sequentieel vooruit, dus de
+            # vooruitlezer mag mee — hier draaien twee spelers naast elkaar.
+            kant.speler.toon_op_klok(min(doel, laatste))
             if doel < laatste:
                 klaar = False
         if klaar:
@@ -5963,6 +6198,11 @@ class MainWindow(QMainWindow):
     def _stop_alles(self):
         if self._alles_timer.isActive():
             self._alles_timer.stop()
+        # Ook de spelers zelf pauzeren: onder de masterklok stond hun eigen timer al stil,
+        # maar hun vooruitlezer niet — en die houdt de capture vast plus tot 96 MB aan
+        # gedecodeerde frames waar niemand meer op wacht.
+        for kant in (self.kant_links, self.kant_rechts):
+            kant.speler.pauzeer()
         self._alles_lopend = []
 
     def _zet_alles_snelheid(self, _idx=None):

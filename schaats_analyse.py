@@ -386,7 +386,13 @@ def _kam_masker(grijs_i16, drempel=DEINT_DREMPEL):
     Verwacht int16 (uint8 loopt over op het verschil).
     """
     m = grijs_i16[1:-1]
-    return ((m - grijs_i16[:-2]) * (m - grijs_i16[2:])) > drempel * drempel
+    # In plaats van `(a * b) > d²` met drie tijdelijke arrays van 2 megapixel: het product
+    # in `a` zelf schrijven. Bit-identiek (int16 wrapt in beide gevallen even hard) en op
+    # 1080p ~2 ms sneller — wat in de analyse niets voorstelt, maar tijdens het afspelen
+    # van camcorderbeeld telt elke millisecond van het budget van 40 ms per frame.
+    a = m - grijs_i16[:-2]
+    a *= m - grijs_i16[2:]
+    return a > drempel * drempel
 
 
 def deinterlace(frame, drempel=DEINT_DREMPEL):
@@ -399,8 +405,11 @@ def deinterlace(frame, drempel=DEINT_DREMPEL):
     haalt de kam er wél uit maar laat het temporele mengsel staan: elke uitvoerrij is dan
     nog steeds een mengsel van twee momenten. Gemeten ging de veldverschuiving op
     knie/enkel daarmee van 6,07 naar 5,52 px, tegen **0,03 px** met deze versie (ffmpeg's
-    `yadif` haalt 0,07 px). Kosten ~18 ms per 1080p-frame — verwaarloosbaar naast de
-    ~2 s/frame van de detectiepass en binnen het budget van 40 ms voor afspelen op 25 fps.
+    `yadif` haalt 0,07 px). Kosten ~12 ms per 1080p-frame — verwaarloosbaar naast de
+    ~2 s/frame van de detectiepass, maar wél merkbaar tijdens het afspelen: daar is het
+    hele budget 40 ms per frame bij 25 fps, en decoderen (~8 ms) plus schalen naar een
+    HiDPI-scherm (~15 ms) zit daar al in. Vandaar dat de twee zwaarste stappen zuinig
+    geschreven zijn; zie `_kam_masker` en de `cv2.copyTo` hieronder.
     """
     g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.int16)
     # Verticaal uitsmeren zodat een kamgebied als geheel behandeld wordt en er geen losse
@@ -408,7 +417,15 @@ def deinterlace(frame, drempel=DEINT_DREMPEL):
     kam = cv2.dilate(_kam_masker(g, drempel).view(np.uint8), _DEINT_KERN).view(bool)[0::2]
     uit = frame.copy()
     interp = cv2.addWeighted(frame[0:-2:2], 0.5, frame[2::2], 0.5, 0.0)
-    uit[1:-1:2] = np.where(kam[:, :, None], interp, frame[1:-1:2])
+    # De samenvoegstap via OpenCV in plaats van numpy: `uit[1:-1:2] = np.where(kam[:,:,None],
+    # interp, origineel)` kost 8,9 ms, `cv2.copyTo` op een contigue kopie 1,1 ms — dezelfde
+    # uitvoer, byte voor byte. Het verschil is dat numpy hier een bool-masker over drie
+    # kanalen broadcast en een complete nieuwe array bouwt, waar OpenCV met SIMD over 16
+    # threads alleen de gemaskeerde bytes schrijft. De omweg via een kopie is nodig omdat
+    # cv2 niet in een strided view (elke tweede rij) kan schrijven; die kopie is goedkoop.
+    oneven = frame[1:-1:2].copy()
+    cv2.copyTo(interp, kam.view(np.uint8), oneven)
+    uit[1:-1:2] = oneven
     return uit
 
 
