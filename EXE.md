@@ -1,7 +1,8 @@
 # SchaatsAnalyse als installeerbare .exe
 
 *Plan, opgesteld 24 augustus 2026. Stap 1 en 2 uitgevoerd op 24 augustus 2026, stap 3 en 4 op
-25 augustus 2026; stap 5 en 6 nog niet.*
+25 augustus 2026, stap 5 en 6 op 25 augustus en de schone-machinetest op 26 augustus 2026.
+Wat er nog met de hand moet gebeuren staat per stap onder "Nog te doen".*
 
 ## Context
 
@@ -474,12 +475,28 @@ Windows-gebeurtenislogboek komen. Daarom staat `faulthandler` nu naast `start_lo
 Elke sessie eindigt met `=== netjes afgesloten … ===`; ontbreekt die regel, dan is de app daar
 gecrasht.
 
-### Nog te doen (kan alleen met de hand)
+### De schone machine ✅ *26 augustus 2026*
 
-**Alleen de schone machine** — een pc zonder Python, zonder VC++ runtime, zonder
-GPU-pakketten. Installeren met `dist\SchaatsAnalyse-setup.exe`, starten, één analyse draaien.
-Let op: de installer in `dist\` is van 17:54 en bevat de crashlog nog niet; draai `bouw.bat`
-opnieuw voordat je hem meeneemt.
+Gedaan op een tweede laptop zonder Python, zonder VC++ runtime en zonder GPU-pakketten: setup
+uit Drive gehaald, geïnstalleerd, gestart, **één video geanalyseerd** en rondgeklikt — zonder
+problemen. Daarmee is het deel van deze stap gehaald dat je op je eigen machine principieel
+niet kunt toetsen: de bundel vindt zijn modellen, de C-runtime zit erin, en de app draait
+zonder dat er ooit een venv is opgebouwd.
+
+**Welke build het precies was, is niet meer vast te stellen.** De Info-dialoog van de analyse
+daar toonde `43014c8b`, maar dat veld noemt de versie waarmee die **analyse** gemaakt is en
+niet de geïnstalleerde app — en de laptop is inmiddels niet meer beschikbaar om
+*Instellingen → Apps* na te kijken. Het was dus `43014c8` of de latere `6f96bf14`. Voor de
+conclusie maakt dat niet uit: tussen die twee commits is geen enkel bundelingsbestand
+aangeraakt (`schaatsanalyse.spec`, `installer.iss`, `bouw.bat`, `maak_versie.py` en
+`schaats_omgeving.py` zijn ongewijzigd; het verschil zit in `schaats_analyse`, `schaats_gui`,
+`schaats_yolo` en `schaats_db`). Wat een schone machine moest bewijzen — bundelen,
+installeren, paden, modellen, starten, meten — is in beide gevallen hetzelfde.
+
+**Leerpunt voor de volgende keer:** noteer de versie uit *Instellingen → Apps → Geïnstalleerde
+apps* zolang de machine er nog staat. Die komt uit de `AppVersion` van de installer en zegt
+wélke app er draait; de versie in de Info-dialoog van een analyse is bevroren op het moment
+van analyseren en beantwoordt die vraag dus niet.
 
 ### Het oorspronkelijke plan
 
@@ -552,14 +569,27 @@ duurder. Als het aantal gebruikers ooit groeit is dit de plek om terug te komen.
 
 ### Nog te doen (kan alleen met de hand)
 
-1. **`bouw.bat` opnieuw draaien** — de installer in `dist\` is van 25 aug 17:54 en bevat de
-   crashlog uit TODO_CRASH punt 3 nog niet (zelfde punt als bij stap 5).
-2. **De setup in Drive zetten**: `Mijn Drive\SchaatsAnalyse\app\SchaatsAnalyse-setup.exe` —
-   dat pad staat letterlijk in INSTALLEREN.md. De map `app\` bestaat daar nog niet; hij zit de
-   bibliotheek niet in de weg (`synchroniseer_bronmap` kijkt alleen in `opnames\`, de
-   conflictcheck alleen naar `schaats*.db` in de hoofdmap).
+1. ~~`bouw.bat` opnieuw draaien~~ ✅ — `dist\SchaatsAnalyse-setup.exe` is nu de build van
+   26 aug 19:28, `2026-08-26.6f96bf14`, mét het crashlog-vangnet. Nagemeten dat de stempel aan
+   **beide** kanten klopt: het `_versie`-moduletje in het PYZ-archief van de exe zegt
+   `COMMIT = '6f96bf14', VUIL = False`, en de `ProductVersion` van de installer zegt hetzelfde.
+   Die twee worden los van elkaar opgehaald (stap 1 en stap 4 van `bouw.bat`, ~5 min uit
+   elkaar), dus een commit tíjdens het bouwen kan ze uit elkaar laten lopen — lees ze daarom
+   allebei en niet alleen de bestandseigenschappen.
+2. **De setup op de juiste plek in Drive zetten.** Hij staat nu in de wortel van `Mijn Drive`,
+   terwijl INSTALLEREN.md naar `Mijn Drive\SchaatsAnalyse\app\SchaatsAnalyse-setup.exe`
+   verwijst. Dat is niet alleen een padverschil: de map die met de trainers gedeeld is, is
+   `SchaatsAnalyse` — controleer of ze in de wortel van jouw Mijn Drive überhaupt bij het
+   bestand kunnen. De map `app\` bestaat daar nog niet; hij zit de bibliotheek niet in de weg
+   (`synchroniseer_bronmap` kijkt alleen in `opnames\`, de conflictcheck alleen naar
+   `schaats*.db` in de hoofdmap).
 3. **INSTALLEREN.md meesturen** — bij de setup in dezelfde Drive-map, want een collega die het
    venster van SmartScreen ziet heeft de uitleg op dát moment nodig.
+4. **Let op oude installaties nu de gedeelde bibliotheek op schema v5 staat** (sinds de
+   interlacing-commit `2246151`; de analyse van 26 aug 17:26 in Drive is er al mee gemaakt).
+   Een installatie van vóór die commit kent v4 en weigert de bibliotheek te openen met
+   `BibliotheekTeNieuw` — netjes afgevangen en zonder schade, maar het is wél hét signaal dat
+   die machine de nieuwe setup nodig heeft. Deel dus geen v4-build meer uit.
 
 ### Het oorspronkelijke plan
 
