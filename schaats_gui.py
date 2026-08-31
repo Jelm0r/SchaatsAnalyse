@@ -409,6 +409,12 @@ def _kalibratie_rijen(inst):
         rijen.append(("Camerastand:", f"niet herberekenbaar: {e}", None))
     return rijen
 
+# Bestandsfilter van elke videokiezer, afgeleid van de extensies die de bibliotheek zelf
+# accepteert — anders staat `.mts` (AVCHD-camcorder, precies het interlaced materiaal uit
+# OPNAME.md) wél in de opnamemap maar niet in de bestandskiezer.
+VIDEO_FILTER = ("Video's (" + " ".join("*" + e for e in schaats_db.VIDEO_EXTS) + ");;"
+                "Alle bestanden (*)")
+
 # Kolommen van de opnametabel (fase 8). Als getal genoemd omdat er cel-widgets en een
 # itemChanged-filter op hangen: een kolom erbij mag geen stille verschuiving worden.
 OPNAME_KOL_NAAM, OPNAME_KOL_DUUR, OPNAME_KOL_LOKAAL = 0, 1, 2
@@ -1758,7 +1764,7 @@ class NieuweAnalyseDialog(QDialog):
 
     def _kies_video(self):
         pad, _ = QFileDialog.getOpenFileName(
-            self, "Kies video", "", "Video's (*.mp4 *.mov *.avi *.mkv);;Alle bestanden (*)")
+            self, "Kies video", "", VIDEO_FILTER)
         if not pad:
             return
         self.video_pad = pad
@@ -1939,7 +1945,7 @@ class BatchAnalyseDialog(QDialog):
 
     def _kies_videos(self):
         paden, _ = QFileDialog.getOpenFileNames(
-            self, "Kies video's", "", "Video's (*.mp4 *.mov *.avi *.mkv);;Alle bestanden (*)")
+            self, "Kies video's", "", VIDEO_FILTER)
         for pad in paden:
             self._voeg_rij(pad)
         self._ok.setEnabled(self.tabel.rowCount() > 0)
@@ -3959,6 +3965,10 @@ class BekijkVenster(QDialog):
     Hergebruikt `VideoSpeler` met dezelfde twee afwijkingen als het knipvenster:
     `snel_zoeken=True` (achteruit mag seeken — dit is een kijkje, geen meting) en
     `toon_overlay=False` (er is geen analyse om te tekenen).
+
+    `bron` is een rij uit `schaats_db` — een opname uit `opnames/` of een losse video van
+    deze pc (`bronvideo_voor_pad`); voor het venster maakt dat geen verschil. Alleen als er
+    geen rij is (`bron['id'] is None`, het registreren mislukte) vervallen de punten.
     """
 
     PANEEL_BREEDTE = 260
@@ -3973,6 +3983,11 @@ class BekijkVenster(QDialog):
         self.fps = info.fps or 30.0
         self._punten = []           # rijen uit bron_markering, op framenummer gesorteerd
         self._vullen = False        # onderdrukt itemChanged tijdens het opbouwen
+        # Punten hangen aan een bronvideo-rij. Die is er altijd — ook voor een losse video
+        # van deze pc (`bronvideo_voor_pad`) — behalve als het registreren mislukte; dan
+        # worden de balk, het paneel en de punt-toetsen niet aangemaakt in plaats van als
+        # dode knoppen te blijven staan (zelfde keuze als de teken-regelaars in VideoSpeler).
+        self._punten_aan = bron.get("id") is not None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
@@ -3984,9 +3999,14 @@ class BekijkVenster(QDialog):
         self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
         kop.addWidget(self.lbl_spoel)
         kop.addStretch(1)
-        self.btn_paneel = QPushButton("Punten verbergen")
-        self.btn_paneel.clicked.connect(self._toggle_paneel)
-        kop.addWidget(self.btn_paneel)
+        if self._punten_aan:
+            self.btn_paneel = QPushButton("Punten verbergen")
+            self.btn_paneel.clicked.connect(self._toggle_paneel)
+            kop.addWidget(self.btn_paneel)
+        else:
+            reden = QLabel("punten worden niet bewaard")
+            reden.setStyleSheet("color: #888;")
+            kop.addWidget(reden)
         btn_venster = QPushButton("Venstermodus (F11)")
         btn_venster.clicked.connect(self._toggle_volledig_scherm)
         kop.addWidget(btn_venster)
@@ -4002,21 +4022,23 @@ class BekijkVenster(QDialog):
         # knipvenster ben je grenzen aan het zetten, geen techniek aan het bespreken.
         self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
                                   toon_overlay=False, toon_tekenen=True)
-        self.speler.op_frame_getoond = self._frame_getoond
         self.splitter.addWidget(self.speler)
 
-        # De balk hangt ín de speler, zodat hij dezelfde breedte als de tijdlijn houdt.
-        self.balk = PuntenBalk()
-        self.balk.KLIK.connect(self._klik_op_balk)
-        self.speler.voeg_onderbalk(self.balk)
-
-        self.splitter.addWidget(self._bouw_puntenpaneel())
+        self.balk = None
+        if self._punten_aan:
+            self.speler.op_frame_getoond = self._frame_getoond
+            # De balk hangt ín de speler, zodat hij dezelfde breedte als de tijdlijn houdt.
+            self.balk = PuntenBalk()
+            self.balk.KLIK.connect(self._klik_op_balk)
+            self.speler.voeg_onderbalk(self.balk)
+            self.splitter.addWidget(self._bouw_puntenpaneel())
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         v.addWidget(self.splitter, stretch=1)
 
-        hulp = QLabel(toetsen_hulp("<b>P</b> punt zetten", "<b>1&ndash;9</b> naar punt",
-                                   "<b>Del</b> punt weg", "<b>Esc</b> sluiten"))
+        punt_toetsen = (("<b>P</b> punt zetten", "<b>1&ndash;9</b> naar punt",
+                         "<b>Del</b> punt weg") if self._punten_aan else ())
+        hulp = QLabel(toetsen_hulp(*punt_toetsen, "<b>Esc</b> sluiten"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         v.addWidget(hulp)
@@ -4025,14 +4047,17 @@ class BekijkVenster(QDialog):
         # is hier per definitie niets geanalyseerd — dat is de hele bedoeling.
         resultaten = [FrameResultaat(i, i / self.fps) for i in range(max(1, info.totaal))]
         self.speler.laad(info, resultaten, bron["pad"], bool(bron.get("interlaced")))
-        self.balk.zet(totaal=len(resultaten))
-        self._vernieuw_punten()
+        if self._punten_aan:
+            self.balk.zet(totaal=len(resultaten))
+            self._vernieuw_punten()
         self.speler.ga_naar(0)
 
         # De standaardtoetsen, plus de punten-toetsen die alleen hier bestaan.
-        extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
-        for n in range(9):
-            extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
+        extra = {}
+        if self._punten_aan:
+            extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
+            for n in range(9):
+                extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
         self.toetsen = SpelerToetsen(self, lambda: [self.speler], extra=extra,
                                      op_spoel=self.lbl_spoel.setText)
 
@@ -4556,7 +4581,8 @@ class MainWindow(QMainWindow):
             "<b>opnames</b> in de bibliotheek; ze verschijnen hier vanzelf (of na "
             "'Vernieuwen').<br>Dubbelklik op een opname om er fragmenten uit te knippen, "
             "of open hem met <b>Bekijken</b> om alleen te kijken — volledig scherm, geen "
-            "analyse.")
+            "analyse.<br>Wil je een video bekijken die hier niet in staat, waar hij ook op "
+            "deze pc staat? Gebruik <b>Nieuwe video bekijken</b>.")
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
@@ -4594,6 +4620,15 @@ class MainWindow(QMainWindow):
         knop_map.setToolTip("Opent de map waar de ruwe opnames in horen te staan.")
         knop_map.clicked.connect(self._open_opnamesmap)
         rij.addWidget(knop_map)
+        self.btn_losse_video = QPushButton("🎬 Nieuwe video bekijken...")
+        self.btn_losse_video.setToolTip(
+            "Bekijk een video die ergens anders op deze pc staat — net van de camera\n"
+            "gehaald, van een collega gekregen — zonder hem eerst in de bibliotheek te\n"
+            "zetten. Hetzelfde kijkvenster: volledig scherm, vertragen, inzoomen, spoelen\n"
+            "en punten die bewaard blijven. Er wordt niets geanalyseerd en niets gekopieerd,\n"
+            "en de video komt niet in de lijst hierboven — die is voor de opnames van het team.")
+        self.btn_losse_video.clicked.connect(self._bekijk_losse_video)
+        rij.addWidget(self.btn_losse_video)
         rij.addStretch(1)
         v.addLayout(rij)
         return paneel
@@ -4789,7 +4824,8 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         try:
-            schaats_db.zet_bron_interlaced(self.bieb, bron["id"], uitkomst)
+            if bron["id"] is not None:
+                schaats_db.zet_bron_interlaced(self.bieb, bron["id"], uitkomst)
         except Exception:
             pass                      # meten lukte; alleen het onthouden niet
         bron["interlaced"] = 1 if uitkomst else 0
@@ -4809,7 +4845,9 @@ class MainWindow(QMainWindow):
 
         Doorgaan mag: soms wil je alleen even het begin zien, en wat je al bekeken hebt
         zit in de cloudcache en is daarna wél meteen terug."""
-        status = self._lokaal.get(bron["id"])
+        # Zonder id (een losse video die niet geregistreerd kon worden) niet cachen: die
+        # sleutel zou de meting van élke volgende losse video afvangen.
+        status = self._lokaal.get(bron["id"]) if bron["id"] is not None else None
         if status is None:                 # de achtergrondmeting was nog niet zover
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
@@ -4818,7 +4856,7 @@ class MainWindow(QMainWindow):
                 status = None
             finally:
                 QApplication.restoreOverrideCursor()
-            if status:
+            if status and bron["id"] is not None:
                 self._lokaal[bron["id"]] = status
         if status not in ("cloud", "deels"):
             return True                    # lokaal, of niet te meten → niet zeuren
@@ -4851,7 +4889,8 @@ class MainWindow(QMainWindow):
                 self, "Opname bekijken",
                 "Kies eerst een opname in de lijst.\n\n"
                 "Staat er niets? Zet je opnames in de map 'opnames' in de bibliotheek en "
-                "druk op 'Vernieuwen'.")
+                "druk op 'Vernieuwen'. Wil je een video bekijken die daar niet in staat, "
+                "gebruik dan 'Nieuwe video bekijken...'.")
             return
         if not self._opname_beschikbaar(bron):
             return
@@ -4863,6 +4902,50 @@ class MainWindow(QMainWindow):
         dlg = BekijkVenster(bron, info, self.bieb, self.trainer_naam, parent=self)
         toon_dialoog(dlg)
         self._vernieuw_opnames()      # de puntentelling in de lijst bijwerken
+
+    def _bekijk_losse_video(self):
+        """Een video ergens anders op deze pc bekijken, zonder hem in de bibliotheek te zetten.
+
+        Voor "alleen kijken" is er niets uit de bibliotheek nodig — geen schaatser, geen
+        analyse, geen kopie — maar je kwam er tot nu toe alleen in via een rij in de
+        opnamelijst, en die bestaat per definitie uit bestanden in `opnames/`. Een clip die
+        net van de camera komt of van een collega, was dus niet te bekijken.
+
+        De video krijgt wél een (verborgen) rij in de bibliotheek, want de punten die je zet
+        moeten bewaard blijven; zie `schaats_db.bronvideo_voor_pad` voor het waarom van het
+        absolute pad. Lukt dat registreren niet, dan gaat het kijken gewoon door zonder
+        punten — daar hoort de database niet tussen te komen."""
+        cfg = schaats_db.laad_config()
+        pad, _ = QFileDialog.getOpenFileName(
+            self, "Kies een video om te bekijken", cfg.get("laatste_videomap", ""),
+            VIDEO_FILTER)
+        if not pad:
+            return
+        cfg["laatste_videomap"] = os.path.dirname(pad)
+        try:
+            schaats_db.bewaar_config(cfg)
+        except Exception:
+            pass                      # de map onthouden is comfort, geen voorwaarde
+
+        try:
+            bron = schaats_db.bronvideo_voor_pad(self.bieb, pad)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Video bekijken",
+                f"De video kan bekeken worden, maar punten kunnen nu niet bewaard worden:\n{e}")
+            bron = {"id": None, "naam": os.path.basename(pad), "pad": pad,
+                    "sync": None, "interlaced": None}
+        if not self._opname_beschikbaar(bron):
+            return
+        try:
+            info = video_info(bron["pad"])
+        except Exception as e:
+            QMessageBox.critical(self, "Video bekijken", f"Kan de video niet openen:\n{e}")
+            return
+        dlg = BekijkVenster(bron, info, self.bieb, self.trainer_naam, parent=self)
+        toon_dialoog(dlg)
+        # Géén _vernieuw_opnames(): een losse video staat niet in de werklijst, dus er is
+        # niets bij te werken.
 
     def _open_opnamesmap(self):
         pad = schaats_db.opnames_pad(self.bieb)

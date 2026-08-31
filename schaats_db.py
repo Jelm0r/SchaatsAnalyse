@@ -357,8 +357,24 @@ def _tabel_ddl(naam):
 
 
 def _abs_pad(bieb, rel):
-    """Relatief DB-pad (forward slashes) → absoluut pad op dit OS."""
+    """Relatief DB-pad (forward slashes) → absoluut pad op dit OS.
+
+    Eén uitzondering: een **losse video van deze pc** (zie `bronvideo_voor_pad`) staat er als
+    absoluut pad in en hoort dus niet aan de bibliotheek geplakt te worden — `os.path.join`
+    zou van (`D:\\bieb`, `C:/film.mp4`) anders `C:film.mp4` maken, een drive-relatief pad dat
+    naar iets heel anders wijst."""
+    if _is_extern(rel):
+        return os.path.normpath(rel)
     return os.path.join(bieb, *rel.split("/"))
+
+
+def _is_extern(bestand):
+    """Is dit DB-pad een losse video van deze pc, i.p.v. een bestand in de bibliotheek?
+
+    Alles wat de bibliotheek zelf beheert staat er relatief in (`opnames/<naam>`, fase
+    1-discipline); een absoluut pad kan dus per definitie alleen een losse video zijn. Zo is
+    er geen extra kolom — en dus geen migratie — nodig om de twee soorten te scheiden."""
+    return os.path.isabs(bestand) or bool(os.path.splitdrive(bestand)[0])
 
 
 def _normaliseer_backend(naam):
@@ -682,7 +698,7 @@ def _video_meta(pad):
         return None, None
 
 
-def lijst_bronvideos(bieb):
+def lijst_bronvideos(bieb, extern=False):
     """Alle bekende opnames met hun werklijst-gegevens: status, notitie, hoeveel fragmenten
     er al uit geknipt zijn (= analyses met deze bron), of het bestand er staat en of de
     cloudsync nog bezig is.
@@ -690,7 +706,13 @@ def lijst_bronvideos(bieb):
     `aantal_fragmenten` telt de analyses die uit deze opname komen; `aantal_schaatsers`
     hoeveel verschillende schaatsers dat betreft; `aantal_punten` de bewaarde punten uit het
     handmatige kijkvenster. Het onderscheid "fragmenten vs. analyses"
-    uit de roadmap valt hier samen — elk gemarkeerd fragment wordt precies één analyse."""
+    uit de roadmap valt hier samen — elk gemarkeerd fragment wordt precies één analyse.
+
+    `extern` scheidt de twee soorten rijen: `False` (default) is de **werklijst** — alleen
+    opnames uit `opnames/`, dus wat het team samen moet knippen; `True` alleen de losse
+    video's van deze pc (`bronvideo_voor_pad`), `None` allebei. De default is bewust de
+    werklijst: een losse video staat op één laptop en heeft in de gedeelde lijst niets te
+    zoeken, waar een collega alleen "bestand niet gevonden" van zou zien."""
     with _verbind(bieb) as con:
         rijen = con.execute(
             "SELECT b.*,"
@@ -704,6 +726,8 @@ def lijst_bronvideos(bieb):
     uit = []
     for r in rijen:
         d = dict(r)
+        if extern is not None and _is_extern(d["bestand"]) != extern:
+            continue
         d["pad"] = _abs_pad(bieb, d["bestand"])
         d["sync"] = video_sync_status(d["pad"], d["bytes"])
         uit.append(d)
@@ -712,10 +736,57 @@ def lijst_bronvideos(bieb):
 
 def bronvideo(bieb, bron_id):
     """Eén opname-rij (incl. absoluut pad + sync-status), of KeyError."""
-    for b in lijst_bronvideos(bieb):
+    for b in lijst_bronvideos(bieb, extern=None):
         if b["id"] == bron_id:
             return b
     raise KeyError(f"Opname {bron_id} staat niet in de bibliotheek.")
+
+
+def bronvideo_voor_pad(bieb, pad, meta_lezer=None):
+    """De rij van een **losse video van deze pc** — ergens buiten de bibliotheek — en maakt
+    hem aan als hij er nog niet is. Retourneert dezelfde dict als `lijst_bronvideos`.
+
+    Bedoeld voor "alleen kijken" (`BekijkVenster`): daar wordt niets gemeten en niets
+    gekopieerd, maar de punten die de trainer zet moeten wél bewaard blijven, en die hangen
+    via `bron_markering.bron_id` aan een bronvideo-rij. Vandaar een echte rij, met drie
+    afwijkingen van een opname uit `opnames/`:
+
+    - **`bestand` is het absolute pad** (forward slashes, `abspath` genormaliseerd). Dat is
+      meteen het kenmerk waaraan `_is_extern` de twee soorten scheidt, dus er is geen extra
+      kolom en geen migratie nodig. Dezelfde video later opnieuw kiezen vindt via de UNIQUE
+      op `bestand` dezelfde rij terug — mét de punten van de vorige keer.
+    - **De rij blijft buiten de werklijst** (`lijst_bronvideos` laat hem standaard weg): het
+      pad bestaat alleen op deze laptop, en in de gedeelde Drive zou een collega er niets
+      anders van zien dan "bestand niet gevonden".
+    - **`bytes` blijft NULL.** Die grootte dient alleen om een half gedownloade cloudkopie te
+      herkennen (`video_sync_status`); op een bestand dat gewoon op deze pc staat is de
+      vergelijking betekenisloos en zou hij averechts werken — dezelfde video later kleiner
+      her-gecodeerd zou als "wordt nog gedownload" gelden en het venster niet openen.
+    """
+    sleutel = os.path.abspath(pad).replace("\\", "/")
+    grootte = None
+    # Wie in de bestandskiezer tóch naar de opnames-map bladert, hoort de rij te krijgen die
+    # de scan er al van heeft: dezelfde video onder twee sleutels zou zijn punten splitsen.
+    # Dan gelden ook gewoon de regels van een opname (relatief pad, `bytes` voor de sync).
+    if os.path.normcase(os.path.dirname(os.path.abspath(pad))) == \
+            os.path.normcase(os.path.abspath(opnames_pad(bieb, maak_aan=False))):
+        sleutel = f"{OPNAMES_MAP}/{os.path.basename(pad)}"
+        try:
+            grootte = os.path.getsize(pad)
+        except OSError:
+            grootte = None
+    with _verbind(bieb) as con:
+        rij = con.execute("SELECT id FROM bronvideo WHERE bestand = ?", (sleutel,)).fetchone()
+        if rij is None:
+            fps, totaal = (meta_lezer or _video_meta)(pad)
+            cur = con.execute(
+                "INSERT INTO bronvideo(bestand, naam, bytes, fps, totaal_frames, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sleutel, os.path.basename(pad), grootte, fps, totaal, BRON_STATUS_DEFAULT))
+            bron_id = cur.lastrowid
+        else:
+            bron_id = rij["id"]
+    return bronvideo(bieb, bron_id)
 
 
 def wijzig_bronvideo(bieb, bron_id, status=None, notitie=None, bijgewerkt_door=""):
@@ -1262,6 +1333,43 @@ if __name__ == "__main__":
         assert lijst_bronvideos(bieb)[0]["sync"] == "onvolledig"
         os.remove(bron["pad"])
         assert lijst_bronvideos(bieb)[0]["sync"] == "ontbreekt"   # rij blijft staan
+
+        # ── Losse video van deze pc (alleen kijken) ───────────────────────────────
+        # Buiten de bibliotheek, dus met een absoluut pad in de DB — en daarmee buiten de
+        # gedeelde werklijst, maar mét bewaarde punten.
+        los = os.path.join(tmp, "van de camera.mp4")
+        with open(los, "wb") as f:
+            f.write(b"nep-video ergens op de laptop")
+        lb = bronvideo_voor_pad(bieb, los, meta_lezer=lambda p: (25.0, 1500))
+        assert os.path.isabs(lb["bestand"]) and "/" in lb["bestand"]
+        assert os.path.normpath(lb["pad"]) == os.path.normpath(los)
+        assert lb["bytes"] is None and lb["sync"] is None   # geen cloud-groottecheck
+        assert lb["naam"] == "van de camera.mp4" and lb["totaal_frames"] == 1500
+        # Tweede keer dezelfde video: dezelfde rij, geen tweede.
+        assert bronvideo_voor_pad(bieb, los)["id"] == lb["id"]
+        # Buiten de werklijst, wél op te vragen als je erom vraagt.
+        assert all(b["id"] != lb["id"] for b in lijst_bronvideos(bieb))
+        assert [b["id"] for b in lijst_bronvideos(bieb, extern=True)] == [lb["id"]]
+        assert len(lijst_bronvideos(bieb, extern=None)) == 2
+        assert bronvideo(bieb, lb["id"])["id"] == lb["id"]
+        # De punten hangen er net zo aan als bij een opname en overleven het opnieuw openen.
+        voeg_markering_toe(bieb, lb["id"], 42, "mooie afzet", "Coach Tester")
+        assert bronvideo_voor_pad(bieb, los)["aantal_punten"] == 1
+        assert lijst_markeringen(bieb, lb["id"])[0]["label"] == "mooie afzet"
+        # Kleiner her-gecodeerd bestand mag géén 'onvolledig' opleveren (bytes is NULL).
+        with open(los, "wb") as f:
+            f.write(b"kort")
+        assert bronvideo_voor_pad(bieb, los)["sync"] is None
+        # En het kamfilter-antwoord wordt hier net zo goed onthouden.
+        zet_bron_interlaced(bieb, lb["id"], True)
+        assert bronvideo_voor_pad(bieb, los)["interlaced"] == 1
+        # Wie via de bestandskiezer naar de opnames-map bladert krijgt de bestaande rij,
+        # geen tweede met een absoluut pad (dat zou de punten van die opname splitsen).
+        zelfde = bronvideo_voor_pad(bieb, os.path.join(opnames_pad(bieb),
+                                                       "Training 3 aug.mp4"))
+        assert zelfde["id"] == bron["id"]
+        assert zelfde["bestand"] == f"{OPNAMES_MAP}/Training 3 aug.mp4"
+        assert len(lijst_bronvideos(bieb, extern=None)) == 2   # nog steeds twee rijen
 
         # Conflictkopie-detectie (fase 4): een tweede .db-bestand wordt gemeld.
         assert detecteer_conflictkopieen(bieb) == []
