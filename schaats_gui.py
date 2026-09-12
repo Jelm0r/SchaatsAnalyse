@@ -217,7 +217,7 @@ import numpy as np
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
 import schaats_db
-import schaats_perspectief
+import skate_perspective
 from schaats_analyse import (
     segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
@@ -401,11 +401,11 @@ def _kalibratie_rijen(inst):
     if inv.get("notitie"):
         rijen.append(("Kalibratie-notitie:", inv["notitie"], None))
     try:
-        kal = schaats_perspectief.KalibratieInvoer.uit_dict(inv).kalibreer()
+        kal = skate_perspective.CalibrationInput.from_dict(inv).calibrate()
         rijen.append(("Camerastand:",
-                      f"f = {kal.f:.0f} px{' (geschat)' if kal.f_geschat else ''}, "
-                      f"hoogte {kal.camera_hoogte:.1f} m, horizon {kal.horizon_deg:+.2f}°, "
-                      f"residu {kal.residu_px:.1f} px", None))
+                      f"f = {kal.f:.0f} px{' (geschat)' if kal.f_estimated else ''}, "
+                      f"hoogte {kal.camera_height:.1f} m, horizon {kal.horizon_deg:+.2f}°, "
+                      f"residu {kal.residual_px:.1f} px", None))
     except Exception as e:
         rijen.append(("Camerastand:", f"niet herberekenbaar: {e}", None))
     return rijen
@@ -1342,7 +1342,7 @@ class KalibratieKiezer(QDialog):
         self._dwarslijnen = []
         self._klik_punt = None           # eerste punt van een lijn-in-wording
         self._kalibratie = None
-        self._invoer = None              # KalibratieInvoer van de huidige lijnen
+        self._invoer = None              # CalibrationInput van de huidige lijnen
         self._scaled_size = None
         self._scale = 1.0
 
@@ -1404,7 +1404,7 @@ class KalibratieKiezer(QDialog):
         self.spin_lijnafstand = QDoubleSpinBox()
         self.spin_lijnafstand.setRange(0.5, 30.0)
         self.spin_lijnafstand.setSingleStep(0.5)
-        self.spin_lijnafstand.setValue(schaats_perspectief.STANDAARD_LIJNAFSTAND)
+        self.spin_lijnafstand.setValue(skate_perspective.DEFAULT_LINE_DISTANCE)
         self.spin_lijnafstand.setSuffix(" m")
         self.spin_lijnafstand.valueChanged.connect(self._herkalibreer)
         self.lbl_lijnafstand = QLabel("Afstand tussen baanlijnen:")
@@ -1496,21 +1496,21 @@ class KalibratieKiezer(QDialog):
         """Zet een bestaande kalibratie in de dialoog. De beeldmaat moet kloppen: de
         lijnen staan in pixels, dus op een andersgrote video zouden ze er stilzwijgend
         naast liggen en een plausibele maar foute kalibratie opleveren."""
-        if not invoer.past_bij(self._orig_w, self._orig_h):
+        if not invoer.fits(self._orig_w, self._orig_h):
             QMessageBox.warning(
                 self, "Kalibratie past niet",
-                f"Die kalibratie is gemaakt op beeld van {invoer.beeld_w}×{invoer.beeld_h} "
+                f"Die kalibratie is gemaakt op beeld van {invoer.image_w}×{invoer.image_h} "
                 f"en deze video is {self._orig_w}×{self._orig_h}. De lijnen staan in "
                 f"pixels, dus overnemen zou ze verkeerd neerleggen. Trek ze opnieuw na.")
             return
-        self._rijlijnen = list(invoer.rijlijnen)
-        self._dwarslijnen = list(invoer.dwarslijnen)
-        self.spin_lijnafstand.setValue(invoer.lijnafstand)
+        self._rijlijnen = list(invoer.track_lines)
+        self._dwarslijnen = list(invoer.cross_lines)
+        self.spin_lijnafstand.setValue(invoer.line_distance)
         self.spin_f.setValue(int(invoer.f_px or 0))
         # Eerst de schaalvlag, dan pas methode/lengte: `_schaal_gewijzigd` zet de methode
         # vast op 'beenvlak' zodra alleen-hoeken aan staat, en zou een daarvóór gezette
         # keuze weer overschrijven.
-        self.chk_alleen_hoeken.setChecked(not invoer.schaal_bekend)
+        self.chk_alleen_hoeken.setChecked(not invoer.scale_known)
         if config is not None:
             idx = self.combo_methode.findData(config.methode)
             if idx >= 0:
@@ -1543,7 +1543,7 @@ class KalibratieKiezer(QDialog):
             painter.drawEllipse(int(px) - 4, int(py) - 4, 8, 8)
         if self._kalibratie is not None:
             # ware horizon (verdwijnlijn van het ijsvlak) als visuele controle
-            a, b, c = self._kalibratie.horizonlijn
+            a, b, c = self._kalibratie.horizon_line
             if abs(b) > 1e-9:
                 y0 = -(c + a * 0.0) / b * s
                 y1 = -(c + a * self._orig_w) / b * s
@@ -1682,15 +1682,15 @@ class KalibratieKiezer(QDialog):
         # Via de invoer kalibreren (niet rechtstreeks): dan loopt wat hier live te zien
         # is langs exact dezelfde weg als een later heropende analyse.
         alleen_hoeken = self.chk_alleen_hoeken.isChecked()
-        invoer = schaats_perspectief.KalibratieInvoer(
-            rijlijnen=self._sorteer_rijlijnen(self._rijlijnen),
-            dwarslijnen=list(self._dwarslijnen),
-            beeld_w=self._orig_w, beeld_h=self._orig_h,
-            lijnafstand=self.spin_lijnafstand.value(),
-            schaal_bekend=not alleen_hoeken,
+        invoer = skate_perspective.CalibrationInput(
+            track_lines=self._sorteer_rijlijnen(self._rijlijnen),
+            cross_lines=list(self._dwarslijnen),
+            image_w=self._orig_w, image_h=self._orig_h,
+            line_distance=self.spin_lijnafstand.value(),
+            scale_known=not alleen_hoeken,
             f_px=self.spin_f.value() or None)
         try:
-            self._kalibratie = invoer.kalibreer()
+            self._kalibratie = invoer.calibrate()
             self._invoer = invoer
         except ValueError as e:
             self.lbl_status.setText(f"Kalibratie lukt nog niet: {e}{self._lijn_hint(n_rij)}")
@@ -1700,25 +1700,25 @@ class KalibratieKiezer(QDialog):
         kal = self._kalibratie
         # Zonder bekende schaal is de camerahoogte in willekeurige eenheden; die dan
         # in meters tonen zou een precisie suggereren die er niet is.
-        hoogte = (f"camerahoogte {kal.camera_hoogte:.1f} m, " if kal.schaal_bekend
+        hoogte = (f"camerahoogte {kal.camera_height:.1f} m, " if kal.scale_known
                   else "")
         # Met precies 2 baanlijnen + 2 dwarslijnen is het stelsel exact bepaald: het
         # residu is dan per constructie 0,00 px en zegt niets over de kwaliteit —
         # tonen zou als "perfect gekalibreerd" gelezen worden. Een derde dwarslijn
         # maakt V2 een kleinste-kwadraten-fit en het residu wél informatief.
         overbepaald = len(self._dwarslijnen) >= 3 or len(self._rijlijnen) >= 3
-        residu = (f", residu {kal.residu_px:.1f} px" if overbepaald else "")
+        residu = (f", residu {kal.residual_px:.1f} px" if overbepaald else "")
         tekst = (f"Kalibratie OK — f = {kal.f:.0f} px"
-                 f"{' (geschat)' if kal.f_geschat else ''}, {hoogte}"
+                 f"{' (geschat)' if kal.f_estimated else ''}, {hoogte}"
                  f"horizon {kal.horizon_deg:+.2f}°{residu}.")
         if not overbepaald:
             tekst += ("\nPrecies genoeg lijnen: er is géén controle mogelijk. Teken een "
                       "derde dwarslijn om te zien of de kalibratie klopt.")
-        if not kal.schaal_bekend:
+        if not kal.scale_known:
             tekst += ("\nAlleen hoeken: die zijn schaalvrij en dus exact; snelheid en "
                       "slaglengte blijven leeg.")
-        if kal.waarschuwingen:
-            tekst += "\n⚠ " + "\n⚠ ".join(kal.waarschuwingen)
+        if kal.warnings:
+            tekst += "\n⚠ " + "\n⚠ ".join(kal.warnings)
         self.lbl_status.setText(tekst)
         self.btn_ok.setEnabled(True)
         self._render()
@@ -1732,7 +1732,7 @@ class KalibratieKiezer(QDialog):
         if methode == "onderbeen":
             onderbeen_l = (self.spin_onderbeen.value() / 100.0
                            if self.spin_onderbeen.value() > 0
-                           else schaats_perspectief.onderbeen_uit_lichaamslengte(
+                           else skate_perspective.lower_leg_from_body_height(
                                self.spin_lengte.value()))
         else:
             onderbeen_l = None
@@ -7699,12 +7699,12 @@ class MainWindow(QMainWindow):
                 # De kalibratie levert de kanteling zelf; de horizon-stap vervalt, net
                 # als bij een enkele analyse.
                 horizon_deg, auto_horizon = 0.0, False
-                if not batch_perspectief.invoer.past_bij(frame0.shape[1], frame0.shape[0]):
+                if not batch_perspectief.invoer.fits(frame0.shape[1], frame0.shape[0]):
                     QMessageBox.warning(
                         self, "Kalibratie past niet",
                         f"'{titel}' is {frame0.shape[1]}×{frame0.shape[0]} en de "
-                        f"kalibratie is gemaakt op {batch_perspectief.invoer.beeld_w}×"
-                        f"{batch_perspectief.invoer.beeld_h}. Deze clip wordt overgeslagen.")
+                        f"kalibratie is gemaakt op {batch_perspectief.invoer.image_w}×"
+                        f"{batch_perspectief.invoer.image_h}. Deze clip wordt overgeslagen.")
                     continue
             else:
                 horizon = self._kies_horizon(frame0)

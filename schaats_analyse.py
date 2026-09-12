@@ -30,7 +30,7 @@ import argparse
 from collections import deque, namedtuple
 from dataclasses import dataclass, field
 
-import schaats_perspectief   # puur numpy — veilig in beide venvs
+import skate_perspective   # puur numpy — veilig in beide venvs
 
 
 # ── Where do the files live? ────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ BOCHT_MIN_TORSO_PX = 12  # onder deze romplengte is de ratio pixelruis (de verst
                          # in de bibliotheek meet 25–35 px)
 
 # ── Perspectiefcorrectie (fase 7) ───────────────────────────────────────────────
-# De 3D-reconstructie zelf zit in schaats_perspectief.py; hier alleen de koppeling.
+# De 3D-reconstructie zelf zit in skate_perspective.py; hier alleen de koppeling.
 ENKEL_HOOGTE_M       = 0.10   # enkel-landmark ligt op malleolus + schaats, niet óp het ijs
 RIJRICHTING_VENSTER_S = 0.4   # venster (s) voor de traject-richting uit wereldposities
 RIJRICHTING_MIN_M     = 0.15  # minimale verplaatsing in het venster om de richting te vertrouwen
@@ -305,26 +305,26 @@ class AfzetEvent:
 @dataclass
 class PerspectiefConfig:
     """Opt-in perspectiefcorrectie via baanlijnen (fase 7): een kalibratie uit
-    `schaats_perspectief.kalibreer_uit_lijnen` plus de reconstructie-keuzes.
+    `skate_perspective.calibrate_from_lines` plus de reconstructie-keuzes.
     Zonder deze config gedraagt de pijplijn zich exact als voorheen.
 
-    `invoer` (KalibratieInvoer) is de bewaarbare herkomst van `kalibratie`. Hij is
+    `invoer` (CalibrationInput) is de bewaarbare herkomst van `kalibratie`. Hij is
     optioneel omdat de kern ook met een los opgebouwde kalibratie werkt (zelftests),
     maar zónder invoer kan de config niet opgeslagen worden — `naar_dict` weigert dat
     dan expliciet in plaats van stilzwijgend een correctie te laten verdampen."""
-    kalibratie: object              # schaats_perspectief.PerspectiefKalibratie
+    kalibratie: object              # skate_perspective.PerspectiveCalibration
     methode: str = "onderbeen"      # 'onderbeen' (bol-snijding) | 'beenvlak' (rijrichting-vlak)
     onderbeen_l: float = None       # onderbeenlengte in m (verplicht bij 'onderbeen')
     enkel_hoogte: float = ENKEL_HOOGTE_M
-    invoer: object = None           # schaats_perspectief.KalibratieInvoer
+    invoer: object = None           # skate_perspective.CalibrationInput
 
     def naar_dict(self):
         """JSON-bare vorm voor `analyse.instellingen_json`."""
         if self.invoer is None:
-            raise ValueError("deze PerspectiefConfig heeft geen KalibratieInvoer en "
+            raise ValueError("deze PerspectiefConfig heeft geen CalibrationInput en "
                              "kan dus niet opgeslagen worden")
         return {
-            "invoer": self.invoer.naar_dict(),
+            "invoer": self.invoer.to_dict(),
             "methode": self.methode,
             "onderbeen_l": None if self.onderbeen_l is None else float(self.onderbeen_l),
             "enkel_hoogte": float(self.enkel_hoogte),
@@ -334,8 +334,8 @@ class PerspectiefConfig:
     def uit_dict(cls, d):
         """Herbouwt de config uit `naar_dict`, inclusief het herberekenen van de
         kalibratie uit de bewaarde lijnen. Gooit ValueError als dat niet lukt."""
-        invoer = schaats_perspectief.KalibratieInvoer.uit_dict(d["invoer"])
-        return cls(kalibratie=invoer.kalibreer(),
+        invoer = skate_perspective.CalibrationInput.from_dict(d["invoer"])
+        return cls(kalibratie=invoer.calibrate(),
                    methode=d.get("methode", "onderbeen"),
                    onderbeen_l=d.get("onderbeen_l"),
                    enkel_hoogte=d.get("enkel_hoogte", ENKEL_HOOGTE_M),
@@ -2007,8 +2007,8 @@ def _wereldtraject(resultaten, perspectief, fps, w, h):
             e_idx = L_ANKLE if r.been == 'links' else R_ANKLE
         else:                             # geen cyclus-toewijzing: laagste enkel in beeld
             e_idx = L_ANKLE if r.lm[L_ANKLE].y >= r.lm[R_ANKLE].y else R_ANKLE
-        P = schaats_perspectief.punt_op_ijs(kal, _lm_px(r, e_idx, w, h),
-                                            hoogte=perspectief.enkel_hoogte)
+        P = skate_perspective.point_on_ice(kal, _lm_px(r, e_idx, w, h),
+                                           height=perspectief.enkel_hoogte)
         if P is not None:
             pos[i] = P[:2]
 
@@ -2038,19 +2038,19 @@ def _perspectief_hoek(r, enkel_px, knie_px, perspectief, richting):
     `hoek_betrouwbaar`. Valt bij een mislukte reconstructie (enkel boven de horizon —
     kan alleen bij een ontspoorde detectie) terug op de oude beeldvlak-meting.
     """
-    rec = schaats_perspectief.reconstrueer_hoek(
+    rec = skate_perspective.reconstruct_angle(
         perspectief.kalibratie, enkel_px, knie_px,
-        methode=perspectief.methode, onderbeen_l=perspectief.onderbeen_l,
-        vlak_richting=richting if perspectief.methode == 'beenvlak' else None,
-        rijrichting=richting, enkel_hoogte=perspectief.enkel_hoogte)
+        method=perspectief.methode, lower_leg_l=perspectief.onderbeen_l,
+        plane_direction=richting if perspectief.methode == 'beenvlak' else None,
+        travel_direction=richting, ankle_height=perspectief.enkel_hoogte)
     oude_hoek = bereken_hoek_tov_ijs(enkel_px, knie_px, r.horizon_deg)
     if rec is None:
         r.hoek_correctie = None
         r.hoek_betrouwbaar = False
         return oude_hoek
-    hoek = round(float(rec.hoek), 1)     # gewone float: gaat zo de DB/CSV/JSON in
+    hoek = round(float(rec.angle), 1)     # gewone float: gaat zo de DB/CSV/JSON in
     r.hoek_correctie = round(hoek - oude_hoek, 1)
-    r.hoek_betrouwbaar = rec.betrouwbaar
+    r.hoek_betrouwbaar = rec.reliable
     return hoek
 
 
@@ -2142,7 +2142,7 @@ def verwerk_afgeleiden(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cyclu
             if np.isnan(posities[i, 0]):
                 continue
             r.wereld_xy = (float(posities[i, 0]), float(posities[i, 1]))
-            if perspectief.kalibratie.schaal_bekend:
+            if perspectief.kalibratie.scale_known:
                 j0, j1 = max(i - k, 0), min(i + k, len(resultaten) - 1)
                 d = posities[j1] - posities[j0]
                 if not np.isnan(d[0]) and j1 > j0:
