@@ -218,7 +218,7 @@ from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 
 import schaats_db
 import skate_perspective
-from schaats_analyse import (
+from skate_analysis import (
     segmenteer_afzetten, teken_overlay_op_frame, horizon_hoek_uit_lijn,
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
     torso_centroid, kader_reeks, maak_voorvulling, bepaal_bocht_reeks,
@@ -618,7 +618,7 @@ def _laad_backend():
                 if is_frozen():
                     _backend_fn = _backend_stuk      # MediaPipe zit niet in dit pakket
                 else:
-                    from schaats_analyse import analyseer as mp_analyseer
+                    from skate_analysis import analyseer as mp_analyseer
                     _backend_fn = mp_analyseer
         return _backend_fn
 

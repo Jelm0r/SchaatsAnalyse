@@ -109,7 +109,7 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
     import cv2
     import schaats_db
     import schaats_gui as G
-    from schaats_analyse import (FrameResultaat, Landmark, verwerk_afgeleiden,
+    from skate_analysis import (FrameResultaat, Landmark, verwerk_afgeleiden,
                                  segmenteer_afzetten, video_info)
 
     # ── fixture ──────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
             pts[32] = (pts[28][0] - 0.02, pts[28][1] + 0.02)
             for j, (x, y) in pts.items():
                 lm[j] = Landmark(x, y, 0.0, 1.0)
-            res.append(FrameResultaat(frame_nr=i, tijd=t, lm=lm, pose_gevonden=True))
+            res.append(FrameResultaat(frame_nr=i, time=t, lm=lm, pose_found=True))
         return res
 
     schaats_db.open_db(bieb)

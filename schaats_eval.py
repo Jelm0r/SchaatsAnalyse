@@ -49,7 +49,7 @@ import sys
 import cv2
 import numpy as np
 
-from schaats_analyse import (
+from skate_analysis import (
     laad_landmarks, verwerk_afgeleiden, segmenteer_afzetten, bereken_hoek_tov_ijs,
     bocht_ratio, bepaal_bocht_reeks, BOCHT_IN, BOCHT_UIT,
     VIS_MIN, L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE, _savgol,

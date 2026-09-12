@@ -35,7 +35,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import date
 
-from schaats_analyse import (sla_landmarks_op, laad_landmarks, video_info,
+from skate_analysis import (sla_landmarks_op, laad_landmarks, video_info,
                              ONV_AFGEKAPT, ONV_GEEN_PUSH, is_frozen, data_dir)
 
 DB_NAAM     = "schaats.db"
@@ -1257,7 +1257,7 @@ def verwijder_analyse(bieb, analyse_id):
 if __name__ == "__main__":
     import tempfile
     import numpy as np
-    from schaats_analyse import arrays_naar_resultaten, resultaten_naar_arrays, AfzetEvent
+    from skate_analysis import arrays_naar_resultaten, resultaten_naar_arrays, AfzetEvent
 
     tmp = tempfile.mkdtemp(prefix="schaats_db_test_")
     try:
@@ -1372,14 +1372,14 @@ if __name__ == "__main__":
         events = [
             AfzetEvent(0, "links",  0,  5, 0.00, 0.20, 40.0, 38.0, 44.0),
             AfzetEvent(1, "rechts", 6, 12, 0.24, 0.48, 42.0, 40.0, 45.0,
-                       opmerking="gemiste tegenafzet?"),
+                       note="gemiste tegenafzet?"),
             # Onvolledig: tellen mee in het aantal, maar niet in de gemiddelde hoek —
             # anders trekken die veel te steile hoeken het gemiddelde op. Beide redenen,
             # want `lijst_analyses` moet ze allebei uitfilteren.
             AfzetEvent(2, "links",  13, 19, 0.52, 0.76, 79.0, 60.0, 80.0,
-                       onvolledig=ONV_AFGEKAPT),
+                       incomplete=ONV_AFGEKAPT),
             AfzetEvent(3, "rechts", 20, 26, 0.80, 1.04, 83.0, 74.0, 88.0,
-                       onvolledig=ONV_GEEN_PUSH),
+                       incomplete=ONV_GEEN_PUSH),
         ]
         video = os.path.join(tmp, "Testvideo.mp4")
         with open(video, "wb") as f:

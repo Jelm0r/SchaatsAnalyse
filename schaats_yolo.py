@@ -67,7 +67,7 @@ try:                           # optioneel: RTMPose-verfijning (pip install rtml
 except ImportError:
     IS_RTMPOSE = False
 
-from schaats_analyse import (
+from skate_analysis import (
     FrameResultaat, Landmark, VideoInfo, video_info,
     smooth_landmarks_offline, verwerk_afgeleiden, zet_horizon, fase_voortgang,
     bocht_ratio, bepaal_bocht_reeks, NUM_POSES_DEFAULT, BOCHT_IN, BOCHT_UIT,
@@ -1895,7 +1895,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
 
     resultaten = []
     for f in range(n_frames):
-        r = FrameResultaat(frame_nr=f, tijd=f / info.fps if info.fps > 0 else 0)
+        r = FrameResultaat(frame_nr=f, time=f / info.fps if info.fps > 0 else 0)
         r.bocht = bool(buiten_meting[f])
         if f in doel_per_frame:
             r.lm = doel_per_frame[f].lm
@@ -2044,7 +2044,7 @@ def _zelftest_bochtwacht():
     wacht = _BochtWacht(FPS, W, H)
     resultaten, buiten_meting, frontaal_op = [], [], None
     for f in range(300):
-        r = FrameResultaat(frame_nr=f, tijd=f / FPS)
+        r = FrameResultaat(frame_nr=f, time=f / FPS)
         controle = wacht.skip                      # infereren we dit frame alleen als check?
         if not wacht.analyseren(f):
             buiten_meting.append(True)             # overgeslagen: geen inferentie
