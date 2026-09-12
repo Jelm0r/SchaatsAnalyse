@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from datetime import date
 
 from schaats_analyse import (sla_landmarks_op, laad_landmarks, video_info,
-                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_bevroren, data_dir)
+                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_frozen, data_dir)
 
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
@@ -190,7 +190,7 @@ def app_versie():
     draaiende sessie)."""
     global _app_versie_cache
     if _app_versie_cache is None:
-        gebundeld = _versie_uit_bundel() if is_bevroren() else None
+        gebundeld = _versie_uit_bundel() if is_frozen() else None
         if gebundeld is not None:
             _app_versie_cache = gebundeld
         else:

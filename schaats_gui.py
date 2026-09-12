@@ -27,11 +27,11 @@ import time
 # stuk — de tqdm-balk van ultralytics/rtmlib, de logging-handler die ultralytics bij de
 # import aanhaakt, elke sys.stdout.write. Dat moet dus geregeld zijn vóór de eerste van
 # die imports, en dus ook vóór _start_opstartscherm() hieronder, dat al op moduleniveau
-# een venster neerzet. schaats_omgeving is stdlib-only: ~1 ms, threading stond er al.
-# In de repo-omgeving gebeurt er niets, tenzij SCHAATSANALYSE_LOG gezet is.
-import schaats_omgeving
+# een venster neerzet. skate_environment is stdlib-only: ~1 ms, threading stond er al.
+# In de repo-omgeving gebeurt er niets, tenzij SKATEANALYSIS_LOG gezet is.
+import skate_environment
 
-LOGPAD = schaats_omgeving.start_logboek() if __name__ == "__main__" else None
+LOGPAD = skate_environment.start_log() if __name__ == "__main__" else None
 
 # Het vangnet daaronder, om dezelfde reden en op hetzelfde moment: een crash in Qt of in
 # een rekenbibliotheek gebeurt in C++ en laat zonder dit niets achter — geen traceback,
@@ -41,7 +41,7 @@ LOGPAD = schaats_omgeving.start_logboek() if __name__ == "__main__" else None
 # hier anders spoorloos verdwijnen (de backend-warmup, de lokaal-proef op de opnames).
 # Anders dan het logboek gebeurt dit óók in de repo-omgeving: juist daar wordt gedebugd.
 if __name__ == "__main__":
-    schaats_omgeving.start_crashlog()
+    skate_environment.start_crashlog()
 
 # ── Qt eerst, en meteen een opstartscherm ───────────────────────────────────────
 # Bewust vóór alle andere imports: de rest van deze module trekt cv2/numpy binnen en
@@ -223,7 +223,7 @@ from schaats_analyse import (
     detecteer_ijslijn, PerspectiefConfig, verwerk_afgeleiden, Landmark,
     torso_centroid, kader_reeks, maak_voorvulling, bepaal_bocht_reeks,
     FrameResultaat, video_info, knip_fragmenten, KnipAfgebroken,
-    ONV_AFGEKAPT, ONV_GEEN_PUSH, app_dir, is_bevroren,
+    ONV_AFGEKAPT, ONV_GEEN_PUSH, app_dir, is_frozen,
     open_video, is_interlaced,
 )
 
@@ -607,15 +607,15 @@ def _laad_backend():
                     _backend_fn = schaats_yolo.analyseer
                 except Exception as e:
                     BACKEND_FOUT = f"{type(e).__name__}: {e}"
-                    if not is_bevroren():
+                    if not is_frozen():
                         IS_YOLO = False
                         BACKEND_NAAM = "MediaPipe"
                     print(f"YOLO-backend kon niet geladen worden ({BACKEND_FOUT}); "
-                          + ("er kan nu niet geanalyseerd worden." if is_bevroren()
+                          + ("er kan nu niet geanalyseerd worden." if is_frozen()
                              else "de app werkt verder met MediaPipe."),
                           file=sys.stderr)
             if _backend_fn is None:
-                if is_bevroren():
+                if is_frozen():
                     _backend_fn = _backend_stuk      # MediaPipe zit niet in dit pakket
                 else:
                     from schaats_analyse import analyseer as mp_analyseer
@@ -7381,7 +7381,7 @@ class MainWindow(QMainWindow):
         if not BACKEND_FOUT or self._backend_gemeld:
             return
         self._backend_gemeld = True
-        if is_bevroren():
+        if is_frozen():
             # In het gebundelde pakket is er geen tweede backend om op terug te vallen:
             # er valt nu niets te meten (bibliotheek en opnames bekijken werken wel).
             QMessageBox.critical(

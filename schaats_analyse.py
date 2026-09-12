@@ -33,13 +33,13 @@ from dataclasses import dataclass, field
 import schaats_perspectief   # puur numpy — veilig in beide venvs
 
 
-# ── Waar staan de bestanden? ────────────────────────────────────────────────────
-# Deze drie hoorden hier (de laagste gedeelde module: schaats_gui, schaats_yolo én
-# schaats_db importeren er alle drie uit), maar staan nu in schaats_omgeving.py — dat is
-# stdlib-only en dus laadbaar vóór het opstartscherm, waar `data_dir()` al nodig is om de
-# uitvoer om te leiden (EXE.md stap 2) terwijl deze module juist cv2+numpy binnentrekt.
-# Ze worden hier doorgegeven, zodat elke bestaande import ongewijzigd blijft werken.
-from schaats_omgeving import is_bevroren, app_dir, data_dir     # noqa: F401
+# ── Where do the files live? ────────────────────────────────────────────────────
+# These three belong here (the lowest shared module: schaats_gui, schaats_yolo, and
+# schaats_db all import them from here), but now live in skate_environment.py — that
+# module is stdlib-only and thus loadable before the splash screen, where `data_dir()`
+# is already needed to redirect output (EXE.md step 2) while this module pulls in
+# cv2+numpy. They're re-exported here, so every existing import keeps working unchanged.
+from skate_environment import is_frozen, app_dir, data_dir     # noqa: F401
 
 
 # MediaPipe wordt bewust NIET op moduleniveau geïmporteerd: dan kan dit bestand ook
