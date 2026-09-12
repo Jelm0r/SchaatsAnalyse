@@ -113,6 +113,22 @@ deze pc"** dat, en krijg je bij het openen een melding met deze instructie erbij
 
 ---
 
+## Opnames van de camera in de bibliotheek zetten
+
+Dat hoeft niet meer via de Verkenner. Op het tabblad **Opnames**: **Van camera naar
+bibliotheek...** → kies op de geheugenkaart of camera de opnames (meerdere tegelijk mag; op een
+camcorder staan ze meestal in `PRIVATE\AVCHD\BDMV\STREAM`, bestanden als `00005.MTS`). De app
+kopieert ze naar de map `opnames` van de bibliotheek en laat zien hoe ver het is, hoe snel het
+gaat en hoe lang het nog duurt. Reken op ongeveer een minuut per 4 GB vanaf een snelle
+geheugenkaart; naar een Drive-map kan het langer duren.
+
+Daarna staan ze in de lijst en zet Google Drive ze zelf op de gedeelde schijf — collega's zien
+ze zodra die upload klaar is. Een opname die er al staat wordt nooit overschreven: heeft een
+nieuwe opname toevallig dezelfde naam als een oude, hernoem hem dan eerst op de camera.
+**Stoppen** halverwege kan altijd; wat al helemaal gekopieerd was blijft staan.
+
+---
+
 ## Video kijken: overal dezelfde toetsen
 
 Of je nu een ruwe opname bekijkt, fragmenten knipt, een analyse terugkijkt of twee schaatsers
@@ -156,6 +172,26 @@ het ongeveer twee keer zo lang. Je hoeft daar niets voor in te stellen.
 
 De bocht wordt trouwens grotendeels overgeslagen — daar valt technisch niets te meten. Dat
 scheelt op een lange opname bijna de helft van de tijd.
+
+## Staat de schaatser klein in beeld?
+
+Een schaatser die ver weg begint is voor de detectie de eerste seconden vaak te klein: het
+skelet verschijnt dan pas als hij dichterbij is, en op sommige beelden blijven er ook
+onderweg stukken zonder skelet. Daar is iets aan te doen bij het aanwijzen van de
+schaatser: **sleep een kader om hem heen** in plaats van erop te klikken. Het programma
+volgt hem dan vanaf dat kader, ook waar de detectie hem zelf nog niet ziet.
+
+Zoom eerst in met het **muiswiel** (rond de muisaanwijzer) en verschuif het beeld met de
+**rechtermuisknop**, zodat je het kader redelijk strak om de schaatser kunt zetten — van
+hoofd tot schaatsen. Klik daarna op **Volg dit kader**. Een gewone klik werkt nog altijd;
+het kader is alleen nodig als de schaatser klein staat.
+
+Er is wel een ondergrens. Is de schaatser op het eerste frame kleiner dan ongeveer **70
+pixels** (op een 1080p-beeld: kleiner dan een vingernagel op het scherm), dan zijn er
+simpelweg geen benen om te meten — dat helpt geen kader. Het programma waarschuwt dan.
+Begin het fragment in dat geval later, op het moment dat de schaatser groter in beeld
+staat; een fragment van een paar seconden vanaf dát moment is meer waard dan een lang
+fragment waarin hij nog ver weg is.
 
 ## Bekende hebbelijkheid
 

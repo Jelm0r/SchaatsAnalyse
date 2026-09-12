@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from datetime import date
 
 from schaats_analyse import (sla_landmarks_op, laad_landmarks, video_info,
-                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_bevroren)
+                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_bevroren, data_dir)
 
 DB_NAAM     = "schaats.db"
 MEDIA_MAP   = "media"
@@ -59,6 +59,8 @@ BRON_STATUS_DEFAULT = BRON_STATUSSEN[0]
 AFGEKAPT_MARKER = ONV_AFGEKAPT
 ONVOLLEDIG_MARKERS = (ONV_AFGEKAPT, ONV_GEEN_PUSH)
 ENV_BIBLIOTHEEK = "SCHAATSANALYSE_BIBLIOTHEEK"   # override voor tests
+ENV_LOKAAL = "SCHAATSANALYSE_LOKAAL"             # idem, voor de lokale bibliotheek
+LOKAAL_MAP = "lokaal"                            # onder data_dir(): de lokale bibliotheek
 
 
 # ── Config (per gebruiker, dus lokaal — niet in de gedeelde map) ───────────────
@@ -70,6 +72,23 @@ def config_pad():
 
 def standaard_bibliotheek():
     return os.path.join(os.path.expanduser("~"), "Documents", "SchaatsAnalyse")
+
+
+def lokale_bibliotheek():
+    """De **lokale** bibliotheek: dezelfde database-opzet als de gedeelde, maar op deze pc
+    (`%LOCALAPPDATA%\\SchaatsAnalyse\\lokaal`, naast het logboek) en nooit in de Drive.
+
+    Hier staan de **losse video's** die via "Nieuwe video bekijken" geopend zijn, mét hun
+    punten. Die rijen dragen een absoluut pad van déze pc, en dat hoort niet in de gedeelde
+    database: een collega heeft er niets aan behalve een rij "bestand niet gevonden". Het is
+    bewust een tweede bibliotheek en geen tweede opslagroute — elke functie in deze module
+    werkt er ongewijzigd op (`bronvideo_voor_pad`, `voeg_markering_toe`, …), dus het
+    kijkvenster hoeft alleen een ander `bieb`-pad mee te krijgen. `open_db` maakt er ook
+    een lege `media/` en `opnames/` bij; die kosten niets en zo blijft er één aanmaakroute.
+    Geen sync-discipline nodig (geen cloudmap), maar hij komt gratis mee."""
+    pad = os.environ.get(ENV_LOKAAL) or os.path.join(data_dir(), LOKAAL_MAP)
+    open_db(pad)
+    return pad
 
 
 def laad_config():
@@ -698,6 +717,116 @@ def _video_meta(pad):
         return None, None
 
 
+KOPIEER_BLOK = 4 * 1024 * 1024      # leesstap bij het kopiëren van de camera (~10 meldingen/s)
+KOPIEER_DEEL = ".deel"              # tijdelijke naam tijdens het kopiëren — geen video-extensie
+
+
+class KopieerAfgebroken(Exception):
+    """De gebruiker heeft het kopiëren afgebroken (`stop_check` gaf True)."""
+
+
+def kopieer_plan(bieb, paden):
+    """Wat er van `paden` (bestanden op de camera/geheugenkaart) naar `opnames/` gaat, en wat
+    niet en waarom. Eén dict per pad: `pad`, `naam`, `bytes`, `doel` en `reden` — `None` =
+    kopiëren, anders de reden om over te slaan. De GUI toont die redenen vóór het kopiëren
+    begint, want tijdens het kopiëren draait er een thread die niets kan vragen.
+
+    **Er wordt nooit overschreven.** De identiteit van een opname is `opnames/<naam>`
+    (`synchroniseer_bronmap`), en aan die rij hangen de geknipte fragmenten, de status en de
+    punten van het team. Een bestand met dezelfde naam maar een andere grootte eroverheen
+    zetten zou al dat werk stilzwijgend op een andere opname laten wijzen; dezelfde grootte
+    is vrijwel zeker dezelfde opname en dan valt er niets te kopiëren. Beide gevallen worden
+    gemeld en overgeslagen — hernoemen op de camera is aan de trainer."""
+    doelmap = opnames_pad(bieb)
+    plan = []
+    gezien = set()
+    for pad in paden:
+        naam = os.path.basename(pad)
+        doel = os.path.join(doelmap, naam)
+        item = {"pad": pad, "naam": naam, "bytes": 0, "doel": doel, "reden": None}
+        plan.append(item)
+        if not os.path.isfile(pad):
+            item["reden"] = "bestand niet gevonden"
+            continue
+        item["bytes"] = os.path.getsize(pad)
+        if os.path.splitext(naam)[1].lower() not in VIDEO_EXTS:
+            item["reden"] = "geen videobestand"
+        elif _in_opnamesmap(bieb, pad):
+            item["reden"] = "staat al in de map opnames"
+        elif os.path.normcase(naam) in gezien:
+            item["reden"] = "twee keer gekozen"
+        elif os.path.exists(doel):
+            try:
+                bestaand = os.path.getsize(doel)
+            except OSError:
+                bestaand = None
+            if bestaand == item["bytes"]:
+                item["reden"] = "staat al in de bibliotheek"
+            else:
+                item["reden"] = ("er staat al een ánder bestand met deze naam in de "
+                                 "bibliotheek — hernoem het eerst op de camera")
+        gezien.add(os.path.normcase(naam))
+    return plan
+
+
+def kopieer_naar_opnames(bieb, plan, progress_callback=None, stop_check=None):
+    """Kopieert de items uit `kopieer_plan` zonder `reden` naar `opnames/` en retourneert de
+    paden van de geslaagde kopieën. Eén mislukt bestand stopt de rest niet: het krijgt zijn
+    fout als `reden` en de volgende gaat door.
+
+    - **Blokgewijs** (`KOPIEER_BLOK`) in plaats van `shutil.copy2`, want dat geeft geen
+      voortgang: `progress_callback(gedaan_bytes, totaal_bytes, idx, naam)` na elk blok, en
+      `stop_check()` ertussen — een opname van 4 GB kost minuten en moet afbreekbaar zijn.
+    - **Eerst onder een tijdelijke naam** (`<naam>.deel`, geen video-extensie): de map is de
+      waarheid over wélke opnames er zijn, dus een half gekopieerd bestand met zijn echte
+      naam zou door `synchroniseer_bronmap` — bij deze pc én bij een collega via Drive — al
+      als opname geregistreerd worden. Pas na de laatste byte `os.replace` naar de echte
+      naam; bij afbreken of een fout gaat het deelbestand weg.
+    - `copystat` erachteraan, zodat de opnamedatum van de camera op het bestand blijft."""
+    totaal = sum(i["bytes"] for i in plan if i["reden"] is None)
+    gedaan = 0
+    geslaagd = []
+    for idx, item in enumerate(plan):
+        if item["reden"] is not None:
+            continue
+        tmp = item["doel"] + KOPIEER_DEEL
+        try:
+            with open(item["pad"], "rb") as bron, open(tmp, "wb") as doel:
+                while True:
+                    if stop_check and stop_check():
+                        raise KopieerAfgebroken()
+                    blok = bron.read(KOPIEER_BLOK)
+                    if not blok:
+                        break
+                    doel.write(blok)
+                    gedaan += len(blok)
+                    if progress_callback:
+                        progress_callback(gedaan, totaal, idx, item["naam"])
+            try:
+                shutil.copystat(item["pad"], tmp)
+            except OSError:
+                pass                        # datum overnemen is comfort, geen voorwaarde
+            os.replace(tmp, item["doel"])
+            geslaagd.append(item["doel"])
+        except KopieerAfgebroken:
+            _wis_stil(tmp)
+            raise
+        except OSError as e:
+            _wis_stil(tmp)
+            item["reden"] = f"mislukt: {e.strerror or e}"
+            gedaan += item["bytes"]        # de balk moet niet blijven hangen op dit bestand
+            if progress_callback:
+                progress_callback(gedaan, totaal, idx, item["naam"])
+    return geslaagd
+
+
+def _wis_stil(pad):
+    try:
+        os.remove(pad)
+    except OSError:
+        pass
+
+
 def lijst_bronvideos(bieb, extern=False):
     """Alle bekende opnames met hun werklijst-gegevens: status, notitie, hoeveel fragmenten
     er al uit geknipt zijn (= analyses met deze bron), of het bestand er staat en of de
@@ -708,11 +837,14 @@ def lijst_bronvideos(bieb, extern=False):
     handmatige kijkvenster. Het onderscheid "fragmenten vs. analyses"
     uit de roadmap valt hier samen — elk gemarkeerd fragment wordt precies één analyse.
 
-    `extern` scheidt de twee soorten rijen: `False` (default) is de **werklijst** — alleen
-    opnames uit `opnames/`, dus wat het team samen moet knippen; `True` alleen de losse
-    video's van deze pc (`bronvideo_voor_pad`), `None` allebei. De default is bewust de
-    werklijst: een losse video staat op één laptop en heeft in de gedeelde lijst niets te
-    zoeken, waar een collega alleen "bestand niet gevonden" van zou zien."""
+    Elke rij draagt `bieb` (de bibliotheek waar hij in staat — de GUI toont de gedeelde en
+    de lokale door elkaar en moet bij een wijziging naar de juiste terug) en `extern`: True
+    voor een **losse video van deze pc** (absoluut pad, `bronvideo_voor_pad`), False voor
+    een opname uit `opnames/`. `extern` filtert: `False` (default) is de **werklijst**,
+    `True` alleen de losse video's, `None` allebei. De default is bewust de werklijst: in de
+    gedeelde database horen sinds `lokale_bibliotheek` geen losse video's meer thuis, en wat
+    er van vóór die tijd nog in staat (`verhuis_losse_videos` pakt alleen de rijen waarvan
+    het bestand op deze pc staat) is voor iedereen anders een "bestand niet gevonden"."""
     with _verbind(bieb) as con:
         rijen = con.execute(
             "SELECT b.*,"
@@ -726,8 +858,10 @@ def lijst_bronvideos(bieb, extern=False):
     uit = []
     for r in rijen:
         d = dict(r)
-        if extern is not None and _is_extern(d["bestand"]) != extern:
+        d["extern"] = _is_extern(d["bestand"])
+        if extern is not None and d["extern"] != extern:
             continue
+        d["bieb"] = bieb
         d["pad"] = _abs_pad(bieb, d["bestand"])
         d["sync"] = video_sync_status(d["pad"], d["bytes"])
         uit.append(d)
@@ -743,21 +877,20 @@ def bronvideo(bieb, bron_id):
 
 
 def bronvideo_voor_pad(bieb, pad, meta_lezer=None):
-    """De rij van een **losse video van deze pc** — ergens buiten de bibliotheek — en maakt
-    hem aan als hij er nog niet is. Retourneert dezelfde dict als `lijst_bronvideos`.
+    """De rij van een **losse video** — ergens buiten `opnames/` — in bibliotheek `bieb`, en
+    maakt hem aan als hij er nog niet is. Retourneert dezelfde dict als `lijst_bronvideos`.
+    De GUI roept dit niet rechtstreeks aan maar via `losse_video`, dat de **lokale**
+    bibliotheek kiest; hier staat alleen de rij-logica.
 
     Bedoeld voor "alleen kijken" (`BekijkVenster`): daar wordt niets gemeten en niets
     gekopieerd, maar de punten die de trainer zet moeten wél bewaard blijven, en die hangen
-    via `bron_markering.bron_id` aan een bronvideo-rij. Vandaar een echte rij, met drie
+    via `bron_markering.bron_id` aan een bronvideo-rij. Vandaar een echte rij, met twee
     afwijkingen van een opname uit `opnames/`:
 
     - **`bestand` is het absolute pad** (forward slashes, `abspath` genormaliseerd). Dat is
       meteen het kenmerk waaraan `_is_extern` de twee soorten scheidt, dus er is geen extra
       kolom en geen migratie nodig. Dezelfde video later opnieuw kiezen vindt via de UNIQUE
       op `bestand` dezelfde rij terug — mét de punten van de vorige keer.
-    - **De rij blijft buiten de werklijst** (`lijst_bronvideos` laat hem standaard weg): het
-      pad bestaat alleen op deze laptop, en in de gedeelde Drive zou een collega er niets
-      anders van zien dan "bestand niet gevonden".
     - **`bytes` blijft NULL.** Die grootte dient alleen om een half gedownloade cloudkopie te
       herkennen (`video_sync_status`); op een bestand dat gewoon op deze pc staat is de
       vergelijking betekenisloos en zou hij averechts werken — dezelfde video later kleiner
@@ -768,8 +901,7 @@ def bronvideo_voor_pad(bieb, pad, meta_lezer=None):
     # Wie in de bestandskiezer tóch naar de opnames-map bladert, hoort de rij te krijgen die
     # de scan er al van heeft: dezelfde video onder twee sleutels zou zijn punten splitsen.
     # Dan gelden ook gewoon de regels van een opname (relatief pad, `bytes` voor de sync).
-    if os.path.normcase(os.path.dirname(os.path.abspath(pad))) == \
-            os.path.normcase(os.path.abspath(opnames_pad(bieb, maak_aan=False))):
+    if _in_opnamesmap(bieb, pad):
         sleutel = f"{OPNAMES_MAP}/{os.path.basename(pad)}"
         try:
             grootte = os.path.getsize(pad)
@@ -787,6 +919,72 @@ def bronvideo_voor_pad(bieb, pad, meta_lezer=None):
         else:
             bron_id = rij["id"]
     return bronvideo(bieb, bron_id)
+
+
+def _in_opnamesmap(bieb, pad):
+    """Ligt `pad` in `<bieb>/opnames/`? Dan is het een opname van het team, geen losse video."""
+    return (os.path.normcase(os.path.dirname(os.path.abspath(pad)))
+            == os.path.normcase(os.path.abspath(opnames_pad(bieb, maak_aan=False))))
+
+
+def losse_video(bieb, lokaal, pad, meta_lezer=None):
+    """De rij voor "Nieuwe video bekijken": in de **lokale** bibliotheek, tenzij de gebruiker
+    in de bestandskiezer naar de opnamesmap van de gedeelde bibliotheek is gebladerd — dan
+    is het gewoon de opname die de scan er al van heeft (dezelfde video onder twee sleutels
+    zou zijn punten splitsen). De dict draagt `bieb`, dus de aanroeper hoeft niet zelf te
+    weten in welke van de twee hij terechtkwam."""
+    doel = bieb if _in_opnamesmap(bieb, pad) else lokaal
+    return bronvideo_voor_pad(doel, pad, meta_lezer=meta_lezer)
+
+
+def verhuis_losse_videos(bieb, lokaal):
+    """Eenmalige opruiming: losse video's die vóór `lokale_bibliotheek` (11 sep 2026) met
+    hun absolute pad in de **gedeelde** database terechtkwamen, verhuizen naar de lokale —
+    mét hun punten. Retourneert het aantal verhuisde rijen.
+
+    Alleen rijen waarvan het bestand **op deze pc staat**: dat is de pc die ze registreerde
+    (een absoluut pad is per definitie van één machine). De rij van een collega blijft
+    staan tot díe zijn app bijwerkt en vernieuwt — hem hier wissen zou zijn punten kosten,
+    en `lijst_bronvideos` laat hem toch al niet zien. Wat nooit meer opgehaald wordt (video
+    weg voordat de eigenaar vernieuwde) blijft onzichtbaar in de gedeelde database staan;
+    dat is een rij van een paar honderd bytes, geen probleem.
+
+    Staat dezelfde video lokaal al (na de verhuizing tóch nog eens via de oude app
+    geopend), dan komen de punten bij die rij. Analyses die uit zo'n rij geknipt waren
+    verliezen hun `bron_id` (ON DELETE SET NULL): in de gedeelde database is er dan geen
+    bron meer om naar te wijzen. Leest zonder te schrijven als er niets te verhuizen is —
+    de gedeelde database hoort in rust te blijven (fase 4)."""
+    with _verbind(bieb) as con:
+        rijen = [dict(r) for r in con.execute("SELECT * FROM bronvideo").fetchall()]
+    te_verhuizen = [r for r in rijen
+                    if _is_extern(r["bestand"]) and os.path.isfile(_abs_pad(bieb, r["bestand"]))]
+    for r in te_verhuizen:
+        with _verbind(bieb) as con:
+            punten = con.execute(
+                "SELECT frame, label, aangemaakt_door, aangemaakt_op FROM bron_markering "
+                "WHERE bron_id = ? ORDER BY frame", (r["id"],)).fetchall()
+        with _verbind(lokaal) as lcon:
+            bestaand = lcon.execute("SELECT id FROM bronvideo WHERE bestand = ?",
+                                    (r["bestand"],)).fetchone()
+            if bestaand is None:
+                cur = lcon.execute(
+                    "INSERT INTO bronvideo(bestand, naam, bytes, fps, totaal_frames, status, "
+                    "                      notitie, bijgewerkt_door, interlaced, toegevoegd_op) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r["bestand"], r["naam"], r["bytes"], r["fps"], r["totaal_frames"],
+                     r["status"], r["notitie"], r["bijgewerkt_door"], r["interlaced"],
+                     r["toegevoegd_op"]))
+                nieuw_id = cur.lastrowid
+            else:
+                nieuw_id = bestaand["id"]
+            lcon.executemany(
+                "INSERT INTO bron_markering(bron_id, frame, label, aangemaakt_door, "
+                "                           aangemaakt_op) VALUES (?, ?, ?, ?, ?)",
+                [(nieuw_id, p["frame"], p["label"], p["aangemaakt_door"], p["aangemaakt_op"])
+                 for p in punten])
+        with _verbind(bieb) as con:
+            con.execute("DELETE FROM bronvideo WHERE id = ?", (r["id"],))   # punten cascaderen
+    return len(te_verhuizen)
 
 
 def wijzig_bronvideo(bieb, bron_id, status=None, notitie=None, bijgewerkt_door=""):
@@ -1201,7 +1399,8 @@ if __name__ == "__main__":
         # `backend_naam` bewust weggelaten: sla_analyse_op hoort hem zelf in te vullen.
         instellingen = {"smooth_n": 5, "threshold": 0.015, "smooth_landmarks": True,
                         "bocht_overslaan": True,
-                        "doel_punt": [0.5, 0.5], "horizon_deg": 0.0, "auto_horizon": False,
+                        "doel_punt": [0.5, 0.5], "doel_kader": [0.45, 0.4, 0.55, 0.6],
+                        "horizon_deg": 0.0, "auto_horizon": False,
                         "heavy": False, "perspectief_gebruikt": False}
         aid = sla_analyse_op(bieb, sid, "Proefanalyse", video, info, resultaten, events,
                              backend="YOLO-pose + ByteTrack", instellingen=instellingen,
@@ -1335,41 +1534,70 @@ if __name__ == "__main__":
         assert lijst_bronvideos(bieb)[0]["sync"] == "ontbreekt"   # rij blijft staan
 
         # ── Losse video van deze pc (alleen kijken) ───────────────────────────────
-        # Buiten de bibliotheek, dus met een absoluut pad in de DB — en daarmee buiten de
-        # gedeelde werklijst, maar mét bewaarde punten.
+        # Buiten de bibliotheek, dus met een absoluut pad — en dat pad hoort niet in de
+        # gedeelde database maar in de **lokale** (`lokale_bibliotheek`): `losse_video` zet
+        # hem daar neer, mét de punten, en de gedeelde werklijst blijft onaangeraakt.
+        lokaal = os.path.join(tmp, "lokaal")
+        os.environ[ENV_LOKAAL] = lokaal
+        assert lokale_bibliotheek() == lokaal and os.path.isfile(os.path.join(lokaal, DB_NAAM))
+        assert all(b["extern"] is False and b["bieb"] == bieb for b in lijst_bronvideos(bieb))
         los = os.path.join(tmp, "van de camera.mp4")
         with open(los, "wb") as f:
             f.write(b"nep-video ergens op de laptop")
-        lb = bronvideo_voor_pad(bieb, los, meta_lezer=lambda p: (25.0, 1500))
+        lb = losse_video(bieb, lokaal, los, meta_lezer=lambda p: (25.0, 1500))
+        assert lb["bieb"] == lokaal and lb["extern"] is True
         assert os.path.isabs(lb["bestand"]) and "/" in lb["bestand"]
         assert os.path.normpath(lb["pad"]) == os.path.normpath(los)
         assert lb["bytes"] is None and lb["sync"] is None   # geen cloud-groottecheck
         assert lb["naam"] == "van de camera.mp4" and lb["totaal_frames"] == 1500
         # Tweede keer dezelfde video: dezelfde rij, geen tweede.
-        assert bronvideo_voor_pad(bieb, los)["id"] == lb["id"]
-        # Buiten de werklijst, wél op te vragen als je erom vraagt.
-        assert all(b["id"] != lb["id"] for b in lijst_bronvideos(bieb))
-        assert [b["id"] for b in lijst_bronvideos(bieb, extern=True)] == [lb["id"]]
-        assert len(lijst_bronvideos(bieb, extern=None)) == 2
-        assert bronvideo(bieb, lb["id"])["id"] == lb["id"]
+        assert losse_video(bieb, lokaal, los)["id"] == lb["id"]
+        # Gedeeld: nog steeds alleen de opname; lokaal: alleen de losse video.
+        assert [b["id"] for b in lijst_bronvideos(bieb, extern=None)] == [bron["id"]]
+        assert [b["id"] for b in lijst_bronvideos(lokaal, extern=None)] == [lb["id"]]
+        assert bronvideo(lokaal, lb["id"])["id"] == lb["id"]
         # De punten hangen er net zo aan als bij een opname en overleven het opnieuw openen.
-        voeg_markering_toe(bieb, lb["id"], 42, "mooie afzet", "Coach Tester")
-        assert bronvideo_voor_pad(bieb, los)["aantal_punten"] == 1
-        assert lijst_markeringen(bieb, lb["id"])[0]["label"] == "mooie afzet"
+        voeg_markering_toe(lokaal, lb["id"], 42, "mooie afzet", "Coach Tester")
+        assert losse_video(bieb, lokaal, los)["aantal_punten"] == 1
+        assert lijst_markeringen(lokaal, lb["id"])[0]["label"] == "mooie afzet"
         # Kleiner her-gecodeerd bestand mag géén 'onvolledig' opleveren (bytes is NULL).
         with open(los, "wb") as f:
             f.write(b"kort")
-        assert bronvideo_voor_pad(bieb, los)["sync"] is None
+        assert losse_video(bieb, lokaal, los)["sync"] is None
         # En het kamfilter-antwoord wordt hier net zo goed onthouden.
-        zet_bron_interlaced(bieb, lb["id"], True)
-        assert bronvideo_voor_pad(bieb, los)["interlaced"] == 1
-        # Wie via de bestandskiezer naar de opnames-map bladert krijgt de bestaande rij,
-        # geen tweede met een absoluut pad (dat zou de punten van die opname splitsen).
-        zelfde = bronvideo_voor_pad(bieb, os.path.join(opnames_pad(bieb),
-                                                       "Training 3 aug.mp4"))
-        assert zelfde["id"] == bron["id"]
+        zet_bron_interlaced(lokaal, lb["id"], True)
+        assert losse_video(bieb, lokaal, los)["interlaced"] == 1
+        # Wie via de bestandskiezer naar de opnames-map van de gedeelde bibliotheek bladert
+        # krijgt de bestaande (gedeelde) rij, geen lokale met een absoluut pad — dat zou de
+        # punten van die opname splitsen.
+        zelfde = losse_video(bieb, lokaal, os.path.join(opnames_pad(bieb),
+                                                        "Training 3 aug.mp4"))
+        assert zelfde["id"] == bron["id"] and zelfde["bieb"] == bieb
         assert zelfde["bestand"] == f"{OPNAMES_MAP}/Training 3 aug.mp4"
-        assert len(lijst_bronvideos(bieb, extern=None)) == 2   # nog steeds twee rijen
+        assert len(lijst_bronvideos(lokaal, extern=None)) == 1   # lokaal niets bij
+
+        # Verhuizing van rijen die de oude app nog in de gedeelde database zette: alleen
+        # die waarvan het bestand hier staat, mét punten; de rest (van een collega) blijft
+        # staan maar buiten de werklijst.
+        oud = os.path.join(tmp, "oude losse.mp4")
+        with open(oud, "wb") as f:
+            f.write(b"stond al in de drive")
+        ob = bronvideo_voor_pad(bieb, oud, meta_lezer=lambda p: (30.0, 900))
+        voeg_markering_toe(bieb, ob["id"], 7, "start", "Coach Tester")
+        voeg_markering_toe(bieb, ob["id"], 99, "eind", "Coach Tester")
+        cb = bronvideo_voor_pad(bieb, os.path.join(tmp, "van collega.mp4"),
+                                meta_lezer=lambda p: (30.0, 10))   # bestand bestaat hier niet
+        assert [b["id"] for b in lijst_bronvideos(bieb)] == [bron["id"]]   # allebei verborgen
+        assert verhuis_losse_videos(bieb, lokaal) == 1
+        assert verhuis_losse_videos(bieb, lokaal) == 0                     # idempotent
+        gedeeld = {b["id"] for b in lijst_bronvideos(bieb, extern=None)}
+        assert gedeeld == {bron["id"], cb["id"]}                            # ob is weg
+        verhuisd = losse_video(bieb, lokaal, oud)
+        assert verhuisd["bieb"] == lokaal and verhuisd["totaal_frames"] == 900
+        assert [(m["frame"], m["label"]) for m in lijst_markeringen(lokaal, verhuisd["id"])] \
+            == [(7, "start"), (99, "eind")]
+        assert len(lijst_bronvideos(lokaal, extern=None)) == 2
+        del os.environ[ENV_LOKAAL]
 
         # Conflictkopie-detectie (fase 4): een tweede .db-bestand wordt gemeld.
         assert detecteer_conflictkopieen(bieb) == []
@@ -1435,6 +1663,58 @@ if __name__ == "__main__":
         assert not os.path.isdir(os.path.join(bieb, MEDIA_MAP, aid2))
         with _verbind(bieb) as con:
             assert con.execute("SELECT COUNT(*) FROM afzet_event_cache").fetchone()[0] == 0
+
+        # Van de camera naar opnames/ kopiëren: plan (wat wel/niet en waarom), blokgewijze
+        # kopie mét voortgang, tijdelijke naam die de scan niet ziet, en afbreken zonder
+        # een half bestand achter te laten.
+        camera = os.path.join(tmp, "camera")
+        os.makedirs(camera)
+        groot = os.path.join(camera, "00007.MTS")
+        with open(groot, "wb") as f:
+            f.write(os.urandom(KOPIEER_BLOK * 2 + 12345))    # drie blokken, laatste half
+        dubbel = os.path.join(camera, "al aanwezig.mp4")   # staat al in opnames/, zelfde grootte
+        with open(dubbel, "wb") as f:
+            f.write(b"dezelfde opname nog een keer")
+        shutil.copy2(dubbel, os.path.join(opnames_pad(bieb), "al aanwezig.mp4"))
+        anders = os.path.join(camera, "naamgenoot.mp4")    # zelfde naam, andere grootte
+        with open(anders, "wb") as f:
+            f.write(b"andere inhoud, andere grootte")
+        with open(os.path.join(opnames_pad(bieb), "naamgenoot.mp4"), "wb") as f:
+            f.write(b"kort")
+        with open(os.path.join(camera, "notitie.txt"), "w") as f:
+            f.write("geen video")
+        synchroniseer_bronmap(bieb)              # die twee zijn dan al bekend
+        plan = kopieer_plan(bieb, [groot, dubbel, anders, os.path.join(camera, "weg.mp4"),
+                                   os.path.join(camera, "notitie.txt"), groot])
+        assert [i["reden"] is None for i in plan] == [True, False, False, False, False, False]
+        assert plan[1]["reden"] == "staat al in de bibliotheek"
+        assert "hernoem" in plan[2]["reden"] and plan[3]["reden"] == "bestand niet gevonden"
+        assert plan[4]["reden"] == "geen videobestand" and plan[5]["reden"] == "twee keer gekozen"
+        # Afbreken na het eerste blok: geen bestand, geen deelbestand, niets in de scan.
+        tellers = []
+        try:
+            kopieer_naar_opnames(bieb, plan, progress_callback=lambda *a: tellers.append(a),
+                                 stop_check=lambda: len(tellers) >= 1)
+            raise AssertionError("had moeten afbreken")
+        except KopieerAfgebroken:
+            pass
+        assert tellers == [(KOPIEER_BLOK, plan[0]["bytes"], 0, "00007.MTS")]
+        assert not os.path.exists(plan[0]["doel"])
+        assert not os.path.exists(plan[0]["doel"] + KOPIEER_DEEL)
+        assert synchroniseer_bronmap(bieb) == 0
+        # Volledig: byte-identiek, voortgang loopt tot het totaal, scan pikt hem op.
+        tellers = []
+        geslaagd = kopieer_naar_opnames(bieb, plan,
+                                        progress_callback=lambda *a: tellers.append(a))
+        assert geslaagd == [plan[0]["doel"]] and len(tellers) == 3
+        assert tellers[-1][:2] == (plan[0]["bytes"], plan[0]["bytes"])
+        with open(groot, "rb") as a, open(plan[0]["doel"], "rb") as b:
+            assert a.read() == b.read()
+        assert not os.path.exists(plan[0]["doel"] + KOPIEER_DEEL)
+        assert synchroniseer_bronmap(bieb) == 1
+        assert bronvideo_voor_pad(bieb, plan[0]["doel"])["bestand"] == f"{OPNAMES_MAP}/00007.MTS"
+        # Nog een keer: nu is hij "staat al in de bibliotheek".
+        assert kopieer_plan(bieb, [groot])[0]["reden"] == "staat al in de bibliotheek"
 
         print("Zelftest OK")
     finally:

@@ -2204,11 +2204,16 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, horizon_deg=0.0, auto_horizon=False,
               perspectief=None, waarschuwing_callback=None, bocht=True,
-              deinterlacen=None):
+              deinterlacen=None, doel_kader=None):
     """
     Volledige analyse-pijplijn: multi-pose detectie + doel-tracking (streaming),
     daarna offline landmark-smoothing en het berekenen van de afgeleide grootheden.
     Retourneert (VideoInfo, lijst[FrameResultaat]).
+
+    `doel_kader` (genormaliseerd (x0, y0, x1, y1) om de schaatser op het eerste frame)
+    bestaat voor signatuur-compatibiliteit met de YOLO-backend, waar het het kijkglas
+    aanzet (een te kleine schaatser volgen vanaf het kader). Deze backend heeft dat
+    niet; het middelpunt dient hier alleen als `doel_punt` als dat niet gegeven is.
 
     Met `bocht` (default) worden bochtframes gemarkeerd (`bepaal_bocht_reeks`) en leveren
     ze geen afzetmeting. Deze backend detecteert streaming per frame en slaat — anders
@@ -2234,6 +2239,8 @@ def analyseer(input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
         deinterlacen = is_interlaced(input_pad)
     if perspectief is not None:
         auto_horizon = False     # vaste camera per aanname; kalibratie kent de kanteling al
+    if doel_punt is None and doel_kader is not None:
+        doel_punt = ((doel_kader[0] + doel_kader[2]) / 2, (doel_kader[1] + doel_kader[3]) / 2)
 
     # Auto-horizon = twee passes → één doorlopende balk (detectie 0–50%, horizon 50–100%).
     det_cb = fase_voortgang(progress_callback, 0, 2) if auto_horizon else progress_callback

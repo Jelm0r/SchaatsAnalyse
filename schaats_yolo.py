@@ -477,6 +477,35 @@ VERFIJN_IMGSZ   = 640        # inferentiegrootte op de uitsnede
 VERFIJN_MARGE   = 1.9        # cropzijde = marge × grootste bbox-zijde
 VERFIJN_MIN_PX  = 256        # ondergrens cropzijde (pixels)
 
+# ── Kijkglas: een te kleine schaatser volgen vanaf een getekend kader ───────────
+# De detectiepass pikt een schaatser pas op bij ~80–130 px hoogte (1080p); daaronder
+# is er geen bbox en dus ook geen verfijning. Met een kader van de gebruiker op het
+# eerste frame propageert het kijkglas de bbox van frame naar frame uit de eigen
+# verfijnde keypoints (zie `_Kijkglas`). Geen tweede detector: RTMPose op de vorige
+# bbox is ~30–100 ms, en een YOLO-`predict` op een crop tijdens de `track`-sessie zou
+# ByteTrack met crop-coördinaten voeden.
+KIJKGLAS_COAST_S    = 1.0    # zolang loopt de propagatie zonder treffer door (constante
+                             # snelheid) voor de run sterft; zelfde orde als GAP_VUL_S
+KIJKGLAS_MARGE      = 0.10   # rand om de keypoint-extent voor de volgende bbox (rtmlib pad
+                             # zelf nog eens ×1,25, dus dit blijft klein)
+KIJKGLAS_KOPPEL_IOU = 0.3    # koppeltoets: IoU van de gepropageerde bbox met de keten-bbox
+                             # op het frame waar de run de keten raakt
+KIJKGLAS_SPRONG     = 0.5    # plausibiliteit per stap: het midden mag hoogstens zo'n
+                             # fractie van de bbox-hoogte verspringen ...
+KIJKGLAS_GROEI      = 1.5    # ... en de hoogte hoogstens deze factor groeien/krimpen; meer
+                             # betekent dat RTMPose op iemand anders is gaan zitten
+KIJKGLAS_START_SCHALEN = (0.7, 1.0, 1.4)   # eerste frame: drie schalingen van het hand-
+                             # getekende kader, hoogste been-score wint (een hand tekent
+                             # zelden strak)
+KADER_MAAT_MAX      = 3.0    # seed-poort mét kader: een kandidaat mag hoogstens zo veel
+                             # hoger zijn dan het kader (omstander naast de klik uitsluiten;
+                             # in 6 s groeit een aanrijdende schaatser ~1,7×, gemeten)
+KADER_MIN_HOOGTE_PX = 70     # daaronder valt er niets te meten: op `00000 16-14` (schaatser
+                             # 35–57 px) gaf RTMPose been-scores van 0,1–0,2 met minder dan
+                             # vier bruikbare keypoints, en YOLO op een 5× uitvergrote crop
+                             # zag alleen sporadisch een blob — de benen zijn dan ~15 px, en
+                             # 2 px fout is al 4° (OPNAME.md). Alleen een waarschuwing.
+
 # COCO-17 keypoint-index → MediaPipe 33-landmark-index.
 COCO_NAAR_MP = {
     0: 0,             # neus
@@ -880,11 +909,19 @@ def _afstand_tot_box(punt, bbox):
                           max(bbox[1] - y, 0.0, y - bbox[3])))
 
 
-def _kies_seed(tracklets, frames, doel_punt, fps=25.0):
+def _kies_seed(tracklets, frames, doel_punt, fps=25.0, doel_kader=None):
     """
     Kies het start-tracklet. Met muisklik in twee stappen; zonder klik: de grootste
     *beweger* — mediane oppervlakte × padlengte — zodat statische omstanders langs de
     boarding nooit gekozen worden.
+
+    Met een getekend **kader** (`doel_kader`, genormaliseerd xyxy) gelden twee dingen
+    extra. Een kandidaat mag hoogstens `KADER_MAAT_MAX`× zo hoog zijn als het kader —
+    de gebruiker heeft de grootte van de schaatser aangegeven, dus een omstander van
+    vier keer die maat naast de klik is niet wie bedoeld werd. En er is **geen terugval
+    op de grootste beweger**: wie een kader tekent wijst één schaatser aan, en als de
+    detectiepass die nergens in het zoekvenster ziet is het aan het kijkglas
+    (`_Kijkglas`) om hem vanaf het kader te volgen, niet aan een gok.
 
     De klik staat op het eerste frame, maar de schaatser die je aanwijst hoeft daar nog
     niet gedetecteerd te zijn: ver weg en klein duurt het op echt materiaal secondenlang
@@ -914,13 +951,18 @@ def _kies_seed(tracklets, frames, doel_punt, fps=25.0):
     zijn).
     """
     klik_gemist = False
+    if doel_punt is None and doel_kader is not None:
+        doel_punt = ((doel_kader[0] + doel_kader[2]) / 2, (doel_kader[1] + doel_kader[3]) / 2)
     if doel_punt is not None:
         dx, dy = doel_punt
+        max_hoogte = (KADER_MAAT_MAX * (doel_kader[3] - doel_kader[1])
+                      if doel_kader is not None else None)
         venster = min(int(round(max(fps, 1.0) * KLIK_ZOEK_S)), len(frames))
         per_frame = {}
         for t in tracklets:
             for d in t:
-                if d.frame < venster:
+                if d.frame < venster and (max_hoogte is None
+                                          or d.bbox[3] - d.bbox[1] <= max_hoogte):
                     per_frame.setdefault(d.frame, []).append((d, t))
         for f in range(venster):
             raak = [(d, t) for d, t in per_frame.get(f, ())
@@ -943,8 +985,11 @@ def _kies_seed(tracklets, frames, doel_punt, fps=25.0):
         if bij:
             lang = [k for k in bij if len(k[2]) >= SEED_MIN_LEN]
             return min(lang or bij, key=lambda k: (k[0], k[1]))[2], False
-        # Ook zo niemand → val terug op de grootste beweger, maar meld het.
+        # Ook zo niemand → val terug op de grootste beweger, maar meld het. Met een
+        # kader niet: dan volgt het kijkglas de aangewezen schaatser vanaf het kader.
         klik_gemist = True
+        if doel_kader is not None:
+            return None, True
     bewegers = [t for t in tracklets if _pad_lengte(t) >= MIN_VERPLAATSING]
     kandidaten = bewegers or tracklets
     if not kandidaten:
@@ -1170,6 +1215,231 @@ def _interpoleer_doel(doel_per_frame, fps, bocht=None):
     return plan
 
 
+def _bbox_uit_lm(lm, marge=KIJKGLAS_MARGE, min_vis=RTMPOSE_MIN_SCORE):
+    """Genormaliseerde bbox (x0, y0, x1, y1) om de zichtbare landmarks, met een rand van
+    `marge` × hoogte; None als er te weinig te zien is. Dit is de bbox die het kijkglas
+    naar het volgende frame draagt."""
+    pts = [(p.x, p.y) for p in lm if p.visibility >= min_vis]
+    if len(pts) < 4:
+        return None
+    xs, ys = zip(*pts)
+    hoogte = max(ys) - min(ys)
+    if hoogte <= 0:
+        return None
+    rand = marge * hoogte
+    return (max(0.0, min(xs) - rand), max(0.0, min(ys) - rand),
+            min(1.0, max(xs) + rand), min(1.0, max(ys) + rand))
+
+
+def _iou(a, b):
+    """Intersection-over-union van twee (x0, y0, x1, y1)-boxen."""
+    ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
+    ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
+    snede = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    opp = lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1])
+    unie = opp(a) + opp(b) - snede
+    return snede / unie if unie > 0 else 0.0
+
+
+def _schaal_bbox(bbox, factor):
+    """Dezelfde bbox, `factor`× zo groot om z'n eigen midden."""
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    hw, hh = (bbox[2] - bbox[0]) / 2 * factor, (bbox[3] - bbox[1]) / 2 * factor
+    return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+
+class _Kijkglas:
+    """
+    Volgt de doelschaatser door de frames waar de keten hem níet heeft, door de bbox van
+    frame naar frame te propageren uit de eigen verfijnde keypoints. Ontstaan voor de
+    schaatser die te klein is voor de detectiepass: die pikt hem pas op bij ~80–130 px
+    hoogte (1080p), terwijl de verfijning (RTMPose top-down op een bbox, opgeschaald naar
+    288×384) op zo'n schaatser prima werkt — het probleem is het vínden van de bbox, niet
+    de keypoints. Het getekende kader van de gebruiker levert die bbox op het eerste
+    frame; daarna levert elk verfijnd frame de bbox voor het volgende.
+
+    Pure toestand, geen video en geen model: de verfijning komt binnen als een callable
+    (`schat`), zodat dit met synthetische landmarks te toetsen is (`_zelftest_kijkglas`).
+
+    **Runs en hun herkomst.** Een run begint óf op het kader (`bron='kader'`) óf op een
+    ketenframe (`'keten'`; `anker` herstart de run op élk ketenframe, zodat de coast bij
+    het volgende gat met een verse snelheid vertrekt). Treffers komen in `hangend` en
+    worden pas definitief (`gevuld`) als de identiteit vaststaat:
+    - raakt de run de keten (`anker` op een ketenframe), dan beslist de **koppeltoets**:
+      IoU van de voorspelde bbox met de keten-bbox ≥ `KIJKGLAS_KOPPEL_IOU` → geaccepteerd,
+      anders is de run naar iemand anders afgedwaald en gaat alles weg;
+    - sterft de run (`KIJKGLAS_COAST_S` zonder treffer) of houdt de video op, dan telt de
+      herkomst: een keten-run wordt geaccepteerd (de identiteit kwam van een geverifieerd
+      ketenpunt), een kader-run alleen als de keten níet aantoonbaar dezelfde schaatser
+      is (`keten_gekoppeld=False`: geen keten, óf een keten uit de grootste-beweger-
+      terugval omdat de detectiepass in het kader niemand zag — dan zijn kader en keten
+      twee losse gissingen over verschillende stukken van de clip, en is de ene niet
+      beter dan de andere). Is de keten wél via het kader gevonden, dan is een kader-run
+      die hem niet haalt verdacht: een handgetekend kader is geen bewezen identiteit, en
+      zonder koppelpunt valt drift niet uit te sluiten.
+
+    `kader_uitkomst` bewaart hoe de kader-run is afgelopen (`ok`, `reden`, `n`), zodat
+    `analyseer` de gebruiker kan vertellen dat het kijkglas de schaatser is kwijtgeraakt
+    — dat is het verschil tussen "0 afzetten" en weten waarom.
+
+    **Plausibiliteit per stap** (`KIJKGLAS_SPRONG`/`KIJKGLAS_GROEI`): RTMPose levert
+    altijd een skelet, ook als er iemand anders in de bbox is geschoven; springt het
+    midden meer dan een halve lichaamshoogte of verandert de hoogte meer dan ×1,5 in één
+    frame, dan is dat geen schaatser maar een verwisseling en telt het als misser.
+    """
+
+    def __init__(self, fps, keten_gekoppeld):
+        fps = fps or 30.0
+        self.max_gemist = max(1, int(round(KIJKGLAS_COAST_S * fps)))
+        self.keten_gekoppeld = keten_gekoppeld
+        self.kader_uitkomst = None  # {'ok', 'reden', 'n'} zodra de kader-run is afgesloten
+        self.bbox = None            # laatst bekende bbox (genormaliseerd); None = geen run
+        self.v = (0.0, 0.0)         # verplaatsing van het midden per frame
+        self.laatste_f = None       # frame van de laatste treffer of het laatste anker
+        self.gemist = 0             # opeenvolgende frames zonder treffer
+        self.bron = None            # 'kader' | 'keten'
+        self.eerste = False         # eerste stap van een kader-run: schaalveger
+        self.hangend = {}           # frame → (lm, dev), wacht op de koppeltoets
+        self.gevuld = {}            # frame → (lm, dev), definitief
+        self.logboek = []           # regels voor het logboek
+        self._treffers = deque(maxlen=SNELHEID_VENSTER)   # (frame, cx, cy)
+
+    @property
+    def leeft(self):
+        return self.bbox is not None
+
+    # ── toestand ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _midden(bbox):
+        return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+
+    def _zet(self, f, bbox):
+        """Nieuwe bekende positie op frame `f`; werkt de snelheid bij."""
+        cx, cy = self._midden(bbox)
+        self._treffers.append((f, cx, cy))
+        if len(self._treffers) >= 2:
+            f0, x0, y0 = self._treffers[0]
+            f1, x1, y1 = self._treffers[-1]
+            if f1 > f0:
+                self.v = ((x1 - x0) / (f1 - f0), (y1 - y0) / (f1 - f0))
+        self.bbox = tuple(bbox)
+        self.laatste_f = f
+        self.gemist = 0
+
+    def _voorspel(self, f):
+        """Waar de bbox op frame `f` verwacht wordt (constante snelheid sinds de laatste
+        bekende positie)."""
+        dt = f - self.laatste_f
+        cx, cy = self._midden(self.bbox)
+        cx, cy = cx + self.v[0] * dt, cy + self.v[1] * dt
+        hw, hh = (self.bbox[2] - self.bbox[0]) / 2, (self.bbox[3] - self.bbox[1]) / 2
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def _sluit_run(self, ok, reden):
+        n = len(self.hangend)
+        if self.bron == 'kader':
+            self.kader_uitkomst = {'ok': ok, 'reden': reden, 'n': n}
+        if n:
+            if ok:
+                self.gevuld.update(self.hangend)
+            eerste, laatste = min(self.hangend), max(self.hangend)
+            self.logboek.append(
+                f"[kijkglas] run vanaf {self.bron} frames {eerste}-{laatste} ({n} gevuld): "
+                f"{'geaccepteerd' if ok else 'verworpen'} — {reden}")
+        self.hangend = {}
+
+    # ── gebeurtenissen ─────────────────────────────────────────────────────────
+    def start_kader(self, bbox, f=0):
+        """Begin de run op het getekende kader."""
+        self._treffers.clear()
+        self.v = (0.0, 0.0)
+        self._zet(f, bbox)
+        self.bron, self.eerste, self.hangend = 'kader', True, {}
+
+    def anker(self, f, bbox):
+        """De keten heeft de schaatser op frame `f`: koppeltoets voor een hangende run,
+        daarna herstart vanaf dit geverifieerde punt."""
+        if self.leeft and self.hangend:
+            voorspeld = self._voorspel(f)
+            iou = _iou(voorspeld, bbox)
+            ok = iou >= KIJKGLAS_KOPPEL_IOU
+            self._sluit_run(ok, f"koppeling op frame {f}: IoU {iou:.2f}")
+            if not ok:
+                self._treffers.clear()  # dat was iemand anders: zijn snelheid ook weg
+        elif self.leeft:
+            self.hangend = {}
+        self._zet(f, bbox)
+        self.bron, self.eerste = 'keten', False
+
+    def volg(self, f, bbox):
+        """Een frame dat pass 2 zelf al vulde (kort gat, geïnterpoleerd): alleen de
+        positie meenemen, zodat de coast straks van de juiste plek vertrekt."""
+        if self.leeft:
+            self._zet(f, bbox)
+
+    def stap(self, f, schat):
+        """
+        Eén frame zonder keten. `schat(bbox) → (lm, dev, score, hist)` is de verfijning
+        op die bbox (lm None = afgewezen door score- of kleurpoort). Retourneert de
+        geaccepteerde `(lm, dev, hist)`, of None.
+        """
+        if not self.leeft:
+            return None
+        verwacht = self._voorspel(f)
+        # Eerste stap van een kader-run: een hand tekent zelden strak, dus drie
+        # schalingen proberen en de zekerste nemen.
+        kandidaten = ([_schaal_bbox(verwacht, k) for k in KIJKGLAS_START_SCHALEN]
+                      if self.eerste else [verwacht])
+        beste = None
+        for bb in kandidaten:
+            uit = schat(bb)
+            if uit is None or uit[0] is None:
+                continue
+            lm, dev, score, hist = uit
+            nieuw = _bbox_uit_lm(lm)
+            if nieuw is None:
+                continue
+            if not self.eerste and not self._plausibel(verwacht, nieuw):
+                continue
+            if beste is None or score > beste[0]:
+                beste = (score, lm, dev, hist, nieuw)
+        if beste is None:
+            self.gemist += 1
+            if self.gemist > self.max_gemist:
+                self._sterf(f)
+            return None
+        _, lm, dev, hist, nieuw = beste
+        self.eerste = False
+        self._zet(f, nieuw)
+        self.hangend[f] = (lm, dev)
+        return lm, dev, hist
+
+    def _plausibel(self, verwacht, nieuw):
+        h_v = verwacht[3] - verwacht[1]
+        h_n = nieuw[3] - nieuw[1]
+        if h_v <= 0 or h_n <= 0:
+            return False
+        (vx, vy), (nx, ny) = self._midden(verwacht), self._midden(nieuw)
+        if float(np.hypot(nx - vx, ny - vy)) > KIJKGLAS_SPRONG * h_v:
+            return False
+        groei = h_n / h_v
+        return 1.0 / KIJKGLAS_GROEI <= groei <= KIJKGLAS_GROEI
+
+    def _sterf(self, f):
+        ok = self.bron == 'keten' or not self.keten_gekoppeld
+        self._sluit_run(ok, f"run gestopt op frame {f} na {self.gemist} frames zonder "
+                            f"treffer" + ("" if ok else "; kader-run zonder koppeling"))
+        self.bbox = None
+        self._treffers.clear()          # een later anker begint met een verse snelheid
+
+    def afsluiten(self):
+        """Einde van de video: wat er nog hangt afhandelen op herkomst."""
+        if self.leeft:
+            ok = self.bron == 'keten' or not self.keten_gekoppeld
+            self._sluit_run(ok, "einde video" + ("" if ok else "; kader-run zonder koppeling"))
+            self.bbox = None
+
+
 def _rtmpose_model():
     r"""Het meegeleverde RTMPose-bestand als dat er staat, anders de URL — waarna rtmlib
     het zelf downloadt en cachet in %USERPROFILE%\.cache\rtmlib."""
@@ -1206,7 +1476,7 @@ def _maak_rtmpose(waarschuwing_callback=None):
 
 def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
                        progress_callback=None, rtmpose=None, bocht=None,
-                       deinterlacen=False):
+                       deinterlacen=False, kijkglas=None):
     """
     Pass 2: lees de video opnieuw en schat per doel-frame de pose opnieuw, nu met de
     schaatser beeldvullend in het inferentiebeeld → aanzienlijk nauwkeurigere
@@ -1214,14 +1484,31 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
     doel-bbox (RTMPose-26: subpixel-decodering + echte hiel/teen); anders via een
     vierkante crop door het YOLO-model. De pakkleur (referentie `ref`) bewaakt in
     beide routes dat nooit stilletjes een andere persoon wordt overgenomen.
-    Retourneert {frame: lm} met verfijnde (of herstelde) landmarks.
+    Retourneert `(uit, devs, gevuld)`: {frame: lm} met verfijnde (of herstelde)
+    landmarks, {frame: middellijn-dev}, en de frames die het kijkglas erbij heeft gezet.
 
     `bocht` (per frame True/False) houdt de gat-opvulling weg uit de bochtstukken; zie
     `_interpoleer_doel`.
+
+    `kijkglas` (een `_Kijkglas`, al gestart op het getekende kader) vult de frames die
+    noch de keten noch de interpolatie dekt: de aanloop vóór de eerste detectie, gaten
+    langer dan `GAP_VUL_S`, de uitloop, en de stukken die de bochtwacht heeft
+    overgeslagen. Het negeert `bocht` bewust: de propagatie is goedkoop, en of een
+    gevuld frame bocht is beslist daarna de ratio (`bepaal_bocht_reeks`). Op
+    ketenframes wordt het kijkglas geankerd (koppeltoets + verse start), op
+    geïnterpoleerde frames alleen bijgewerkt; zie `_Kijkglas`.
     """
     plan = _interpoleer_doel(doel_per_frame, info.fps, bocht)
     w, h = info.w, info.h
     uit, devs = {}, {}
+
+    def verfijn(frame, bbox, poort):
+        """→ (lm, dev, score, hist); lm None als de schatting is afgewezen."""
+        if rtmpose is not None:
+            return _verfijn_rtmpose(rtmpose, frame, bbox, poort, ref, w, h)
+        lm = _verfijn_yolo_crop(model, frame, bbox, ref, w, h)
+        return lm, None, (1.0 if lm is not None else 0.0), None
+
     cap = open_video(input_pad, deinterlacen)
     f = 0
     while True:
@@ -1230,19 +1517,42 @@ def _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
             break
         if f in plan:
             bbox, echt = plan[f]
-            if rtmpose is not None:
-                lm, dev = _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h)
-                if dev is not None:
-                    devs[f] = dev
-            else:
-                lm = _verfijn_yolo_crop(model, frame, bbox, ref, w, h)
+            lm, dev, _, _ = verfijn(frame, bbox, 'veto' if echt else 'match')
+            if dev is not None:
+                devs[f] = dev
             if lm is not None:
                 uit[f] = lm
+            if kijkglas is not None:
+                # De keten-bbox als de verfijning afviel: ook dan is dit een geverifieerd
+                # punt (pass-1-detectie) en hoort de coast van hier te vertrekken.
+                bekend = (_bbox_uit_lm(lm) if lm is not None else None) or bbox
+                if echt:
+                    kijkglas.anker(f, bekend)
+                elif lm is not None:
+                    kijkglas.volg(f, bekend)
+        elif kijkglas is not None and kijkglas.leeft:
+            treffer = kijkglas.stap(f, lambda bb, _fr=frame: verfijn(_fr, bb, 'veto'))
+            if treffer is not None and not doel_per_frame:
+                # Kijkglas-only (geen keten): de referentie moet uit de eigen treffers
+                # komen, anders heeft de kleurpoort nooit iets om tegen te toetsen.
+                ref.voeg_toe(treffer[2])
         f += 1
         if progress_callback is not None:
             progress_callback(f, info.totaal)
     cap.release()
-    return uit, devs
+
+    gevuld = set()
+    if kijkglas is not None:
+        kijkglas.afsluiten()
+        for f2, (lm, dev) in kijkglas.gevuld.items():
+            uit[f2] = lm
+            if dev is not None:
+                devs[f2] = dev
+        gevuld = set(kijkglas.gevuld)
+        for regel in kijkglas.logboek:
+            print(regel)
+        print(f"[kijkglas] {len(gevuld)} frames erbij gevuld")
+    return uit, devs, gevuld
 
 
 # Halpe26-indices van de been-keypoints (heupen t/m enkels) voor de kwaliteitscheck.
@@ -1327,31 +1637,36 @@ def _middellijn_afwijking(frame, been_hist, knie_xy, tibia_len):
     return round(float(np.median(centra) - kx_lokaal), 1)
 
 
-def _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h):
+def _verfijn_rtmpose(rtmpose, frame, bbox, poort, ref, w, h):
     """
     Top-down verfijning van één frame: RTMPose-26 op de doel-bbox (pixels).
-    De kleurpoort houdt de andere schaatser buiten: matcht de torso-kleur van de
-    schatting niet met de referentie, dan vervalt de verfijning (bij een echte
-    detectie blijven de pass-1-landmarks staan; een geïnterpoleerd gat-frame eist
-    juist een positieve kleurmatch, want daar is geen pass-1-vangnet).
-    Retourneert (lm | None, middellijn-dev-dict | None).
+    De kleurpoort houdt de andere schaatser buiten, in twee standen:
+    - `'veto'` — alleen een dúidelijk ander pak (< `KLEUR_SPLIT_MIN`) wordt geweigerd.
+      Voor een echte detectie (pass-1-vangnet: de landmarks blijven dan staan) én voor
+      het kijkglas, waar continuïteit, scorepoort, plausibiliteit en koppeltoets het
+      vangnet zijn en de torso van een schaatser van 90 px (~15×25 px) te ruizig is
+      voor een positieve drempel;
+    - `'match'` — een geïnterpoleerd gat-frame eist juist een positieve kleurmatch
+      (≥ `KLEUR_MATCH_MIN`), want daar is geen enkel ander vangnet.
+    Retourneert `(lm | None, middellijn-dev-dict | None, been-score, masker-hist | None)`.
     """
     bbox_px = (bbox[0] * w, bbox[1] * h, bbox[2] * w, bbox[3] * h)
     kps, scores = rtmpose(frame, [list(bbox_px)])
     kp, sc = kps[0], scores[0]
 
-    if float(sc[list(_HALPE_BENEN)].mean()) < RTMPOSE_MIN_SCORE:
-        return None, None                  # benen niet gezien (occlusie): niet vertrouwen
+    score = float(sc[list(_HALPE_BENEN)].mean())
+    if score < RTMPOSE_MIN_SCORE:
+        return None, None, score, None     # benen niet gezien (occlusie): niet vertrouwen
     hist, uit_masker = _torso_hist(frame, kp, sc, bbox_px)
     sim = ref.sim(hist)
-    if echt:
+    if poort == 'veto':
         # Alleen een masker-histogram mag een verfijning afwijzen: de bbox-terugval
         # bevat achtergrond en scoort ook bij de júiste schaatser laag.
         if uit_masker and sim is not None and sim < KLEUR_SPLIT_MIN:
-            return None, None              # duidelijk een ander pak in de bbox
+            return None, None, score, None     # duidelijk een ander pak in de bbox
     else:
         if sim is None or sim < KLEUR_MATCH_MIN:
-            return None, None              # gat-frame: alleen vullen bij zékere match
+            return None, None, score, None     # gat-frame: alleen vullen bij zékere match
 
     # Kwaliteitsvlag: knie t.o.v. de middellijn van het been (Halpe: 11/13/15 =
     # L heup/knie/enkel, 12/14/16 = R). Alleen meten, niet corrigeren.
@@ -1364,7 +1679,7 @@ def _verfijn_rtmpose(rtmpose, frame, bbox, echt, ref, w, h):
             dev[naam] = _middellijn_afwijking(frame, been_hist, kp[k_i], tibia)
     if dev['l_knie'] is None and dev['r_knie'] is None:
         dev = None
-    return _halpe26_naar_landmarks(kp, sc, w, h), dev
+    return _halpe26_naar_landmarks(kp, sc, w, h), dev, score, (hist if uit_masker else None)
 
 
 def _verfijn_yolo_crop(model, frame, bbox, ref, w, h):
@@ -1452,12 +1767,21 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
               num_poses=NUM_POSES_DEFAULT, doel_punt=None, smooth_landmarks=True,
               progress_callback=None, yolo_model=None, horizon_deg=0.0,
               auto_horizon=False, verfijn=True, perspectief=None,
-              waarschuwing_callback=None, bocht=True, deinterlacen=None):
+              waarschuwing_callback=None, bocht=True, deinterlacen=None,
+              doel_kader=None):
     """
     Volledige analyse via YOLO-pose + ByteTrack + offline doelkeuze + crop-verfijning.
     Signatuur-compatibel met schaats_analyse.analyseer() (`model_pad` — het MediaPipe
     .task — en `num_poses` worden genegeerd; YOLO detecteert altijd alle personen).
     Retourneert (VideoInfo, lijst[FrameResultaat]).
+
+    `doel_kader` (genormaliseerd (x0, y0, x1, y1) om de schaatser op het eerste frame)
+    zet het **kijkglas** aan: de schaatser wordt ook gevolgd waar de detectiepass hem
+    niet ziet — te klein, ver weg — door de bbox uit het kader van frame naar frame te
+    propageren in de verfijningspass (zie `_Kijkglas`). Het middelpunt dient als
+    `doel_punt` als dat niet apart gegeven is. Zonder kader is het gedrag byte-voor-byte
+    als voorheen: het kijkglas is bewust opt-in, omdat het ook gaten en overgeslagen
+    bochtstukken van elke analyse zou vullen en dat een meetwijziging is.
 
     `perspectief` (PerspectiefConfig) werkt identiek aan de MediaPipe-backend: de
     gedeelde stappen `zet_horizon`/`verwerk_afgeleiden` doen al het werk.
@@ -1483,6 +1807,21 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
                        waarschuwing_callback)
     if perspectief is not None:
         auto_horizon = False     # vaste camera per aanname; kalibratie kent de kanteling al
+    if doel_kader is not None:
+        doel_kader = tuple(float(v) for v in doel_kader)
+        if doel_punt is None:
+            doel_punt = ((doel_kader[0] + doel_kader[2]) / 2,
+                         (doel_kader[1] + doel_kader[3]) / 2)
+        kader_px = (doel_kader[3] - doel_kader[1]) * info.h
+        if kader_px < KADER_MIN_HOOGTE_PX:
+            # Geen blokkade — misschien groeit hij snel genoeg — maar wel zeggen waarom
+            # er straks (bijna) niets uitkomt, want dat is anders niet te zien.
+            _meld(waarschuwing_callback,
+                  f"Het getekende kader is maar {kader_px:.0f} px hoog. Onder ongeveer "
+                  f"{KADER_MIN_HOOGTE_PX} px ziet ook de verfijning geen benen meer (de "
+                  f"benen zijn dan zo'n 15 px), dus daar valt niets te meten — ook niet met "
+                  f"het kijkglas. Begin het fragment later, op het moment dat de schaatser "
+                  f"groter in beeld staat.")
 
     # Meerdere passes → één doorlopende voortgangsbalk via fase-schijven.
     n_fasen = 1 + (1 if verfijn else 0) + (1 if auto_horizon else 0)
@@ -1505,8 +1844,17 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     tracklets = []
     for t in _bouw_tracklets(frames):
         tracklets.extend(_splits_op_kleur(t))
-    seed, klik_gemist = _kies_seed(tracklets, frames, doel_punt, info.fps)
-    if seed is None:
+    seed, klik_gemist = _kies_seed(tracklets, frames, doel_punt, info.fps, doel_kader)
+    terugval = False
+    if seed is None and doel_kader is not None:
+        # De detectiepass zag in het kader niemand. Dan tóch de grootste beweger volgen
+        # (precies wat een klik in dat geval doet), náást het kijkglas vanaf het kader:
+        # het kader mag nooit slechter uitpakken dan een klik. Op `00000 16-14` (schaatser
+        # 35–57 px, pas op frame 187 van 200 gedetecteerd) leverde kijkglas-only één
+        # frame op, terwijl de terugval de dertien echte detecties aan het eind pakt.
+        seed, _ = _kies_seed(tracklets, frames, None, info.fps)
+        terugval = seed is not None
+    if seed is None and doel_kader is None:
         # Zonder seed blijft doel_per_frame leeg en loopt de rest van de pijplijn
         # gewoon door: geen enkel frame krijgt een pose en de GUI meldt "0 afzetten"
         # alsof dat een meting is. Liever hard falen met een begrijpelijke reden.
@@ -1515,14 +1863,35 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
             "geen enkele persoon op. Controleer of de schaatser in beeld is en of de "
             "video leesbaar is (codec/resolutie), en probeer eventueel een andere clip.")
     if klik_gemist and waarschuwing_callback is not None:
-        waarschuwing_callback(
-            f"Je klik kon niet aan een schaatser gekoppeld worden — op die plek is in "
-            f"de eerste {KLIK_ZOEK_S:.0f} seconden niemand gedetecteerd, ook niet vlak "
-            f"ernaast. Er is nu de grootste beweger in beeld gevolgd; controleer of dat "
-            f"de bedoelde schaatser is.")
+        if doel_kader is not None:
+            vervolg = (f"Het kijkglas volgt de schaatser vanaf het kader; daarnaast is de "
+                       f"grootste beweger in beeld gevolgd (vanaf frame {seed[0].frame}) — "
+                       f"controleer of dat dezelfde schaatser is."
+                       if terugval else
+                       "De schaatser is nu alleen met het kijkglas vanaf het kader gevolgd; "
+                       "controleer het resultaat.")
+            waarschuwing_callback(
+                f"Het getekende kader kon niet aan een detectie gekoppeld worden — op die "
+                f"plek heeft de detectiepass in de eerste {KLIK_ZOEK_S:.0f} seconden "
+                f"niemand van die maat gezien. " + vervolg)
+        else:
+            waarschuwing_callback(
+                f"Je klik kon niet aan een schaatser gekoppeld worden — op die plek is in "
+                f"de eerste {KLIK_ZOEK_S:.0f} seconden niemand gedetecteerd, ook niet vlak "
+                f"ernaast. Er is nu de grootste beweger in beeld gevolgd; controleer of dat "
+                f"de bedoelde schaatser is.")
 
-    keten, ref = _stik_keten(seed, tracklets, info.fps)
+    if seed is not None:
+        keten, ref = _stik_keten(seed, tracklets, info.fps)
+    else:
+        keten, ref = [], KleurReferentie()      # kijkglas-only: alles komt van het kader
     doel_per_frame = {d.frame: d for d in keten}
+    kijkglas = None
+    if doel_kader is not None and verfijn:
+        # De keten is alleen "gekoppeld" als hij via het kader zelf gevonden is; een
+        # terugval-keten is een tweede gissing en mag een kader-run niet afkeuren.
+        kijkglas = _Kijkglas(info.fps, keten_gekoppeld=bool(doel_per_frame) and not terugval)
+        kijkglas.start_kader(doel_kader, 0)
 
     resultaten = []
     for f in range(n_frames):
@@ -1545,15 +1914,37 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
         bocht_per_frame = None
 
     # Pass 2: verfijning (nauwkeurigere keypoints + gaten vullen), top-down met
-    # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route.
-    if verfijn and doel_per_frame:
-        verfijnd, devs = _verfijn_landmarks(input_pad, model, info, doel_per_frame, ref,
-                                            progress_callback=ver_cb,
-                                            rtmpose=_maak_rtmpose(waarschuwing_callback),
-                                            bocht=bocht_per_frame,
-                                            deinterlacen=deinterlacen)
+    # RTMPose-26 als rtmlib beschikbaar is, anders de oude YOLO-crop-route. Mét kader
+    # loopt het kijkglas hier mee en vult het de frames die de keten niet heeft.
+    if verfijn and (doel_per_frame or kijkglas is not None):
+        verfijnd, devs, gevuld = _verfijn_landmarks(
+            input_pad, model, info, doel_per_frame, ref, progress_callback=ver_cb,
+            rtmpose=_maak_rtmpose(waarschuwing_callback), bocht=bocht_per_frame,
+            deinterlacen=deinterlacen, kijkglas=kijkglas)
     else:
-        verfijnd, devs = {}, {}
+        verfijnd, devs, gevuld = {}, {}, set()
+    if kijkglas is not None and not doel_per_frame and not gevuld:
+        raise RuntimeError(
+            "Geen schaatser gevonden om te volgen: de detectie zag in het getekende "
+            "kader niemand, en ook het kijkglas kon er vanaf het kader geen schaatser in "
+            "volgen. Teken het kader strak om de schaatser op het eerste frame (inzoomen "
+            "met het muiswiel) en controleer of hij daar echt in beeld staat.")
+    uitkomst = kijkglas.kader_uitkomst if kijkglas is not None else None
+    if uitkomst is not None and 'koppeling' not in uitkomst['reden']:
+        # De kader-run heeft de keten niet gehaald: gestorven of einde video. Dat kan
+        # gewoon goed zijn (kijkglas-only tot het eind), maar meestal betekent het dat de
+        # schaatser te klein of te onduidelijk was — en dat hoort de gebruiker te horen
+        # in plaats van het uit "0 afzetten" te moeten raden.
+        _meld(waarschuwing_callback,
+              f"Het kijkglas heeft de schaatser vanaf het kader {uitkomst['n']} frame(s) "
+              f"kunnen volgen ({uitkomst['reden']}). Raakt het hem zo snel kwijt, dan is "
+              f"hij te klein of te onduidelijk in beeld voor de verfijning.")
+    # Een frame dat het kijkglas gevuld heeft ís geanalyseerd, ook als de bochtwacht het
+    # in pass 1 had overgeslagen: de tweede bochtclassificatie hieronder beoordeelt het
+    # dan op zijn eigen heupstand, zoals elk ander frame met een skelet.
+    for f in gevuld:
+        if f < len(buiten_meting):
+            buiten_meting[f] = False
 
     for f, r in enumerate(resultaten):
         lm = verfijnd.get(f)
@@ -1744,9 +2135,148 @@ def _zelftest_seed():
     seed, gemist = _kies_seed([laat, ander], frames, KLIK, FPS)
     assert gemist, "een schaatser buiten het zoekvenster werd toch als de klik gelezen"
 
+    # 6. Met een kader telt de maat mee: een omstander van vier keer de kaderhoogte die
+    #    wél op de klik staat is niet wie er aangewezen is — en zonder passende
+    #    kandidaat geeft _kies_seed géén terugval (`analyseer` beslist zelf of hij naast
+    #    het kijkglas alsnog de grootste beweger volgt, en meldt dat dan).
+    kader = (KLIK[0] - 0.02, KLIK[1] - 0.05, KLIK[0] + 0.02, KLIK[1] + 0.05)   # 0,10 hoog
+    groot = _tracklet(5, 0, 120, KLIK[0], KLIK[1], breedte=0.14, hoogte=0.42)
+    seed, gemist = _kies_seed([groot, doel, ander], frames, KLIK, FPS, doel_kader=kader)
+    assert not gemist and seed is doel, "de maatpoort liet de grote omstander door"
+    seed, gemist = _kies_seed([groot, ander], frames, KLIK, FPS, doel_kader=kader)
+    assert gemist and seed is None, "met kader hoort er geen terugval op de beweger te zijn"
+    # Zonder kader wint de omstander op de klik gewoon (bestaand gedrag, stap 1).
+    seed, gemist = _kies_seed([groot, doel, ander], frames, KLIK, FPS)
+    assert not gemist and seed is groot
+
     print("Zelftest _kies_seed OK")
+
+
+def _zelftest_kijkglas():
+    """
+    Toetst `_Kijkglas` met een nep-verfijning — geen video, geen model. De verfijning
+    levert een skelet op de plek waar de synthetische schaatser staat (of niets, om een
+    misser na te bootsen); de toets is of het kijkglas de juiste frames vult, de
+    koppeltoets goed toepast en op tijd stopt. Draaien met `python schaats_yolo.py`.
+    """
+    FPS = 25.0
+
+    def skelet(cx, cy, hoogte):
+        """33 landmarks op een rechthoek rond (cx, cy): genoeg voor `_bbox_uit_lm`."""
+        lm = [Landmark(0.0, 0.0, 0.0, 0.0) for _ in range(33)]
+        hw, hh = hoogte * 0.2, hoogte * 0.5 / (1 + 2 * KIJKGLAS_MARGE)
+        for i, (dx, dy) in zip((11, 12, 23, 24, 27, 28, 0),
+                               ((-1, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (1, 1), (0, -1))):
+            lm[i] = Landmark(cx + dx * hw, cy + dy * hh, 0.0, 0.9)
+        return lm
+
+    def schaatser(f):
+        """Positie van de synthetische schaatser: rijdt langzaam naar rechtsonder en
+        groeit (komt op de camera af)."""
+        return 0.30 + 0.002 * f, 0.25 + 0.001 * f, 0.08 + 0.0004 * f
+
+    def maak_schat(missers=(), verschoven=None):
+        """Nep-verfijning: skelet op de echte plek als de bbox hem bevat; None op de
+        opgegeven frames (occlusie); op `verschoven` frames een skelet dat een halve
+        beeldbreedte verderop staat (RTMPose die op iemand anders gaat zitten)."""
+        aanroepen = []
+
+        def schat(f, bbox):
+            aanroepen.append(f)
+            if f in missers:
+                return None, None, 0.1, None
+            cx, cy, hoogte = schaatser(f)
+            if verschoven and f in verschoven:
+                cx += 0.5
+            if not (bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]):
+                return None, None, 0.1, None
+            return skelet(cx, cy, hoogte), None, 0.8, None
+        return schat, aanroepen
+
+    def kader_op(f, ruim=1.0):
+        cx, cy, hoogte = schaatser(f)
+        hw, hh = 0.2 * hoogte * ruim, 0.5 * hoogte * ruim
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
+
+    def loop(kg, schat, frames, keten):
+        for f in frames:
+            if f in keten:
+                kg.anker(f, kader_op(f))
+            elif kg.leeft:
+                kg.stap(f, lambda bb, _f=f: schat(_f, bb))
+        kg.afsluiten()
+
+    # 1. Aanloop vanaf een (te ruim getekend) kader tot de keten op frame 40: de
+    #    koppeltoets slaagt en alle 40 aanloopframes zijn gevuld.
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    kg.start_kader(kader_op(0, ruim=1.6), 0)
+    schat, aanroepen = maak_schat()
+    loop(kg, schat, range(60), keten=set(range(40, 60)))
+    assert set(kg.gevuld) == set(range(40)), sorted(kg.gevuld)
+    assert aanroepen[:3] == [0, 0, 0], "eerste stap hoort de drie startschalingen te proberen"
+    assert any("geaccepteerd" in r for r in kg.logboek)
+
+    # 2. Dezelfde aanloop, maar de keten zit op iemand anders (bbox aan de andere kant
+    #    van het beeld): koppeltoets faalt, niets gevuld, reden in het logboek.
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    kg.start_kader(kader_op(0), 0)
+    schat, _ = maak_schat()
+    for f in range(40):
+        kg.stap(f, lambda bb, _f=f: schat(_f, bb))
+    kg.anker(40, (0.8, 0.8, 0.9, 0.95))
+    assert not kg.gevuld and any("verworpen" in r for r in kg.logboek)
+
+    # 3. Coast: een occlusie korter dan KIJKGLAS_COAST_S wordt overbrugd; daarna vult
+    #    het kijkglas gewoon weer, vanaf een keten-anker (uitloop na frame 10).
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    schat, _ = maak_schat(missers=set(range(20, 30)))
+    loop(kg, schat, range(60), keten=set(range(0, 11)))
+    verwacht = set(range(11, 20)) | set(range(30, 60))
+    assert set(kg.gevuld) == verwacht, sorted(set(kg.gevuld) ^ verwacht)
+
+    # 4. Een occlusie langer dan de coast laat de run sterven; wat er vóór hing is van
+    #    een keten-run en blijft staan, en na de dood wordt er niets meer gevuld.
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    schat, _ = maak_schat(missers=set(range(20, 60)))
+    loop(kg, schat, range(80), keten=set(range(0, 11)))
+    assert set(kg.gevuld) == set(range(11, 20)), sorted(kg.gevuld)
+    assert not kg.leeft
+
+    # 5. Een kader-run die sterft zonder de keten te raken wordt verworpen — een
+    #    handgetekend kader is geen bewezen identiteit ...
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    kg.start_kader(kader_op(0), 0)
+    schat, _ = maak_schat(missers=set(range(15, 80)))
+    loop(kg, schat, range(80), keten=set())
+    assert not kg.gevuld and any("zonder koppeling" in r for r in kg.logboek)
+    assert kg.kader_uitkomst == {'ok': False, 'reden': kg.kader_uitkomst['reden'], 'n': 15}
+    assert "koppeling" not in kg.kader_uitkomst['reden'].split(";")[0]   # gestorven, niet gekoppeld
+    # ... behalve als er helemaal geen keten is (kijkglas-only): dan is het kader alles.
+    kg = _Kijkglas(FPS, keten_gekoppeld=False)
+    kg.start_kader(kader_op(0), 0)
+    schat, _ = maak_schat()
+    loop(kg, schat, range(50), keten=set())
+    assert set(kg.gevuld) == set(range(50))
+    assert kg.kader_uitkomst['ok'] and kg.kader_uitkomst['n'] == 50
+    # ... en met een terugval-keten (niet gekoppeld) blijft een gestorven kader-run ook
+    # staan: kader en keten zijn dan twee losse gissingen over verschillende stukken.
+    kg = _Kijkglas(FPS, keten_gekoppeld=False)
+    kg.start_kader(kader_op(0), 0)
+    schat, _ = maak_schat(missers=set(range(15, 80)))
+    loop(kg, schat, range(120), keten=set(range(100, 120)))
+    assert set(kg.gevuld) == set(range(15)), sorted(kg.gevuld)
+
+    # 6. Plausibiliteit: een skelet dat ineens een halve beeldbreedte verderop staat is
+    #    een verwisseling en telt als misser, niet als treffer.
+    kg = _Kijkglas(FPS, keten_gekoppeld=True)
+    schat, _ = maak_schat(verschoven={12, 13})
+    loop(kg, schat, range(30), keten=set(range(0, 11)))
+    assert 12 not in kg.gevuld and 13 not in kg.gevuld and 14 in kg.gevuld
+
+    print("Zelftest _Kijkglas OK")
 
 
 if __name__ == '__main__':
     _zelftest_bochtwacht()
     _zelftest_seed()
+    _zelftest_kijkglas()

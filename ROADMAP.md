@@ -237,9 +237,29 @@ Klein maar waardevol vervolg op fase 1 (kan ook later):
 >
 > **Eén kant wisselen** bleek er al te zijn: elke `VergelijkKant` had z'n eigen "Kies analyse..."-knop die alleen die kant vervangt (meegekomen met de `VideoSpeler`-refactor, maar nooit uit deze lijst gehaald). Wat er wél bij moest: de knop heet **"Wisselen..."** zodra er een analyse staat, er is een **✕**-knop om een kant leeg te maken (bedraad vanuit de pagina zodat de masterklok eerst losgelaten wordt), en dezelfde analyse opnieuw laden **houdt het sync-punt** — dat hoort bij de video, niet bij het laden. Een andere analyse begint nog steeds op frame 0.
 >
+> **Twee ruwe video's naast elkaar (12 september 2026):** het kijkvenster (`BekijkVenster`, Opnames-tab) kan nu ook twee video's tegelijk tonen — twee rijen selecteren, of "➕ Tweede video ernaast..." in het venster — op dezelfde masterklok als deze pagina, die daarvoor als `MasterKlok` uit `MainWindow` is gehaald. Sync-punt per video, één snelheid, geen analyse nodig; punten alleen bij één video. Zie CLAUDE.md.
+
 > **Eén snelheid voor beide kanten:** de snelheidsregelaar per kant is weg (`VideoSpeler(toon_snelheid=False)`); de gedeelde regelaar onderaan de pagina stuurt nu ook het los afspelen van een kant. Twee video's naast elkaar op verschillend tempo laten lopen is precies wat je bij vergelijken níet wilt, en de per-kant combo nodigde daar wel toe uit.
 >
 > **Bewust niet:** nog steeds geen opgeslagen sync-punten (zie de sectie hierboven — schemabump); geen derde kant.
+
+---
+
+## Extra — Kleine schaatser volgen vanaf een getekend kader (kijkglas) ✅
+
+> **Af (11 september 2026)** — buiten de fasering, op verzoek: "op sommige beelden is de schaatser te klein".
+>
+> **Waarom:** de detectiepass (yolo26x-pose op 1280) ziet een schaatser pas vanaf ~80–130 px hoogte (gemeten over de 48 analyses in de bibliotheek). Een schaatser die ver weg begint mist daardoor zijn aanloop — op `00005 8-41` 84–112 frames (3,4–4,5 s), terwijl hij op frame 0 al ~100 px in beeld staat — en `_BochtWacht` zet die aanloop bovendien als "niets te zien" in de skip-stand, zodat hij in de tabel als bocht verschijnt. De verfijningspass (RTMPose op een bbox) werkt op zo'n schaatser wél; het probleem is het vínden van de bbox.
+>
+> **Wat er staat:** in de `DoelKiezer` kun je behalve klikken ook een **kader om de schaatser slepen** (muiswiel zoomt rond de cursor, rechts-slepen pant — op een dialoog van 900 px is zo'n schaatser ~45 px hoog). Dat kader zet in de YOLO-backend het **kijkglas** aan (`_Kijkglas` in `schaats_yolo.py`): in de verfijningspass wordt de bbox van frame naar frame gepropageerd uit de eigen RTMPose-keypoints, vanaf het kader door de aanloop, en vanaf de keten door gaten > `GAP_VUL_S`, de uitloop en de bocht-skips. Geen tweede detector (VRAM; en een YOLO-`predict` tijdens de `track`-sessie voedt ByteTrack met crop-coördinaten). Vangnetten: scorepoort, veto-kleurpoort, plausibiliteit per stap en een koppeltoets (IoU met de keten-bbox waar de run de keten raakt); een run vanaf het kader wordt zonder koppeling verworpen. Het kader staat als `doel_kader` in `instellingen_json` en in de Info-dialoog. Zie CLAUDE.md (punt 7 onder de YOLO-backend en de `DoelKiezer`-bullet).
+>
+> **Gemeten** (A/B met dezelfde code, alleen het kader verschilt): `8-41` dekking 185 → 269/269 en 8 → 12 afzetten, `10-57` 119 → 132/132, `14-48` 120 → 183/183 en 6 → 7 afzetten; koppeling IoU 0,86–0,92; op de gedeelde frames **0,0 px** verschil op knieën en enkels; +5 tot +7 s analysetijd. Visueel nagekeken dat het skelet op de aangewezen schaatser staat, ook op `14-48` waar een tweede schaatser in hetzelfde pak vlak achter hem opduikt.
+>
+> **De ondergrens is gemeten en hard:** op `00000 16-14` (schaatser 35–57 px, 7,5 van de 8 s) is RTMPose blind (been-scores 0,1–0,2) en ziet YOLO op een 5× uitvergrote crop alleen sporadisch een blob — onder ~70 px valt er met geen enkele vinder iets te meten. Daarom waarschuwt de app bij zo'n kader (`KADER_MIN_HOOGTE_PX`), volgt hij náást het kijkglas alsnog de grootste beweger (het kader mag nooit slechter uitpakken dan een klik) en meldt hij als het kijkglas de schaatser kwijtraakt. Het advies is dan: het fragment later laten beginnen.
+>
+> **Ook gemeten en afgewezen: een hogere detectieresolutie.** Dezelfde clip met `DETECT_IMGSZ` 1920 (native) en 2560 (1,33× opgeblazen): YOLO vindt de schaatser dan bij ~73 px i.p.v. ~115 px (frame 144 i.p.v. 187 — 1,7 s eerder), maar onder de 73 px op geen enkele resolutie, en daar zit 5,8 van de 8 s van deze clip. Kosten 2,0× resp. 3,2× de detectiepass (0,94 → 1,92 → 3,05 s/frame op DirectML), en op de 4 GB-NVIDIA-laptop past 1280 al nét. De 73–115 px-band die 1920 erbij vindt, dekt het kader + kijkglas op 1280 al gratis. Besluit (11 september 2026): 1280 blijft; geen opt-in gebouwd.
+>
+> **Bewust niet (nog):** het kijkglas zónder kader aanzetten (het zou dan ook de gaten en bocht-skips van elke analyse vullen — een meetwijziging die eerst een eigen A/B verdient); korte gaten ≤ `GAP_VUL_S` op propagatie i.p.v. interpolatie (zelfde reden); een YOLO-herdetectie op een crop als het kijkglas sterft (pas als de meting erom vraagt — `schat` is al een callable); een gouden hoekfout op de aanloopframes (`schaats_eval.py annoteer` op `8-41`).
 
 ---
 
@@ -646,6 +666,49 @@ dan de trainer aanwees.
 **Omvang**: klein (dezelfde poort/venster-logica in `_seed`), maar zonder testmateriaal in
 die venv is er weinig te valideren.
 
+## Idee — OpenCV-filters als controle op het neurale net (nog niet uitgewerkt, geopperd 1 september 2026)
+
+Geopperd naar aanleiding van de vraag of de tool klassieke CV-filters (Canny, achtergrond-
+subtractie/silhouet) gebruikt om de schaatser te *vinden* — dat is nu niet zo (zie CLAUDE.md:
+Canny wordt alleen voor de ijslijn/horizon gebruikt, kleurhistogrammen alleen voor doelkeuze/
+tracking en de `middellijn_dev`-kwaliteitsvlag). Het idee hier is anders: niet het net
+vervangen door een filter, maar een filter **ernaast** zetten als onafhankelijke controle op
+wat het net teruggeeft.
+
+**Wat dat zou kunnen zijn:**
+- Een silhouet-/achtergrondmasker (bv. `cv2.createBackgroundSubtractorMOG2`/KNN, of simpel
+  frame-differencing) rond de gerapporteerde bbox: klopt die met een bewegend object, of
+  staat hij op stilstaand ijs/boarding? Zou vroeg een foute doelkeuze of een tracker die op
+  een omstander is gesprongen kunnen signaleren, náást de bestaande kleurpoort
+  (`KLEUR_MATCH_MIN`/`KLEUR_SPLIT_MIN` in `schaats_yolo.py`).
+- Een randendetectie (Canny/contour) om te toetsen of een been-keypoint op een echte
+  rand/contour valt i.p.v. in de lucht — vergelijkbaar met wat `_middellijn_afwijking` al met
+  kleur-backprojection doet voor de knie, maar dan als generieke rand-toets in plaats van
+  kleur-specifiek.
+- Zou als **extra kwaliteitsvlag** naast bestaande signalen kunnen dienen (`middellijn_dev`,
+  de kleurpoorten, de RTMPose-keypointscore) — niet om automatisch te corrigeren, net zoals
+  `_middellijn_afwijking` nu ook alleen meet en niet corrigeert.
+
+**Wat dit kansrijker maakt sinds juli 2026:** de vaste aanname **frontaal + horizontale
+camera** (zie bovenaan dit document) betekent meestal ook een vaste camerapositie per clip —
+de achtergrond (ijs, boarding, publiek) verandert dan alleen door de bewegende schaatser(s),
+wat achtergrondsubtractie/frame-differencing een stuk betrouwbaarder maakt dan bij een
+pannende camera.
+
+**Nog volledig open:**
+- Geen enkele meting — dit is puur een richting, geen ontwerp. Eerst zou moeten blijken óf
+  zo'n filter iets signaleert wat de bestaande kleur-/scoresignalen nog niet doen (bv. op de
+  clips uit "Losse eindjes in de doelkeuze" hierboven, waar de kleurpoort een foute
+  doelkeuze doorliet).
+- Welke OpenCV-techniek (MOG2/KNN/frame-diff/Canny-contour) en op welk niveau
+  (bbox-plausibiliteit? los keypoint? heel frame?) — te kiezen ná een eerste proef, niet
+  vooraf.
+- Zoals bij elke wijziging aan de meting: pas invoeren na een A/B met `schaats_eval.py`
+  (dekking, events, botlengte-CV, gouden referentie) — een controlefilter dat zelf ruis
+  toevoegt is erger dan geen controle.
+- **Prioriteit: laag** t.o.v. fase 2 (de eerstvolgende geplande stap, zie bovenaan dit
+  document) — dit is een aantekening voor later, geen geplande fase.
+
 ## Volgorde & omvang (grove inschatting)
 
 | Fase | Wat | Omvang |
@@ -664,6 +727,8 @@ die venv is er weinig te valideren.
 | 7 | Perspectiefcorrectie via baanlijnen | *nice-to-have (niet nu — frontale, horizontale camera)*; groot, 2–3 sessies (stap 3, de 3D-reconstructie, is onderzoekswerk — eerst valideren op testmateriaal) |
 | 8 | Fragmenten knippen in de app + `bronvideo`/opnames in de bibliotheek | ✅ **af** (11 aug 2026) |
 | — | Losse eindjes in de doelkeuze (stitch-poort, MediaPipe-klik) | **open** — code klein, de A/B is het werk; zie de eigen sectie hierboven |
+| — | Kleine schaatser volgen vanaf een getekend kader (kijkglas) | ✅ **af** (11 sep 2026) — zie de eigen sectie hierboven |
+| — | OpenCV-filters als controle op het neurale net (idee) | **open, ongepland** — nog geen ontwerp, lage prioriteit; zie de eigen sectie hierboven |
 
 ## Openstaande vragen (beslissen wanneer de fase begint)
 
