@@ -392,25 +392,123 @@ document supersedes it for anything about actual progress and lessons learned).
         `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode) — all 16
         windows pass.
 
-      - **Next up for 8a**: the rest of `VideoSpeler` (~2633-3736, now minus the
-        read-ahead pieces already done above). Given sessions 1-4 covered the
-        ~2,550-line infrastructure/pickers/workers/dialogs prefix plus the isolated
-        `ForwardReader` class, expect the remaining ~6,250 lines to take multiple
-        further sessions. Suggested chunking, smallest/most-isolated first (check each
-        class's own reference count with `grep -c` before touching it, the same way
-        sessions 1-4 did, since some of these constants/helpers are shared across
-        classes):
-        - The rest of the giant `VideoSpeler` class (~2633-3736, still over 1,000
-          lines even with `ForwardReader` split off — will likely need its own further
-          split, e.g. UI-building/zoom-pan/drawing vs. playback/navigation) — this is
-          also where the constants deferred in the note above should finally get
-          renamed, since they're its dependencies.
-        - `SpelerToetsen` + `MasterKlok` (~3737-4041) — this is also where the two
-          remaining Dutch "vooruitlezer" mentions noted above live.
-        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4041-4595).
-        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4595-5241).
-        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5241-5408).
-        - `MainWindow` (~5408-8872, ~3,460 lines — will very likely need to be split
+      - **Session 5** — the rest of `VideoSpeler`→`VideoPlayer` (~2633-3736, everything
+        left after session 4 split off `ForwardReader`): full identifier/docstring/comment
+        translation, ~50 methods and ~40 attributes. Class itself renamed
+        `VideoSpeler`→`VideoPlayer`; constructor params `min_grootte/toon_snelheid/
+        snel_zoeken/toon_overlay/toon_tekenen`→`min_size/show_speed/fast_seek/
+        show_overlay/show_drawing`. Because this class's public surface (methods,
+        callback-hook attributes, widget handles) is read from many other not-yet-
+        translated classes in the *same file* (`MainWindow`, `VergelijkKant`,
+        `FragmentKiezer`, `BekijkVenster`), the risk here isn't Pattern A/B (no module
+        boundary — it's all one file) but plain missed call sites. Handled it as a
+        same-file variant of Pattern G: `grep -c` every candidate identifier first,
+        split into "safe to rename file-wide" (0 external refs, or external refs that
+        are themselves unambiguous — e.g. `snel_zoeken` only ever appears as a
+        `VideoSpeler(...)` keyword at 2 call sites) vs. "leave alone" when the name
+        turned out to be shared vocabulary spanning `MainWindow`'s own not-yet-
+        translated state (see below). Renamed via a scripted whole-file word-boundary
+        regex pass (~90 identifier pairs) rather than by hand, specifically *because*
+        it's all one file and grep could verify every hit — followed by a full manual
+        read-through translating every comment/docstring the script doesn't touch.
+        Renamed (methods): `laad`→`load`, `sluit`→`release` (not `close` — would shadow
+        `QWidget.close()`'s different meaning), `ga_naar`→`go_to`, `toon_huidig_frame`→
+        `show_current_frame`, `toon_op_klok`→`show_on_clock`, `speel`/`pauzeer`/
+        `speelt`→`play`/`pause`/`is_playing`, `zet_besturing_actief`→
+        `set_controls_active`, `voeg_bedieningsknop`/`voeg_onderbalk`→
+        `add_control_button`/`add_bottom_bar`, `herbereken_kader`→`recompute_box`,
+        the whole zoom/pan family (`_zet_zoom`→`_set_zoom`, `_kader_op`→`_box_at`,
+        `_zoom_plafond`→`_zoom_ceiling`, `_bereken_zoom_eff`→`_compute_effective_zoom`,
+        `widget_naar_norm`/`norm_naar_widget`→`widget_to_norm`/`norm_to_widget`, ...),
+        the whole drawing family (`wis_tekening`→`clear_drawing`, `_teken_*`→`_draw_*`/
+        `_paint_drawing`, `_muis_*`→`_mouse_*`, `bewerk_modus`→`edit_mode`, `_kader`→
+        `_box` matching the existing `kader`→`box` glossary entry from `skate_yolo.py`),
+        the whole playback-clock family (`_speel_tick`→`_play_tick`,
+        `_ijk_speelklok`→`_calibrate_play_clock`, `speeltimer`→`play_timer`), plus the
+        owner-hook attributes (`op_frame_getoond`→`on_frame_shown`,
+        `overlay_tekenaar`→`overlay_drawer`, `op_muis_druk/_beweeg/_los`→
+        `on_mouse_press/_move/_release`) and their ~10 external assignment sites in
+        `MainWindow`/`VergelijkKant`/`BekijkVenster`. Also renamed the handful of
+        VideoPlayer-owned module-level constants from session 1's "left Dutch on
+        purpose" list that this class actually depends on: `SNELHEDEN`/`_snelheid_idx`/
+        `SNELHEID_DEFAULT_IDX`/`ALLES_SNELHEID_IDX`→`SPEEDS`/`_speed_idx`/
+        `SPEED_DEFAULT_IDX`/`ALL_SPEED_IDX`, `VIDEO_TOETSEN_HULP`/`VIDEO_TOETSEN_TOOLTIP`/
+        `toetsen_hulp`→`VIDEO_KEYS_HELP`/`VIDEO_KEYS_TOOLTIP`/`keys_help`,
+        `wissel_volledig_scherm`→`toggle_fullscreen`, `TRANSPORT_KNOP_BREEDTE`→
+        `TRANSPORT_BUTTON_WIDTH`, `SEEK_DREMPEL_FRAMES`→`SEEK_THRESHOLD_FRAMES`,
+        `SPEEL_OVERSAMPLE`/`SPEEL_TIK_MIN_MS`→`PLAY_OVERSAMPLE`/`PLAY_TICK_MIN_MS` (all
+        of these are also used by the still-Dutch `SpelerToetsen`/`MasterKlok`/
+        `BekijkVenster`/`FragmentKiezer`, so those call sites got the mechanical rename
+        too, without translating anything else in those classes). Also renamed the
+        `_bouw_ui` method — but **only** `VideoPlayer`'s own copy, scoped by line range
+        rather than the whole-file regex, since `MainWindow` independently defines its
+        own unrelated `_bouw_ui` that stays Dutch until `MainWindow`'s own session.
+        Switched the two `resultaat.pose_gevonden`/`resultaat.tijd` reads inside this
+        class to the real `FrameResult` fields (`result.pose_found`/`result.time`)
+        instead of the Dutch aliases, matching the Phase 6/7 precedent of preferring
+        real names over aliases in freshly translated code.
+        **Deliberately left Dutch** (checked individually, same judgment call as
+        session 3's `bieb`/`schaatser_id`/etc.): `deinterlacen` (both the constructor
+        parameter and the attribute) -- confirmed via grep this is genuinely shared
+        vocabulary: `AnalysisWorker.__init__` (already "translated" in session 3) still
+        takes a `deinterlacen=` keyword, `MainWindow` has its own separate
+        `self.deinterlacen` instance attribute, and `FragmentKiezer`/`BekijkVenster`
+        pass it positionally into `VideoPlayer.load(...)` too -- renaming it here would
+        split one concept across `MainWindow`'s eventual session. `huidige_idx` for the
+        same reason and more so: `MainWindow` declares its own read-only property
+        `def huidige_idx(self): return self.speler.huidige_idx` and then uses
+        `self.huidige_idx` as if it were its own attribute in ~15 more places inside the
+        still fully-Dutch skeleton-editor section of `MainWindow` (~8100-8400) --
+        renaming the player's copy alone would desynchronize the property's name from
+        what it proxies. `resultaten`/`video_pad`/`video_info`/`info` per the
+        project-wide lower-bar convention (`resultaten` and `_pad`-suffixed names stay
+        Dutch everywhere; `video_info`/`info` were already English). Left the plain Qt
+        widget handles alone too (`self.label`, `self.slider`, `self.cap`,
+        `self.btn_*`, `self.chk_*`, `self.lbl_*`, `self.combo_*`) except where a name
+        was actually a Dutch word carrying real meaning (`chk_skelet`→`chk_skeleton`,
+        `chk_afzetbeen`→`chk_push_leg`, `lbl_tijd`→`lbl_time`, `lbl_snelheid`/
+        `combo_snelheid`→`lbl_speed`/`combo_speed`, `btn_frame_terug/_verder/_eind`→
+        `btn_frame_back/_forward/_end`, `combo_teken`/`btn_teken_terug`/`btn_teken_wis`→
+        `combo_draw`/`btn_draw_undo`/`btn_draw_clear`) -- matches the precedent already
+        set by `TargetPicker` (session predates this log but is in the committed code:
+        `self.label`, `self._pix` stayed put while `_box`/`_drag_start`/`_pan_start`
+        were translated). All Dutch **strings** (tooltips, button labels, status-bar
+        text) untouched throughout -- that's 8b/8c.
+        **One mechanical-rename side effect worth knowing about for later sessions**:
+        the whole-file regex pass also rewrites the *word* wherever it's used as plain
+        prose inside a still-Dutch comment, not just where it names the actual
+        identifier (e.g. a comment explaining a dialog "closes via accept()/reject()"
+        used the literal word `sluit` as an ordinary verb, and the mechanical pass
+        turned that into nonsense before the manual translation pass overwrote it with
+        real English anyway). Caught here only because this session immediately
+        followed the rename with a full hand-translation of every comment in range;
+        a future session that runs a similar mechanical pass over a *wider* range than
+        it intends to hand-translate in the same sitting should re-read the affected
+        comments before leaving them, not trust the script's output as prose.
+        **Verified**: `py_compile` across the repo; real `import skate_gui` under both
+        venvs (offscreen Qt); a throwaway script driving `VideoPlayer` end-to-end
+        against a fake capture (`load`/`go_to`/`crop_norm`/the `on_frame_shown` hook/
+        `_set_zoom`/`_reset_zoom`/the `edit_mode` property/`play`/`pause`/`is_playing`/
+        `release`) -- all pass under the new names; grepped the whole file for every
+        renamed identifier's old spelling (zero hits) and for the new names' external
+        call sites (`VideoPlayer(`, `.on_frame_shown`, `.overlay_drawer`, `.edit_mode`,
+        `.follow_frozen`, `.combo_speed`, `.lbl_speed`) to confirm every external
+        assignment/keyword-call site was updated consistently;
+        `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode) -- all 16
+        windows pass, including the three `VideoPlayer`-backed windows
+        (`FragmentKiezer`, `BekijkVenster` x2, `MainWindow` analysis/compare pages).
+
+      - **Next up for 8a**: `SpelerToetsen` + `MasterKlok` (~3742-4046 at this session's
+        end state) -- this is also where the two remaining Dutch "vooruitlezer"
+        mentions noted in session 4 live, and where the module-level constants left
+        Dutch in session 1's list that are *these* classes' own dependencies
+        (`VIDEO_TOETSEN_HULP` is already done, but `SPOEL_FACTOR`/`SPOEL_TICK_MS`,
+        `ALLES_TICK_MS` are still Dutch/mixed and belong here) should get renamed.
+        After that, in order:
+        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4046-4600).
+        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4600-5246).
+        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5246-5413).
+        - `MainWindow` (~5413-8877, ~3,460 lines — will very likely need to be split
           across more than one session by itself; it owns most of the ~150
           `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
           8c work will naturally happen while translating its identifiers/docstrings/
@@ -418,12 +516,13 @@ document supersedes it for anything about actual progress and lessons learned).
           dedicated pass confirms every dialog/tooltip string is translated too. This is
           also where `bieb`/`schaatser_id`/`titel`/`instellingen`/`aangemaakt_door`/
           `analyse_id`/`naam`/`geboortejaar`/`notities`/`taken`/`schaatser_naam` from
-          session 3's "deliberately left Dutch" list actually live and could finally be
-          renamed in one coordinated pass, if a future session decides that's worth
-          doing -- check first whether `skate_db.py`'s own parameter names would need
-          to move together, since right now they match on purpose).
-        - `main()` (~8872-8893).
-        Line numbers are from session 3's end state and will drift as each chunk is
+          session 3's "deliberately left Dutch" list, and `deinterlacen`/`huidige_idx`
+          from this session's, actually live and could finally be renamed in one
+          coordinated pass, if a future session decides that's worth doing -- check
+          first whether `skate_db.py`'s own parameter names would need to move
+          together for `deinterlacen`/etc., since right now they match on purpose).
+        - `main()` (~8877-8898).
+        Line numbers are from session 5's end state and will drift as each chunk is
         translated — re-`grep -n "^class \|^def "` at the start of each session rather
         than trusting the numbers above verbatim.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do

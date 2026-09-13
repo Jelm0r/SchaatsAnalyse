@@ -445,9 +445,9 @@ VIDEO_FILTER = ("Video's (" + " ".join("*" + e for e in skate_db.VIDEO_EXTS) + "
 
 # Columns of the recordings table (phase 8). Named as numbers because cell widgets and an
 # itemChanged filter hang off them: an extra column must never become a silent shift.
-# NOTE: kept Dutch (`OPNAME_` = recording) for now, along with the other VideoSpeler/
+# NOTE: kept Dutch (`OPNAME_` = recording) for now, along with the other VideoPlayer/
 # opnametab-adjacent identifiers below down to the backend-selection section — they
-# belong with a future Phase 8 session that translates the recordings tab/VideoSpeler,
+# belong with a future Phase 8 session that translates the recordings tab/VideoPlayer,
 # not this module-infrastructure one. See TRANSLATION_PROGRESS.md.
 OPNAME_KOL_NAAM, OPNAME_KOL_DUUR, OPNAME_KOL_LOKAAL = 0, 1, 2
 OPNAME_KOL_STATUS, OPNAME_KOL_TELLING, OPNAME_KOL_NOTITIE = 3, 4, 5
@@ -479,29 +479,29 @@ LOKAAL_WEERGAVE = {
                "→ 'Offline beschikbaar maken'."),
 }
 
-# Trim window (phase 8): above this jump, a `snel_zoeken` ("fast seek") player seeks
+# Trim window (phase 8): above this jump, a `fast_seek` ("fast seek") player seeks
 # instead of scrubbing sequentially. Letting small jumps run sequentially keeps
 # frame-by-frame stepping and plain playback exact — and it's right around a fragment
 # boundary that you step frame by frame.
-SEEK_DREMPEL_FRAMES = 30
+SEEK_THRESHOLD_FRAMES = 30
 
 # Playback speeds: (label, factor on the fps). 1.0 = real speed, lower = slow motion.
 # Above 1x is meant for scanning through a long recording (the phase 8 trim window):
-# there, decoding doesn't speed up but frames get **skipped** (see _speel_tick), because
+# there, decoding doesn't speed up but frames get **skipped** (see _play_tick), because
 # 8x real speed outruns every decoder.
-SNELHEDEN = [("8×", 8.0), ("4×", 4.0), ("2×", 2.0),
+SPEEDS = [("8×", 8.0), ("4×", 4.0), ("2×", 2.0),
              ("1×", 1.0), ("½×", 0.5), ("¼×", 0.25), ("⅛×", 0.125), ("1/16×", 0.0625)]
 
 
-def _snelheid_idx(factor):
-    """Index of a speed in SNELHEDEN, looked up by factor instead of hardcoded —
+def _speed_idx(factor):
+    """Index of a speed in SPEEDS, looked up by factor instead of hardcoded —
     otherwise every speed added later silently shifts the defaults."""
-    return next(i for i, (_, f) in enumerate(SNELHEDEN) if f == factor)
+    return next(i for i, (_, f) in enumerate(SPEEDS) if f == factor)
 
 
-SNELHEID_DEFAULT_IDX = _snelheid_idx(1.0)
+SPEED_DEFAULT_IDX = _speed_idx(1.0)
 
-# The playback timer fires **faster than the frame rate**. `_speel_tick` reads the target
+# The playback timer fires **faster than the frame rate**. `_play_tick` reads the target
 # frame off the wall clock and returns immediately if no new frame is due yet, so an
 # empty tick costs microseconds. If the timer fired exactly once per frame, every tick
 # that's a few ms late would immediately cost a whole frame — and that's not an edge
@@ -516,10 +516,10 @@ SNELHEID_DEFAULT_IDX = _snelheid_idx(1.0)
 # that matters here — that's what reads as stutter; the tick itself only costs ~5 ms, so
 # there was no shortage of compute time, only of hitting the window, and the percentage
 # alone wouldn't reveal the bug. Oversampling further (1/4) gained nothing more.
-SPEEL_OVERSAMPLE = 3
+PLAY_OVERSAMPLE = 3
 # Lower bound, so an extremely high frame rate doesn't set the timer to hundreds of empty
 # ticks per second.
-SPEEL_TIK_MIN_MS = 4
+PLAY_TICK_MIN_MS = 4
 
 # Scrubbing with . and , — everywhere in the app, see `SpelerToetsen`. 6x the recording
 # speed: fast enough to get through half an hour, slow enough to see when you've shot
@@ -531,24 +531,24 @@ SPOEL_TICK_MS = 40
 
 # One single list of the default keys, so every video window can show the same line and
 # no window grows its own (and thus, over time, diverging) list. A window's extras get
-# appended with `toetsen_hulp()`.
-VIDEO_TOETSEN_HULP = (
+# appended with `keys_help()`.
+VIDEO_KEYS_HELP = (
     "<b>Spatie</b> afspelen/pauze · <b>.</b> doorspoelen 6× · <b>,</b> terugspoelen 6× · "
     "<b>&larr;/&rarr;</b> één frame · <b>Home/End</b> begin/eind · muiswiel zoomt · "
     "<b>F11</b> volledig scherm")
 
 # The same list as plain text, for a tooltip (which doesn't understand HTML markup).
-VIDEO_TOETSEN_TOOLTIP = (
+VIDEO_KEYS_TOOLTIP = (
     "Toetsen: spatie = afspelen/pauze, ← → = één frame, . en , = spoelen op 6×\n"
     "zolang je de toets ingedrukt houdt, Home/End = begin/eind, F11 = volledig scherm.")
 
 
-def toetsen_hulp(*extra):
+def keys_help(*extra):
     """The default keys plus the window's own keys, as one help line."""
-    return " · ".join((VIDEO_TOETSEN_HULP,) + tuple(extra))
+    return " · ".join((VIDEO_KEYS_HELP,) + tuple(extra))
 
 
-def wissel_volledig_scherm(venster):
+def toggle_fullscreen(venster):
     """F11 on every video window. Deliberately `setWindowState` and not `showNormal()`:
     the latter also clears a maximized state, so the main window would suddenly be small
     after leaving F11."""
@@ -559,7 +559,7 @@ def wissel_volledig_scherm(venster):
 
 # Width of the transport buttons (⏮ ⏪ ▶ ⏩ ⏭): they carry a single glyph, so Qt's
 # default width for text buttons is wasted space on a narrow screen.
-TRANSPORT_KNOP_BREEDTE = 46
+TRANSPORT_BUTTON_WIDTH = 46
 
 # Compare page: **upper bound** on the interval of the master clock driving both videos
 # at once. The target frame follows from the wall-clock time, so the clock self-corrects
@@ -571,7 +571,7 @@ TRANSPORT_KNOP_BREEDTE = 46
 ALLES_TICK_MS = 30
 # Decoding two videos at once can't hit 1x anyway, and a trainer is watching technique:
 # default ¼×.
-ALLES_SNELHEID_IDX = _snelheid_idx(0.25)
+ALL_SPEED_IDX = _speed_idx(0.25)
 
 # ── Backend selection ────────────────────────────────────────────────────────────
 # Use YOLO-pose + ByteTrack if torch/ultralytics is available (then run the app under
@@ -693,7 +693,7 @@ def set_window_size(window, wanted_width, wanted_height, maximize=False):
 
     Note: `resize()` can't override the layout — if the content's `minimumSizeHint` is
     wider than the screen, the window ends up too big anyway. That's why the wide
-    control bars in `VideoSpeler` wrap with a `WrapBar`; see there.
+    control bars in `VideoPlayer` wrap with a `WrapBar`; see there.
     """
     screen = window.screen() or QApplication.primaryScreen()
     if screen is None:
@@ -741,7 +741,7 @@ def show_dialog(dlg):
     `app.exec()` and thus outside the reach of any `try`. One trim-then-batch round of
     seven clips left sixteen of those windows behind this way (target and horizon picker
     per clip, plus the trim window and the batch dialog), some of them with their own
-    `VideoSpeler` and `VideoCapture` inside.
+    `VideoPlayer` and `VideoCapture` inside.
 
     `deleteLater()` and not `WA_DeleteOnClose`, because the caller reads the outcome
     (`dlg.doel_punt`, `dlg.fragmenten`, ...) only *after* `exec()`. Verified: the dialog
@@ -758,7 +758,7 @@ def show_dialog(dlg):
 class FlowLayout(QLayout):
     """Layout that lines its items up on a row and **wraps** when the width doesn't fit.
 
-    Needed because `VideoSpeler`'s control bars (layer toggles + zoom controls, ~774 px
+    Needed because `VideoPlayer`'s control bars (layer toggles + zoom controls, ~774 px
     together) demand a minimum width of 774 px as a `QHBoxLayout`. Two players side by
     side on the compare page made that 1607 px — wider than a 1280 px laptop screen, and
     a `QMainWindow` can't be smaller than its `minimumSizeHint`, so `resize()` was simply
@@ -879,7 +879,7 @@ class WrapBar(QWidget):
         # two at its actual width. That phantom sat permanently in the window minimum
         # and pushed the main window above a 1280x720 screen (measured 12-9-2026). How
         # many rows are *actually* needed is decided by the owner at its own minimum
-        # width, see `VideoSpeler.minimumSizeHint`; QBoxLayout, when placing the bar,
+        # width, see `VideoPlayer.minimumSizeHint`; QBoxLayout, when placing the bar,
         # always gives it via heightForWidth the rows it needs at that moment.
         beleid.setVerticalPolicy(QSizePolicy.Preferred)
         self.setSizePolicy(beleid)
@@ -978,7 +978,7 @@ class TargetPicker(QDialog):
     80-130 px tall). For that the box needs to be reasonably tight, and on a 900 px
     dialog such a skater is only about 45 px tall -- hence the **mouse wheel to zoom**
     around the cursor and **right-drag to pan**. Crop-and-magnify, the same recipe as
-    `VideoSpeler._toon_pixmap`: `_crop_norm` is the single source of truth for the
+    `VideoPlayer._show_pixmap`: `_crop_norm` is the single source of truth for the
     conversion, and everything that gets saved is normalized to the frame, so the zoom
     level doesn't matter for the outcome.
 
@@ -2630,404 +2630,409 @@ class ForwardReader(QThread):
                 return sorted(out)
 
 
-class VideoSpeler(QWidget):
+class VideoPlayer(QWidget):
     """
-    Videopaneel met een eigen capture, afspeeltimer en zoom/pan-state: beeldlabel +
-    transportknoppen + afspeelsnelheid + scrub-slider + laag-toggles + zoomregelaars.
+    Video panel with its own capture, playback timer, and zoom/pan state: image label +
+    transport buttons + playback speed + scrub slider + layer toggles + zoom controls.
 
-    Zelfstandig, zodat er meerdere naast elkaar kunnen bestaan (de analysepagina heeft er
-    één, de vergelijkpagina twee). De speler is de **enige** eigenaar van `video_info`,
-    `resultaten`, `huidige_idx` en `video_pad`; MainWindow kijkt er via read-only properties
-    naar, zodat er nooit stilzwijgend een tweede kopie ontstaat die uit de pas loopt.
+    Self-contained, so several can exist side by side (the analysis page has one, the
+    compare page two). The player is the **sole** owner of `video_info`, `resultaten`,
+    `huidige_idx`, and `video_pad`; MainWindow only looks at them through read-only
+    properties, so a second, silently diverging copy can never appear.
 
-    De eigenaar haakt in met plain callables — géén signalen, want een QMouseEvent overleeft
-    een queued connectie niet en er is per speler precies één eigenaar:
-        op_frame_getoond(idx)     — ná het tekenen van een frame (grafiek/tabel/statusbalk)
-        overlay_tekenaar(pixmap)  — vlak vóór setPixmap (de skelet-editor tekent z'n handles;
-                                    de aantekeningen van de trainer liggen daar al onder)
-        op_muis_druk/_beweeg/_los(event)
-                                  — alleen als de speler het event niet zelf als pan-sleep
-                                    heeft opgeslokt
+    The owner hooks in with plain callables -- no signals, since a QMouseEvent doesn't
+    survive a queued connection and there is exactly one owner per player:
+        on_frame_shown(idx)     -- after drawing a frame (chart/table/status bar)
+        overlay_drawer(pixmap)  -- right before setPixmap (the skeleton editor draws its
+                                    handles; the trainer's annotations already sit under it)
+        on_mouse_press/_move/_release(event)
+                                  -- only if the player itself didn't already swallow the
+                                    event as a pan drag
     """
 
-    def __init__(self, min_grootte=(480, 320), toon_snelheid=True, snel_zoeken=False,
-                 toon_overlay=True, toon_tekenen=False, parent=None):
+    def __init__(self, min_size=(480, 320), show_speed=True, fast_seek=False,
+                 show_overlay=True, show_drawing=False, parent=None):
         super().__init__(parent)
 
-        # Zonder analyse valt er niets te tekenen: het knipvenster (fase 8) voedt de speler
-        # met lege FrameResult-objecten, en dan zou de overlay op élk frame "Geen pose
-        # gedetecteerd" zetten. `toon_overlay=False` slaat het tekenen over en verbergt de
-        # laag-vinkjes, die daar toch niets doen.
-        self.toon_overlay = toon_overlay
+        # Without an analysis there's nothing to draw: the trim window (phase 8) feeds the
+        # player empty FrameResult objects, and then the overlay would put "No pose
+        # detected" on every single frame. `show_overlay=False` skips the drawing and hides
+        # the layer checkboxes, which wouldn't do anything there anyway.
+        self.show_overlay = show_overlay
 
-        # Tekenen op het beeld (zie DRAW_TOOLTIP) is er alléén waar je puur kijkt: het
-        # kijkvenster. Standaard uit, en dan worden de regelaars niet eens aangemaakt —
-        # `FlowLayout` slaat verborgen items niet over, dus een onzichtbaar teken-blok zou
-        # in elk ander videovenster een gat én ~28 px venster-minimum kosten voor iets wat
-        # daar niet te gebruiken is.
-        self.tekenen_aan = bool(toon_tekenen)
+        # Drawing on the image (see DRAW_TOOLTIP) exists only where you're purely looking:
+        # the viewing window. Off by default, and then the controls aren't even created --
+        # `FlowLayout` doesn't skip hidden items, so an invisible drawing block would cost
+        # every other video window a gap and ~28 px of window minimum for something that
+        # can't be used there.
+        self.drawing_on = bool(show_drawing)
 
-        # Kamfilter voor interlaced bron (zie DEINT_TOOLTIP). Staat het aan, dan krijgt de
-        # speler exact de pixels te zien waarop ook gemeten is — anders zou het skelet op een
-        # ánder beeld liggen dan waaruit het berekend is.
+        # Comb filter for an interlaced source (see DEINT_TOOLTIP). When on, the player
+        # shows exactly the pixels the measurement was taken from -- otherwise the skeleton
+        # would sit on a different image than the one it was computed from.
         self.deinterlacen = False
 
-        # `snel_zoeken` ruilt frame-exactheid in voor bruikbaarheid op een lange opname —
-        # zie _lees_frame_exact. Alleen aanzetten waar het beeld een kijkje is en geen meting
-        # (het knipvenster van fase 8); de weergavepagina laat hem uit.
-        self.snel_zoeken = snel_zoeken
+        # `fast_seek` trades frame-exactness for usability on a long recording -- see
+        # _read_frame_exact. Only turn it on where the image is a look, not a measurement
+        # (the phase-8 trim window); the viewing page leaves it off.
+        self.fast_seek = fast_seek
 
-        # Weergave-state (per speler, zodat er meerdere tegelijk kunnen draaien)
+        # Display state (per player, so several can run at once)
         self.video_pad = None
         self.video_info = None
         self.resultaten = []
         self.huidige_idx = -1
         self.cap = None
-        self._weergave_pos = 0        # frames al gelezen door cap (sequentiële cursor)
-        self._laatste_frame = None    # ruwe kopie van het huidige frame (voor laag-toggles)
-        self._weergave_scaled = None  # QSize van de getoonde (geschaalde) pixmap, voor omrekening
+        self._display_pos = 0        # frames already read by cap (sequential cursor)
+        self._last_frame = None    # raw copy of the current frame (for layer toggles)
+        self._display_scaled = None  # QSize of the shown (scaled) pixmap, for coordinate conversion
 
-        # Inzoomen op de schaatser. Twee zoomwaarden, bewust uit elkaar gehouden:
-        # `_zoom` is wat de gebruiker instelde (slider/wiel, 1–ZOOM_MAX), `_zoom_eff` is wat
-        # er daadwerkelijk getoond wordt. Zonder automatische zoom zijn ze gelijk.
-        self._zoom = 1.0            # 1.0 = passend (geen crop); tot ZOOM_MAX
-        self._zoom_eff = 1.0        # toegepaste zoom van het huidige frame (tot ZOOM_AUTO_MAX)
-        self._pan_cx = 0.5          # genormaliseerd middelpunt van de uitsnede (volledig frame)
+        # Zooming in on the skater. Two zoom values, deliberately kept apart:
+        # `_zoom` is what the user set (slider/wheel, 1-ZOOM_MAX), `_zoom_eff` is what's
+        # actually shown. Without automatic zoom they're equal.
+        self._zoom = 1.0            # 1.0 = fitted (no crop); up to ZOOM_MAX
+        self._zoom_eff = 1.0        # zoom applied to the current frame (up to ZOOM_AUTO_MAX)
+        self._pan_cx = 0.5          # normalized center of the crop (full frame)
         self._pan_cy = 0.5
-        self._zoom_volg = True      # auto-centreren op de schaatser (spiegel van chk_volg)
-        self._volg_forceren = False  # eenmalig centreren zonder framewissel (na een zoom-actie)
-        self._zoom_auto = False     # zoom door het programma laten bepalen (spiegel van chk_auto)
-        self._kader = None          # (midden_x, midden_y, straal) per frame, of None
-        self._crop_norm = (0.0, 0.0, 1.0, 1.0)  # (x0n, y0n, breedten, hoogten): getoonde crop
-        self._pan_sleep = None      # laatste muispositie tijdens een handmatige pan-sleep
+        self._zoom_follow = True      # auto-center on the skater (mirrors chk_follow)
+        self._force_follow = False  # center once without a frame change (after a zoom action)
+        self._zoom_auto = False     # let the program determine the zoom (mirrors chk_auto)
+        self._box = None          # (center_x, center_y, radius) per frame, or None
+        self._crop_norm = (0.0, 0.0, 1.0, 1.0)  # (x0n, y0n, widthn, heightn): the shown crop
+        self._pan_drag = None      # last mouse position during a manual pan drag
 
-        # Tekenen op het beeld (zie DRAW_TOOLTIP). De streken zijn lijsten van
-        # frame-genormaliseerde punten en horen bij de clip, niet bij een frame: ze blijven
-        # dus staan terwijl de video doorloopt.
-        self.teken_modus = DRAW_PAN
-        self._tekening = []          # afgeronde streken: [[(nx, ny), ...], ...]
-        self._streek = None          # de streek die op dit moment gesleept wordt
-        self._basis_pixmap = None    # geschaald beeld zónder tekening (snelle hertekening)
+        # Drawing on the image (see DRAW_TOOLTIP). The strokes are lists of
+        # frame-normalized points and belong to the clip, not to a frame: they stay put
+        # while the video keeps playing.
+        self.draw_mode = DRAW_PAN
+        self._drawing = []          # completed strokes: [[(nx, ny), ...], ...]
+        self._stroke = None          # the stroke currently being dragged
+        self._base_pixmap = None    # scaled image without the drawing (fast redraw)
 
-        # Haken voor de eigenaar (zie de klasse-docstring)
-        self.op_frame_getoond = None
-        self.overlay_tekenaar = None
-        self.op_muis_druk = None
-        self.op_muis_beweeg = None
-        self.op_muis_los = None
-        # Rechtstreeks het veld: de setter hieronder raakt `combo_teken` aan, en die
-        # bestaat pas na `_bouw_ui`.
-        self._bewerk_modus = False    # stuurt de pan-vs-editor-voorrang van de muis
-        self.volgen_bevroren = False  # tijdens een editor-sleep: uitsnede niet laten verspringen
+        # Hooks for the owner (see the class docstring)
+        self.on_frame_shown = None
+        self.overlay_drawer = None
+        self.on_mouse_press = None
+        self.on_mouse_move = None
+        self.on_mouse_release = None
+        # Directly on the field: the setter below touches `combo_draw`, which doesn't
+        # exist yet until after `_build_ui`.
+        self._edit_mode = False    # drives the pan-vs-editor priority of the mouse
+        self.follow_frozen = False  # during an editor drag: don't let the crop jump
 
-        # Scrub-samenvoeging (zie _scrub_gevraagd); moet vóór _bouw_ui bestaan, want die
-        # verbindt de slider er eventueel aan.
-        self._scrub_doel = 0
+        # Scrub coalescing (see _scrub_requested); must exist before `_build_ui`, since
+        # that connects the slider to it.
+        self._scrub_target = 0
         self._scrub_timer = QTimer(self)
         self._scrub_timer.setSingleShot(True)
         self._scrub_timer.timeout.connect(self._scrub_tick)
 
-        self._bouw_ui(min_grootte, toon_snelheid, toon_overlay)
-        self.speeltimer = QTimer(self)
-        # PreciseTimer, en dat is hier geen finetuning maar het verschil tussen vloeiend en
-        # schokkerig. Een gewone Qt-timer is een CoarseTimer en hangt op Windows aan de
-        # klokgranulariteit van ~15,6 ms: gemeten vuurt een timer van 40 ms er dan één per
-        # 46,5 ms. Op 25 fps is dat structureel 6,5 ms per frame te laat, en omdat
-        # `_speel_tick` op de wandklok telt betaalt hij dat met overgeslagen frames — 15%
-        # van alle frames, terwijl er rekentijd zat over is (27,9 ms werk van de 40 ms).
-        # Met PreciseTimer vuurt hij op 40,1 ms en zakt het overslaan naar 1%.
-        self.speeltimer.setTimerType(Qt.PreciseTimer)
-        self.speeltimer.timeout.connect(self._speel_tick)
-        # IJkpunt van de afspeelklok (zie `_speel_tick`): vanaf welk frame en welk moment
-        # de verstreken tijd geteld wordt, en welk frame wíj het laatst toonden.
-        self._speel_basis_idx = 0
-        self._speel_basis_t = 0.0
-        self._speel_laatste = -1
+        self._build_ui(min_size, show_speed, show_overlay)
+        self.play_timer = QTimer(self)
+        # PreciseTimer, and that's not fine-tuning here but the difference between smooth
+        # and choppy. A regular Qt timer is a CoarseTimer and on Windows hangs off the
+        # clock granularity of ~15.6 ms: measured, a 40 ms timer then fires once every
+        # 46.5 ms. At 25 fps that's structurally 6.5 ms per frame too late, and since
+        # `_play_tick` counts on the wall clock it pays for that in skipped frames -- 15%
+        # of all frames, while there was plenty of compute time to spare (27.9 ms of work
+        # out of the 40 ms). With PreciseTimer it fires at 40.1 ms and the skip rate drops
+        # to 1%.
+        self.play_timer.setTimerType(Qt.PreciseTimer)
+        self.play_timer.timeout.connect(self._play_tick)
+        # Calibration point of the playback clock (see `_play_tick`): from which frame and
+        # which moment elapsed time is counted, and which frame we ourselves last showed.
+        self._play_base_idx = 0
+        self._play_base_t = 0.0
+        self._play_last = -1
         # Read-ahead (see `ForwardReader`): the running thread, and the frames it handed
         # back on stopping that haven't been shown yet ({index: frame}).
         self._reader = None
         self._readahead_rest = {}
-        self.zet_besturing_actief(False)
+        self.set_controls_active(False)
 
-    # ── UI opbouw ────────────────────────────────────────────────────────
-    def _bouw_ui(self, min_grootte, toon_snelheid=True, toon_overlay=True):
-        self._hoofd = QVBoxLayout(self)
+    # ── UI construction ─────────────────────────────────────────────────
+    def _build_ui(self, min_size, show_speed=True, show_overlay=True):
+        self._main = QVBoxLayout(self)
 
         self.label = QLabel("Geen video geladen")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("background-color: #111; color: #888;")
-        # De expliciete minimumSize is wat de layout als ondergrens gebruikt (hij wint van de
-        # minimumSizeHint, die bij een QLabel mét pixmap de pixmapgrootte is). Houd `min_grootte`
-        # dus laag: hij bepaalt rechtstreeks hoe hoog het venster minimaal wordt.
-        self.label.setMinimumSize(*min_grootte)
-        self._hoofd.addWidget(self.label, stretch=1)
+        # The explicit minimumSize is what the layout uses as the lower bound (it wins over
+        # the minimumSizeHint, which for a QLabel with a pixmap is the pixmap size). So keep
+        # `min_size` low: it directly determines how short the window can be.
+        self.label.setMinimumSize(*min_size)
+        self._main.addWidget(self.label, stretch=1)
 
-        knoppen = QHBoxLayout()
+        buttons = QHBoxLayout()
         self.btn_start = QPushButton("⏮")
-        self.btn_frame_terug = QPushButton("⏪")
+        self.btn_frame_back = QPushButton("⏪")
         self.btn_play = QPushButton("▶")
-        self.btn_frame_verder = QPushButton("⏩")
-        self.btn_eind = QPushButton("⏭")
-        self.lbl_tijd = QLabel("t=0.00s  frame 0/0")
+        self.btn_frame_forward = QPushButton("⏩")
+        self.btn_end = QPushButton("⏭")
+        self.lbl_time = QLabel("t=0.00s  frame 0/0")
 
-        self.btn_start.clicked.connect(lambda: self.ga_naar(0))
-        self.btn_frame_terug.clicked.connect(lambda: self.ga_naar(self.huidige_idx - 1))
-        self.btn_play.clicked.connect(self._toggle_afspelen)
-        self.btn_frame_verder.clicked.connect(lambda: self.ga_naar(self.huidige_idx + 1))
-        self.btn_eind.clicked.connect(lambda: self.ga_naar(len(self.resultaten) - 1))
+        self.btn_start.clicked.connect(lambda: self.go_to(0))
+        self.btn_frame_back.clicked.connect(lambda: self.go_to(self.huidige_idx - 1))
+        self.btn_play.clicked.connect(self._toggle_playback)
+        self.btn_frame_forward.clicked.connect(lambda: self.go_to(self.huidige_idx + 1))
+        self.btn_end.clicked.connect(lambda: self.go_to(len(self.resultaten) - 1))
 
-        # De sneltoets bij de knop zetten is de enige plek waar iedereen hem tegenkomt:
-        # deze balk staat op alle vier de plekken waar een video te zien is.
-        for knop, tip in ((self.btn_start, "Naar het begin (Home)"),
-                          (self.btn_frame_terug, "Eén frame terug (←)"),
+        # Putting the keyboard shortcut on the button is the one place everyone runs into
+        # it: this bar sits in all four places where a video is shown.
+        for button, tip in ((self.btn_start, "Naar het begin (Home)"),
+                          (self.btn_frame_back, "Eén frame terug (←)"),
                           (self.btn_play, "Afspelen / pauze (spatie)"),
-                          (self.btn_frame_verder, "Eén frame verder (→)"),
-                          (self.btn_eind, "Naar het eind (End)")):
-            knop.setToolTip(f"{tip}\n\n{VIDEO_TOETSEN_TOOLTIP}")
+                          (self.btn_frame_forward, "Eén frame verder (→)"),
+                          (self.btn_end, "Naar het eind (End)")):
+            button.setToolTip(f"{tip}\n\n{VIDEO_KEYS_TOOLTIP}")
 
-        for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
-                  self.btn_frame_verder, self.btn_eind):
-            # Eén teken breed: de Qt-standaardbreedte (81 px) is bedoeld voor knoppen mét
-            # tekst en eiste met vijf transportknoppen 405 px per speler — twee spelers naast
-            # elkaar op de vergelijkpagina paste daarmee niet op een smal laptopscherm.
-            w.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
-            knoppen.addWidget(w)
+        for w in (self.btn_start, self.btn_frame_back, self.btn_play,
+                  self.btn_frame_forward, self.btn_end):
+            # One character wide: the Qt default width (81 px) is meant for buttons with
+            # text and demanded 405 px per player for five transport buttons -- two players
+            # side by side on the compare page then didn't fit a narrow laptop screen.
+            w.setMaximumWidth(TRANSPORT_BUTTON_WIDTH)
+            buttons.addWidget(w)
 
-        # Afspeelsnelheid (slow motion): factor waarmee de fps vermenigvuldigd wordt.
-        # De combo bestaat altijd (hij is de bron voor `_speel_interval_ms`), maar hoeft
-        # niet zichtbaar te zijn: op de vergelijkpagina stuurt één gedeelde regelaar
-        # beide kanten, zodat de video's altijd even snel lopen.
-        self.lbl_snelheid = QLabel("Snelheid")
-        knoppen.addWidget(self.lbl_snelheid)
-        self.combo_snelheid = QComboBox()
-        self.combo_snelheid.setToolTip("Afspeelsnelheid — kies een lagere factor voor slow motion.")
-        for label, factor in SNELHEDEN:
-            self.combo_snelheid.addItem(label, factor)
-        self.combo_snelheid.setCurrentIndex(SNELHEID_DEFAULT_IDX)
-        self.combo_snelheid.currentIndexChanged.connect(self._zet_snelheid)
-        knoppen.addWidget(self.combo_snelheid)
-        self.lbl_snelheid.setVisible(toon_snelheid)
-        self.combo_snelheid.setVisible(toon_snelheid)
+        # Playback speed (slow motion): the factor the fps gets multiplied by. The combo
+        # always exists (it's the source for `_play_interval_ms`), but doesn't have to be
+        # visible: on the compare page a single shared control drives both sides, so the
+        # videos always run at the same speed.
+        self.lbl_speed = QLabel("Snelheid")
+        buttons.addWidget(self.lbl_speed)
+        self.combo_speed = QComboBox()
+        self.combo_speed.setToolTip("Afspeelsnelheid — kies een lagere factor voor slow motion.")
+        for label, factor in SPEEDS:
+            self.combo_speed.addItem(label, factor)
+        self.combo_speed.setCurrentIndex(SPEED_DEFAULT_IDX)
+        self.combo_speed.currentIndexChanged.connect(self._set_speed)
+        buttons.addWidget(self.combo_speed)
+        self.lbl_speed.setVisible(show_speed)
+        self.combo_speed.setVisible(show_speed)
 
-        knoppen.addWidget(self.lbl_tijd, stretch=1)
-        self._hoofd.addLayout(knoppen)
+        buttons.addWidget(self.lbl_time, stretch=1)
+        self._main.addLayout(buttons)
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 0)
-        self.slider.setToolTip(f"Sleep om door de video te scrubben.\n\n{VIDEO_TOETSEN_TOOLTIP}")
-        # Op een lange opname kost één sprong ~80 ms (seek) + tekenen, terwijl een sleep over
-        # de tijdlijn honderden valueChanged-signalen afvuurt. Die stapelen zich op en de GUI
-        # lijkt vast te lopen. `_scrub_gevraagd` bewaart alleen het laatst gevraagde frame en
-        # tekent dat via een timer met interval 0: die vuurt pas als de wachtrij leeg is, dus
-        # alle tussenliggende waarden vallen vanzelf weg en er wordt precies zo vaak getekend
-        # als de machine aankan. Zonder snel_zoeken (korte clips) blijft de directe weg staan.
+        self.slider.setToolTip(f"Sleep om door de video te scrubben.\n\n{VIDEO_KEYS_TOOLTIP}")
+        # On a long recording, one jump costs ~80 ms (seek) + drawing, while a drag across
+        # the timeline fires hundreds of valueChanged signals. Those pile up and the GUI
+        # seems to lock up. `_scrub_requested` only stores the last requested frame and
+        # draws it via a timer with interval 0: that only fires once the queue is empty, so
+        # all the intermediate values automatically drop away and drawing happens exactly
+        # as often as the machine can keep up with. Without fast_seek (short clips) the
+        # direct path is left as is.
         self.slider.valueChanged.connect(
-            self._scrub_gevraagd if self.snel_zoeken else self.ga_naar)
-        self._hoofd.addWidget(self.slider)
+            self._scrub_requested if self.fast_seek else self.go_to)
+        self._main.addWidget(self.slider)
 
-        # Afbrekende balk i.p.v. QHBoxLayout: deze rij is met al zijn regelaars te breed voor
-        # een laptopscherm (zeker twee spelers naast elkaar) en moet kunnen inklappen.
-        self._balk_toggles = WrapBar()
-        self._rij_toggles = self._balk_toggles
-        self.chk_skelet = QCheckBox("Skelet")
-        self.chk_afzetbeen = QCheckBox("Afzetbeen")
+        # A wrapping bar instead of QHBoxLayout: with all its controls this row is too wide
+        # for a laptop screen (certainly two players side by side) and needs to be able to
+        # collapse.
+        self._toggles_bar = WrapBar()
+        self._toggles_row = self._toggles_bar
+        self.chk_skeleton = QCheckBox("Skelet")
+        self.chk_push_leg = QCheckBox("Afzetbeen")
         self.chk_hud = QCheckBox("HUD")
-        for chk in (self.chk_skelet, self.chk_afzetbeen, self.chk_hud):
+        for chk in (self.chk_skeleton, self.chk_push_leg, self.chk_hud):
             chk.setChecked(True)
-            chk.stateChanged.connect(lambda _=None: self.toon_huidig_frame())
-            chk.setVisible(toon_overlay)
-            self._rij_toggles.addWidget(chk)
+            chk.stateChanged.connect(lambda _=None: self.show_current_frame())
+            chk.setVisible(show_overlay)
+            self._toggles_row.addWidget(chk)
 
-        # Inzoomen op de schaatser (muiswiel boven de video werkt ook — zie onder).
-        self.chk_volg = QCheckBox("Volg schaatser")
-        self.chk_volg.setChecked(True)
-        self.chk_volg.setToolTip("Houd de schaatser gecentreerd in beeld tijdens het inzoomen.")
-        self.chk_volg.toggled.connect(self._zet_zoom_volg)
-        self._rij_toggles.addWidget(self.chk_volg)
+        # Zooming in on the skater (the mouse wheel over the video also works -- see below).
+        self.chk_follow = QCheckBox("Volg schaatser")
+        self.chk_follow.setChecked(True)
+        self.chk_follow.setToolTip("Houd de schaatser gecentreerd in beeld tijdens het inzoomen.")
+        self.chk_follow.toggled.connect(self._set_zoom_follow)
+        self._toggles_row.addWidget(self.chk_follow)
         self.chk_auto = QCheckBox("Automatische zoom")
         self.chk_auto.setToolTip(
             "Het programma kiest de zoom: de schaatser staat helemaal in beeld met wat ruimte "
             "eromheen, de hele clip lang. Rijdt hij naar de camera toe, dan zoomt het beeld "
             "vanzelf uit.\nZolang dit aan staat is de zoomregelaar buiten werking; aan het "
             "muiswiel draaien neemt de zoom weer over.")
-        self.chk_auto.toggled.connect(self._zet_zoom_auto)
-        self._rij_toggles.addWidget(self.chk_auto)
-        # Volgen en automatische zoom leven van de gedetecteerde pose; zonder analyse
-        # (knipvenster) zouden het vinkjes zijn die niets doen.
-        self.chk_volg.setVisible(toon_overlay)
-        self.chk_auto.setVisible(toon_overlay)
+        self.chk_auto.toggled.connect(self._set_zoom_auto)
+        self._toggles_row.addWidget(self.chk_auto)
+        # Follow and automatic zoom live off the detected pose; without an analysis
+        # (trim window) they'd be checkboxes that don't do anything.
+        self.chk_follow.setVisible(show_overlay)
+        self.chk_auto.setVisible(show_overlay)
 
-        # De zoomregelaars als één blok in de balk: zouden ze los meedoen, dan kan het
-        # label "Zoom" op de vorige regel achterblijven terwijl zijn schuif afbreekt.
-        zoom_blok = QWidget()
-        zoom_rij = QHBoxLayout(zoom_blok)
-        zoom_rij.setContentsMargins(0, 0, 0, 0)
-        zoom_rij.addWidget(QLabel("Zoom"))
+        # The zoom controls as a single block in the bar: if they took part loose, the
+        # "Zoom" label could get left behind on the previous line while its slider wraps.
+        zoom_block = QWidget()
+        zoom_row = QHBoxLayout(zoom_block)
+        zoom_row.setContentsMargins(0, 0, 0, 0)
+        zoom_row.addWidget(QLabel("Zoom"))
         self.slider_zoom = QSlider(Qt.Horizontal)
         self.slider_zoom.setRange(100, int(ZOOM_MAX * 100))   # 100 = 1.0×
         self.slider_zoom.setValue(100)
         self.slider_zoom.setFixedWidth(120)
         self.slider_zoom.setToolTip("Zoomniveau. Muiswiel boven de video werkt ook.")
-        self.slider_zoom.valueChanged.connect(lambda v: self._zet_zoom(v / 100.0))
-        zoom_rij.addWidget(self.slider_zoom)
+        self.slider_zoom.valueChanged.connect(lambda v: self._set_zoom(v / 100.0))
+        zoom_row.addWidget(self.slider_zoom)
         self.lbl_zoom = QLabel("1.0×")
         self.lbl_zoom.setFixedWidth(38)
-        zoom_rij.addWidget(self.lbl_zoom)
+        zoom_row.addWidget(self.lbl_zoom)
         self.btn_zoom_reset = QPushButton("Passend")
         self.btn_zoom_reset.setToolTip("Zoom herstellen naar passend beeld.")
-        self.btn_zoom_reset.clicked.connect(self._zoom_reset)
-        # Alleen mét analyse: daar zet hij ook auto-volgen weer aan. Zonder analyse
-        # (kijk- en knipvenster) is de schuif op 1× hetzelfde en leek de knop niets te doen.
-        self.btn_zoom_reset.setVisible(toon_overlay)
-        zoom_rij.addWidget(self.btn_zoom_reset)
-        self._rij_toggles.addWidget(zoom_blok)
+        self.btn_zoom_reset.clicked.connect(self._reset_zoom)
+        # Only with an analysis: there it also turns auto-follow back on. Without an
+        # analysis (viewing/trim window) the slider at 1x is the same thing, and the
+        # button would seem to do nothing.
+        self.btn_zoom_reset.setVisible(show_overlay)
+        zoom_row.addWidget(self.btn_zoom_reset)
+        self._toggles_row.addWidget(zoom_block)
 
-        # Tekenen op het beeld — alleen waar het aan staat (het kijkvenster). Eén blok in
-        # de balk (zelfde reden als bij zoom_blok: anders blijft het label achter op de
-        # vorige regel als de balk afbreekt). De combo bepaalt wat de línkerknop doet;
-        # rechts-slepen blijft altijd pannen.
-        self.combo_teken = self.btn_teken_terug = self.btn_teken_wis = None
-        if self.tekenen_aan:
-            teken_blok = QWidget()
-            teken_rij = QHBoxLayout(teken_blok)
-            teken_rij.setContentsMargins(0, 0, 0, 0)
-            teken_rij.addWidget(QLabel("Muis"))
-            self.combo_teken = QComboBox()
-            for label, modus in DRAW_MODES:
-                self.combo_teken.addItem(label, modus)
-            self.combo_teken.setToolTip(DRAW_TOOLTIP)
-            self.combo_teken.currentIndexChanged.connect(self._zet_teken_modus)
-            teken_rij.addWidget(self.combo_teken)
-            self.btn_teken_terug = QPushButton("↶")
-            self.btn_teken_terug.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
-            self.btn_teken_terug.setToolTip("Laatst getekende streek weghalen.")
-            self.btn_teken_terug.clicked.connect(self.wis_laatste_streek)
-            teken_rij.addWidget(self.btn_teken_terug)
-            self.btn_teken_wis = QPushButton("🧹")
-            self.btn_teken_wis.setMaximumWidth(TRANSPORT_KNOP_BREEDTE)
-            self.btn_teken_wis.setToolTip("Alle aantekeningen van het beeld halen.")
-            # lambda: clicked() geeft anders zijn `checked=False` door als `hertekenen`,
-            # waarmee de tekening wél gewist wordt maar in beeld blijft staan.
-            self.btn_teken_wis.clicked.connect(lambda: self.wis_tekening())
-            teken_rij.addWidget(self.btn_teken_wis)
-            self._rij_toggles.addWidget(teken_blok)
+        # Drawing on the image -- only where it's turned on (the viewing window). One
+        # block in the bar (same reason as zoom_block: otherwise the label gets left
+        # behind on the previous line when the bar wraps). The combo decides what the
+        # left button does; right-drag always keeps panning.
+        self.combo_draw = self.btn_draw_undo = self.btn_draw_clear = None
+        if self.drawing_on:
+            draw_block = QWidget()
+            draw_row = QHBoxLayout(draw_block)
+            draw_row.setContentsMargins(0, 0, 0, 0)
+            draw_row.addWidget(QLabel("Muis"))
+            self.combo_draw = QComboBox()
+            for label, mode in DRAW_MODES:
+                self.combo_draw.addItem(label, mode)
+            self.combo_draw.setToolTip(DRAW_TOOLTIP)
+            self.combo_draw.currentIndexChanged.connect(self._set_draw_mode)
+            draw_row.addWidget(self.combo_draw)
+            self.btn_draw_undo = QPushButton("↶")
+            self.btn_draw_undo.setMaximumWidth(TRANSPORT_BUTTON_WIDTH)
+            self.btn_draw_undo.setToolTip("Laatst getekende streek weghalen.")
+            self.btn_draw_undo.clicked.connect(self.clear_last_stroke)
+            draw_row.addWidget(self.btn_draw_undo)
+            self.btn_draw_clear = QPushButton("🧹")
+            self.btn_draw_clear.setMaximumWidth(TRANSPORT_BUTTON_WIDTH)
+            self.btn_draw_clear.setToolTip("Alle aantekeningen van het beeld halen.")
+            # lambda: otherwise clicked() passes its `checked=False` through as
+            # `redraw`, which does clear the drawing but leaves it on screen.
+            self.btn_draw_clear.clicked.connect(lambda: self.clear_drawing())
+            draw_row.addWidget(self.btn_draw_clear)
+            self._toggles_row.addWidget(draw_block)
 
-        self._hoofd.addWidget(self._balk_toggles)
+        self._main.addWidget(self._toggles_bar)
 
-        # Muis-events op het videolabel: pannen doet de speler zelf, de rest gaat naar de
-        # haken van de eigenaar (de skelet-editor).
-        self.label.mousePressEvent = self._muis_druk
-        self.label.mouseMoveEvent = self._muis_beweeg
-        self.label.mouseReleaseEvent = self._muis_los
-        self.label.wheelEvent = self._zoom_wiel   # muiswiel = in-/uitzoomen
-        # tracking aan: mouseMoveEvent vuurt ook zónder ingedrukte knop, nodig voor de
-        # hover-tekst die het lichaamsdeel onder de cursor benoemt in de bewerk-modus.
+        # Mouse events on the video label: the player itself does panning, the rest goes
+        # to the owner's hooks (the skeleton editor).
+        self.label.mousePressEvent = self._mouse_press
+        self.label.mouseMoveEvent = self._mouse_move
+        self.label.mouseReleaseEvent = self._mouse_release
+        self.label.wheelEvent = self._zoom_wheel   # mouse wheel = zoom in/out
+        # tracking on: mouseMoveEvent also fires without a button held, needed for the
+        # hover text that names the body part under the cursor in edit mode.
         self.label.setMouseTracking(True)
-        # Rechts-slepen pant (ook in de bewerk-modus, waar links bezet is). Zonder dit
-        # propageert contextMenuEvent naar het QMainWindow, dat er zijn toolbar-/dock-menu
-        # op opent — dan klapt er bij elke pan een menu open.
+        # Right-drag pans (also in edit mode, where the left button is taken). Without
+        # this, contextMenuEvent propagates to the QMainWindow, which opens its
+        # toolbar/dock menu on it -- then a menu would pop open on every pan.
         self.label.setContextMenuPolicy(Qt.PreventContextMenu)
 
-    def voeg_bedieningsknop(self, w):
-        """Hangt een eigenaar-specifieke knop rechts in de toggles-rij (bv. '✏ Bewerken')."""
-        self._rij_toggles.addWidget(w)
+    def add_control_button(self, w):
+        """Adds an owner-specific button to the right of the toggles row (e.g. '✏ Edit')."""
+        self._toggles_row.addWidget(w)
 
-    def voeg_onderbalk(self, w):
-        """Hangt een eigenaar-specifieke balk onderaan het paneel (bv. de editor-balk)."""
-        self._hoofd.addWidget(w)
+    def add_bottom_bar(self, w):
+        """Adds an owner-specific bar to the bottom of the panel (e.g. the editor bar)."""
+        self._main.addWidget(w)
 
     def minimumSizeHint(self):
-        # De afbrekende balken (toggles/zoom, en de editor-balk via voeg_onderbalk) tellen
-        # mee met de regels die ze op de minimumbreedte van dít paneel nodig hebben — niet
-        # met hun smalste afbreking en ook niet met nul regels. Zie minimum_with_wrapping.
+        # The wrapping bars (toggles/zoom, and the editor bar via add_bottom_bar) count
+        # with the number of lines they need at this panel's minimum width -- not their
+        # narrowest wrap and not zero lines. See minimum_with_wrapping.
         return minimum_with_wrapping(self)
 
-    # ── Laden / sluiten ──────────────────────────────────────────────────
+    # ── Loading / releasing ──────────────────────────────────────────────
     @property
     def crop_norm(self):
         return self._crop_norm
 
     @property
-    def weergave_scaled(self):
-        return self._weergave_scaled
+    def display_scaled(self):
+        return self._display_scaled
 
-    def laad(self, info, resultaten, video_pad, deinterlacen=False):
+    def load(self, info, resultaten, video_pad, deinterlacen=False):
         """
-        Neemt een analyse in gebruik: capture heropenen, zoom resetten, besturing aan.
+        Puts an analysis into use: reopen the capture, reset zoom, controls on.
 
-        Toont bewust nog géén frame — de caller roept als laatste `ga_naar(0)` aan. Alleen
-        zo staan de tabel en de grafiek van de eigenaar al klaar wanneer `op_frame_getoond`
-        voor het eerste frame vuurt.
+        Deliberately shows no frame yet -- the caller calls `go_to(0)` last. Only that way
+        are the owner's table and chart already in place by the time `on_frame_shown`
+        fires for the first frame.
         """
         if not video_pad:
-            raise ValueError("VideoSpeler.laad() zonder videopad")
+            raise ValueError("VideoPlayer.load() without a video path")
         self.video_info = info
         self.resultaten = resultaten
         self.video_pad = video_pad
 
-        # Zoom resetten (geen zoom-lekkage tussen analyses). De stand van "Automatische zoom"
-        # blijft wél staan: dat is een voorkeur van de kijker, geen eigenschap van de clip.
+        # Reset zoom (no zoom leaking between analyses). The "Automatic zoom" setting does
+        # stay put: that's a viewer preference, not a property of the clip.
         self._zoom = self._zoom_eff = 1.0
         self._pan_cx = self._pan_cy = 0.5
-        self._zoom_volg = True
-        self._volg_forceren = True     # bij het eerste frame meteen op de schaatser richten
-        self._pan_sleep = None
+        self._zoom_follow = True
+        self._force_follow = True     # aim at the skater right away on the first frame
+        self._pan_drag = None
         self._crop_norm = (0.0, 0.0, 1.0, 1.0)
-        # Aantekeningen horen bij de clip die eronder ligt: een andere analyse begint schoon.
-        self.wis_tekening(hertekenen=False)
-        # Eén keer offline: welk kader heeft de schaatser per frame nodig? Kost een fractie
-        # van een seconde en maakt de automatische zoom onafhankelijk van de afspeelrichting
-        # (scrubben geeft exact dezelfde uitsnede als ernaartoe afspelen).
-        self._kader = box_sequence(resultaten, info.fps or 30.0)
+        # Annotations belong to the clip underneath: a different analysis starts clean.
+        self.clear_drawing(redraw=False)
+        # Once, offline: what box does the skater need per frame? Costs a fraction of a
+        # second and makes the automatic zoom independent of playback direction (scrubbing
+        # gives exactly the same crop as playing toward it).
+        self._box = box_sequence(resultaten, info.fps or 30.0)
         self.slider_zoom.blockSignals(True)
         self.slider_zoom.setValue(100)
         self.slider_zoom.blockSignals(False)
         self.lbl_zoom.setText("1.0×")
-        self.chk_volg.blockSignals(True)
-        self.chk_volg.setChecked(True)
-        self.chk_volg.blockSignals(False)
+        self.chk_follow.blockSignals(True)
+        self.chk_follow.setChecked(True)
+        self.chk_follow.blockSignals(False)
 
         self._stop_readahead()         # get the capture back first, only then release it
         if self.cap is not None:
             self.cap.release()
         self.deinterlacen = bool(deinterlacen)
         self.cap = open_video(video_pad, self.deinterlacen)
-        self._weergave_pos = 0
+        self._display_pos = 0
         self._readahead_rest = {}
-        self._laatste_frame = None
+        self._last_frame = None
         self.huidige_idx = -1
 
-        # blockSignals: setRange klemt een te hoge sliderwaarde en zou anders valueChanged
-        # vuren → een volle seek op een tabel die nog van de vórige analyse is.
+        # blockSignals: setRange clamps a too-high slider value and would otherwise fire
+        # valueChanged -> a full seek on a table that's still from the previous analysis.
         self.slider.blockSignals(True)
         self.slider.setRange(0, max(0, len(resultaten) - 1))
         self.slider.setValue(0)
         self.slider.blockSignals(False)
-        self.zet_besturing_actief(True)
+        self.set_controls_active(True)
 
-    def herbereken_kader(self):
-        """Het auto-zoom-kader opnieuw afleiden uit de huidige resultaten.
+    def recompute_box(self):
+        """Re-derives the auto-zoom box from the current results.
 
-        Alleen nodig als er frames zijn bíjgekomen die eerst geen pose hadden (handmatig
-        geplaatst skelet): `box_sequence` opent bij een gat > KADER_GAT_S naar het volle
-        beeld, dus zonder herberekening blijft juist het net gevulde frame uitgezoomd.
-        Bewust niet na elke sleep-correctie — dan zou de zoom bij elke drop verspringen."""
+        Only needed when frames have been added that didn't have a pose before (a
+        manually placed skeleton): `box_sequence` opens up to the full image on a gap >
+        BOX_GAP_S, so without recomputing, exactly the just-filled-in frame stays zoomed
+        out. Deliberately not done after every drag correction -- that would make the
+        zoom jump on every drop."""
         if not self.resultaten or self.video_info is None:
             return
-        self._kader = box_sequence(self.resultaten, self.video_info.fps or 30.0)
+        self._box = box_sequence(self.resultaten, self.video_info.fps or 30.0)
 
-    def sluit(self):
-        """Laat het videobestand los (nodig voordat de mediamap gewist kan worden) en
-        maakt het paneel leeg."""
-        self.pauzeer()                 # also gets the capture back from the read-ahead reader
+    def release(self):
+        """Lets go of the video file (needed before the media folder can be deleted) and
+        clears the panel."""
+        self.pause()                 # also gets the capture back from the read-ahead reader
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-        self._laatste_frame = None
-        self._weergave_pos = 0
+        self._last_frame = None
+        self._display_pos = 0
         self._readahead_rest = {}
-        self._kader = None
-        self.wis_tekening(hertekenen=False)
+        self._box = None
+        self.clear_drawing(redraw=False)
         self.video_info = None
         self.resultaten = []
         self.huidige_idx = -1
@@ -3036,49 +3041,49 @@ class VideoSpeler(QWidget):
         self.slider.blockSignals(True)
         self.slider.setRange(0, 0)
         self.slider.blockSignals(False)
-        self.lbl_tijd.setText("t=0.00s  frame 0/0")
-        self.zet_besturing_actief(False)
+        self.lbl_time.setText("t=0.00s  frame 0/0")
+        self.set_controls_active(False)
 
-    def zet_besturing_actief(self, actief):
-        for w in (self.btn_start, self.btn_frame_terug, self.btn_play,
-                  self.btn_frame_verder, self.btn_eind, self.slider,
-                  self.chk_volg, self.chk_auto, self.slider_zoom, self.btn_zoom_reset):
-            w.setEnabled(actief)
-        if self.tekenen_aan:
-            self.btn_teken_terug.setEnabled(actief)
-            self.btn_teken_wis.setEnabled(actief)
-            # De combo hangt daarnaast aan de bewerk-modus (die claimt de linkerknop).
-            self.combo_teken.setEnabled(bool(actief) and not self._bewerk_modus)
-        self._zet_handzoom_actief(actief)
+    def set_controls_active(self, active):
+        for w in (self.btn_start, self.btn_frame_back, self.btn_play,
+                  self.btn_frame_forward, self.btn_end, self.slider,
+                  self.chk_follow, self.chk_auto, self.slider_zoom, self.btn_zoom_reset):
+            w.setEnabled(active)
+        if self.drawing_on:
+            self.btn_draw_undo.setEnabled(active)
+            self.btn_draw_clear.setEnabled(active)
+            # The combo also hangs off edit mode (which claims the left button).
+            self.combo_draw.setEnabled(bool(active) and not self._edit_mode)
+        self._set_manual_zoom_active(active)
 
-    def _zet_handzoom_actief(self, actief=None):
-        """Zet de handmatige zoomregelaars aan/uit: bepaalt het programma de zoom, dan zijn
-        ze buiten werking (grijs) — dat is eerlijker dan een slider die niets doet."""
-        if actief is None:
-            actief = self.slider.isEnabled()
-        aan = bool(actief) and not self._zoom_auto
-        self.slider_zoom.setEnabled(aan)
-        self.btn_zoom_reset.setEnabled(aan)
+    def _set_manual_zoom_active(self, active=None):
+        """Turns the manual zoom controls on/off: if the program determines the zoom,
+        they're disabled (greyed out) -- fairer than a slider that doesn't do anything."""
+        if active is None:
+            active = self.slider.isEnabled()
+        on = bool(active) and not self._zoom_auto
+        self.slider_zoom.setEnabled(on)
+        self.btn_zoom_reset.setEnabled(on)
 
-    # ── Navigeren + tekenen ──────────────────────────────────────────────
-    def ga_naar(self, idx):
+    # ── Navigation + drawing ─────────────────────────────────────────────
+    def go_to(self, idx):
         if not self.resultaten:
             return
         # Jumping elsewhere is random access; the read-ahead reader has no business there
         # (it sits further along and is holding the capture). If the video keeps running,
-        # `_speel_tick` starts it up again on its own at the new spot.
+        # `_play_tick` starts it up again on its own at the new spot.
         self._stop_readahead()
         idx = max(0, min(idx, len(self.resultaten) - 1))
-        self._toon_frame(idx)
+        self._show_frame(idx)
 
-    def toon_huidig_frame(self):
+    def show_current_frame(self):
         if self.huidige_idx >= 0:
-            self._toon_frame(self.huidige_idx)
+            self._show_frame(self.huidige_idx)
 
-    def toon_op_klok(self, idx):
+    def show_on_clock(self, idx):
         """Show a frame under an **external** clock -- the compare page's master clock.
 
-        Unlike `ga_naar`, this isn't random access but sequential-forward, so the
+        Unlike `go_to`, this isn't random access but sequential-forward, so the
         read-ahead reader should indeed be running here. That's where it's needed most:
         two players run side by side, so all the work counts double -- measured, one tick
         with two 1080i recordings at 1x cost **56.4 ms** against a 30 ms tick interval. If
@@ -3088,57 +3093,56 @@ class VideoSpeler(QWidget):
             return
         idx = max(0, min(idx, len(self.resultaten) - 1))
         if idx < self.huidige_idx:
-            self.ga_naar(idx)          # backward really is random access
+            self.go_to(idx)          # backward really is random access
             return
         if idx == self.huidige_idx:
             return
         if self._reader is None:
             self._start_readahead()
         if self._reader is None:       # above 1x: grab-skipping is cheaper there
-            self._toon_frame(idx)
+            self._show_frame(idx)
             return
         read_idx, frame = self._reader.take(idx)
         if frame is not None:
-            self._toon_frame(min(read_idx, len(self.resultaten) - 1), frame)
+            self._show_frame(min(read_idx, len(self.resultaten) - 1), frame)
 
-    def _scrub_gevraagd(self, idx):
-        """Scrub-aanvraag van de slider (alleen in `snel_zoeken`-modus). Zie de opmerking bij
-        de slider: alleen het láátste doel telt, de rest laten we vallen."""
-        self._scrub_doel = idx
+    def _scrub_requested(self, idx):
+        """Scrub request from the slider (only in `fast_seek` mode). See the note by the
+        slider: only the latest target counts, the rest we drop."""
+        self._scrub_target = idx
         if not self._scrub_timer.isActive():
             self._scrub_timer.start(0)
 
     def _scrub_tick(self):
-        doel = self._scrub_doel
-        if doel != self.huidige_idx:
-            self.ga_naar(doel)
-        if self._scrub_doel != doel:      # tijdens het tekenen verder gesleept
+        target = self._scrub_target
+        if target != self.huidige_idx:
+            self.go_to(target)
+        if self._scrub_target != target:      # dragged further while drawing
             self._scrub_timer.start(0)
 
-    def _lees_frame_exact(self, idx):
+    def _read_frame_exact(self, idx):
         """
-        Lees frame `idx` frame-exact, uitsluitend via sequentieel lezen.
-        Een CAP_PROP_POS_FRAMES-seek is op VFR-video's (bv. iPhone-.MOV) níet
-        frame-exact: het gedecodeerde beeld kan er enkele frames naast zitten
-        terwijl OpenCV wél het gevraagde framenummer rapporteert. Het skelet
-        (van het júiste frame) lijkt dan achter te lopen op het beeld — ook
-        tijdens het afspelen erna, want de fout blijft constant. Daarom houden
-        we zelf de cursor bij: vooruit spoelen met grab(), achteruit door de
-        video te heropenen. Op de korte clips waar deze tool voor is, is dat
-        ruim snel genoeg.
+        Reads frame `idx` frame-exactly, exclusively via sequential reading.
+        A CAP_PROP_POS_FRAMES seek is NOT frame-exact on VFR videos (e.g. iPhone .MOV):
+        the decoded image can be off by a few frames while OpenCV does report the
+        requested frame number. The skeleton (of the *correct* frame) then appears to
+        lag behind the image -- also during playback afterward, since the error stays
+        constant. That's why we track the cursor ourselves: spool forward with grab(),
+        backward by reopening the video. On the short clips this tool is for, that's
+        comfortably fast enough.
 
-        Met `snel_zoeken` (het knipvenster van fase 8) mag er wél geseekt worden. Daar is
-        het beeld een kijkje en geen meting: op een opname van een half uur (50.000 frames)
-        zou terugspoelen vanaf frame 0 het doorbladeren onmogelijk maken, terwijl een
-        fragmentgrens die je met het oog bepaalt best een paar frames (~0,1 s) mag schelen.
-        Ná de seek wordt de eigen cursor hersteld, zodat vooruit afspelen weer klopt.
+        With `fast_seek` (the phase-8 trim window) seeking is allowed. There the image is
+        a look, not a measurement: on a half-hour recording (50,000 frames), rewinding
+        from frame 0 would make browsing impossible, while a fragment boundary you set by
+        eye can easily be a few frames (~0.1 s) off. After the seek, our own cursor is
+        restored so forward playback is correct again.
 
-        **Elke stap achteruit seekt**, hoe klein ook: de sequentiële route spoelt daarvoor
-        vanaf frame 0 opnieuw door, en één frame terug op frame 20.000 van een opname van
-        23 minuten kostte zo bijna een minuut waarin de GUI volledig vastliep (gemeten op
-        `00005.MTS`, 34.728 frames). Alleen kléíne sprongen vooruit blijven sequentieel —
-        die zijn goedkoop (~3 ms per overgeslagen frame tegen ~80 ms voor een seek) en zo
-        blijft frame-voor-frame stappen rond een fragmentgrens exact.
+        **Every step backward seeks**, however small: the sequential route otherwise
+        re-spools from frame 0, and one frame back at frame 20,000 of a 23-minute
+        recording cost nearly a minute during which the GUI completely locked up
+        (measured on `00005.MTS`, 34,728 frames). Only *small* jumps forward stay
+        sequential -- those are cheap (~3 ms per skipped frame against ~80 ms for a seek)
+        and that keeps stepping frame by frame around a fragment boundary exact.
         """
         if self.cap is None:
             return None
@@ -3152,152 +3156,152 @@ class VideoSpeler(QWidget):
             if frame is not None:
                 return frame
             self._readahead_rest = {}   # we're going elsewhere
-        if self.snel_zoeken and (idx < self._weergave_pos
-                                 or idx - self._weergave_pos > SEEK_DREMPEL_FRAMES):
+        if self.fast_seek and (idx < self._display_pos
+                                 or idx - self._display_pos > SEEK_THRESHOLD_FRAMES):
             if self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx):
-                self._weergave_pos = idx      # cursor herstellen: vooruit lezen klopt weer
-            # Mislukt de seek, dan valt de code hieronder terug op sequentieel spoelen.
-        if idx < self._weergave_pos:
+                self._display_pos = idx      # restore the cursor: forward reading is correct again
+            # If the seek fails, the code below falls back to sequential spooling.
+        if idx < self._display_pos:
             self.cap.release()
             self.cap = open_video(self.video_pad, self.deinterlacen)
-            self._weergave_pos = 0
-        while self._weergave_pos < idx:
+            self._display_pos = 0
+        while self._display_pos < idx:
             if not self.cap.grab():
                 return None
-            self._weergave_pos += 1
+            self._display_pos += 1
         ret, frame = self.cap.read()
         if not ret:
             return None
-        self._weergave_pos += 1
+        self._display_pos += 1
         return frame
 
-    def _meld_leesfout(self, idx):
+    def _report_read_error(self, idx):
         """
-        Frame `idx` kon niet gelezen worden (voorbij het einde, of een decodefout).
-        Stilzwijgend terugkeren is misleidend: beeld, slider, tabelmarkering en tijd
-        blijven dan op het vórige frame staan terwijl de gebruiker denkt te zijn
-        gesprongen. Dus: afspelen stoppen, de besturing terugzetten op het laatst
-        geldige frame en het melden.
+        Frame `idx` could not be read (past the end, or a decode error).
+        Silently returning is misleading: the image, slider, table marker, and time then
+        stay on the previous frame while the user thinks they jumped. So: stop playback,
+        set the controls back to the last valid frame, and report it.
         """
-        self.pauzeer()
-        if self.huidige_idx >= 0 and self._laatste_frame is not None:
-            self._toon_frame(self.huidige_idx)       # zet slider/tabel weer in de pas
-            self.lbl_tijd.setText(
+        self.pause()
+        if self.huidige_idx >= 0 and self._last_frame is not None:
+            self._show_frame(self.huidige_idx)       # put the slider/table back in step
+            self.lbl_time.setText(
                 f"Frame {idx} kon niet gelezen worden — beeld staat nog op {self.huidige_idx}")
         else:
-            self.lbl_tijd.setText(f"Frame {idx} kon niet gelezen worden")
+            self.lbl_time.setText(f"Frame {idx} kon niet gelezen worden")
 
-    def _toon_frame(self, idx, frame=None):
+    def _show_frame(self, idx, frame=None):
         if frame is not None:                       # ready-made from the read-ahead reader
-            self._laatste_frame = frame
+            self._last_frame = frame
             frame = frame.copy()
-            nieuw_frame = True
-        elif idx == self.huidige_idx and self._laatste_frame is not None:
-            frame = self._laatste_frame.copy()      # alleen overlay opnieuw tekenen
-            nieuw_frame = False
+            new_frame = True
+        elif idx == self.huidige_idx and self._last_frame is not None:
+            frame = self._last_frame.copy()      # only redraw the overlay
+            new_frame = False
         else:
-            frame = self._lees_frame_exact(idx)
+            frame = self._read_frame_exact(idx)
             if frame is None:
-                self._meld_leesfout(idx)
+                self._report_read_error(idx)
                 return
-            self._laatste_frame = frame
+            self._last_frame = frame
             frame = frame.copy()
-            nieuw_frame = True
+            new_frame = True
         self.huidige_idx = idx
 
-        resultaat = self.resultaten[idx]
-        # De automatische zoom verschilt per frame; label (en de uitgeschakelde slider als
-        # aflezing) tonen daarom de toegepaste factor. Eerst rekenen, dán pas het volgen:
-        # automatisch kan er ook zonder handmatige zoom een uitsnede zijn, en die moet
-        # mee-centreren.
-        self._zoom_eff = self._bereken_zoom_eff(idx)
+        result = self.resultaten[idx]
+        # The automatic zoom differs per frame; the label (and the disabled slider, as a
+        # readout) therefore show the applied factor. Compute first, then follow: even
+        # without a manual zoom there can be an automatic crop, and that has to re-center
+        # along with it.
+        self._zoom_eff = self._compute_effective_zoom(idx)
         self.lbl_zoom.setText(f"{self._zoom_eff:.1f}×")
         if self._zoom_auto:
             self.slider_zoom.blockSignals(True)
             self.slider_zoom.setValue(int(round(min(ZOOM_MAX, self._zoom_eff) * 100)))
             self.slider_zoom.blockSignals(False)
-        # Auto-volgen: centreer de zoom-uitsnede op de schaatser, maar alleen bij een echte
-        # framewissel en niet tijdens een handle-sleep — anders verspringt de uitsnede onder
-        # de cursor bij het verslepen of het togglen van een laag.
-        if ((nieuw_frame or self._volg_forceren) and self._zoom_eff > 1.0
-                and self._zoom_volg and not self.volgen_bevroren):
-            # Automatisch: op het kader-middelpunt, want de zoom is op datzelfde kader
-            # gemeten — daar staat de schaatser dus gegarandeerd compleet in beeld.
-            # Handmatig: op de romp, die rustiger beweegt dan de armen en benen.
-            kader = self._kader_op(idx) if self._zoom_auto else None
-            c = (kader[:2] if kader is not None
-                 else torso_centroid(resultaat.lm) if resultaat.pose_gevonden else None)
+        # Auto-follow: center the zoom crop on the skater, but only on an actual frame
+        # change and not during a handle drag -- otherwise the crop would jump out from
+        # under the cursor while dragging or toggling a layer.
+        if ((new_frame or self._force_follow) and self._zoom_eff > 1.0
+                and self._zoom_follow and not self.follow_frozen):
+            # Automatic: on the box's center point, since the zoom was measured against
+            # that same box -- so the skater is guaranteed to be fully in frame there.
+            # Manual: on the torso, which moves more calmly than the arms and legs.
+            box = self._box_at(idx) if self._zoom_auto else None
+            c = (box[:2] if box is not None
+                 else torso_centroid(result.lm) if result.pose_found else None)
             if c is not None:
-                self._pan_cx, self._pan_cy = c   # klemmen gebeurt in _toon_pixmap
-        self._volg_forceren = False
-        if self.toon_overlay:
+                self._pan_cx, self._pan_cy = c   # clamping happens in _show_pixmap
+        self._force_follow = False
+        if self.show_overlay:
             draw_overlay_on_frame(
-                frame, resultaat, self.video_info.fps,
-                toon_skelet=self.chk_skelet.isChecked(),
-                toon_afzetbeen=self.chk_afzetbeen.isChecked(),
+                frame, result, self.video_info.fps,
+                toon_skelet=self.chk_skeleton.isChecked(),
+                toon_afzetbeen=self.chk_push_leg.isChecked(),
                 toon_hud=self.chk_hud.isChecked(),
             )
-        self._toon_pixmap(frame)
+        self._show_pixmap(frame)
 
         if idx != self.slider.value():
             self.slider.blockSignals(True)
             self.slider.setValue(idx)
             self.slider.blockSignals(False)
 
-        self.lbl_tijd.setText(f"t={resultaat.tijd:.2f}s  frame {idx}/{len(self.resultaten) - 1}")
-        if self.op_frame_getoond is not None:
-            self.op_frame_getoond(idx)
+        self.lbl_time.setText(f"t={result.time:.2f}s  frame {idx}/{len(self.resultaten) - 1}")
+        if self.on_frame_shown is not None:
+            self.on_frame_shown(idx)
 
-    def _toon_pixmap(self, frame_bgr):
+    def _show_pixmap(self, frame_bgr):
         h, w = frame_bgr.shape[:2]
-        # Inzoomen = een uitsnede rond het pan-middelpunt opschalen. De uitsnede houdt
-        # dezelfde beeldverhouding als het frame, zodat de KeepAspectRatio-letterbox
-        # (en dus de coördinaat-omrekening van de editor) onveranderd blijft.
+        # Zooming in = scaling up a crop around the pan center. The crop keeps the same
+        # aspect ratio as the frame, so the KeepAspectRatio letterbox (and hence the
+        # editor's coordinate conversion) stays unchanged.
         z = max(1.0, self._zoom_eff)
         if z > 1.0:
             cw, ch = w / z, h / z
-            x0 = min(max(self._pan_cx * w - cw / 2, 0.0), w - cw)   # crop binnen het frame klemmen
+            x0 = min(max(self._pan_cx * w - cw / 2, 0.0), w - cw)   # clamp the crop within the frame
             y0 = min(max(self._pan_cy * h - ch / 2, 0.0), h - ch)
             ix0, iy0 = int(round(x0)), int(round(y0))
             icw = min(int(round(cw)), w - ix0)
             ich = min(int(round(ch)), h - iy0)
-            # .copy() maakt de slice C-contigu (nodig voor de QImage-stride) en laat
-            # _laatste_frame gegarandeerd op volle resolutie staan.
+            # .copy() makes the slice C-contiguous (needed for the QImage stride) and
+            # guarantees _last_frame stays at full resolution.
             frame_bgr = frame_bgr[iy0:iy0 + ich, ix0:ix0 + icw].copy()
             self._crop_norm = (ix0 / w, iy0 / h, icw / w, ich / h)
             h, w = frame_bgr.shape[:2]
         else:
             self._crop_norm = (0.0, 0.0, 1.0, 1.0)
-        # Géén .copy() op de QImage: die wijst naar de numpy-buffer, maar `QPixmap.fromImage`
-        # zet het beeld om naar het pixmap-formaat van het platform en kopieert het dus zelf
-        # — en `frame_bgr` leeft tot die regel klaar is. De extra kopie was per frame een
-        # memcpy van het hele beeld (gemeten 0,6 ms van een tik van 5,3 ms).
+        # No .copy() on the QImage: it points at the numpy buffer, but `QPixmap.fromImage`
+        # converts the image to the platform's pixmap format and thus copies it itself --
+        # and `frame_bgr` stays alive until that line is done. The extra copy used to be a
+        # memcpy of the whole image every frame (measured 0.6 ms of a 5.3 ms tick).
         qimg = QImage(frame_bgr.data, w, h, frame_bgr.strides[0], QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg).scaled(
             self.label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        # Volgorde is niet cosmetisch: de overlay-tekenaar (skelet-editor) rekent via
-        # norm_naar_widget met _weergave_scaled, dus die moet al bijgewerkt zijn.
-        self._weergave_scaled = pixmap.size()
-        # Het kale geschaalde beeld bewaren, zodat een muisbeweging tijdens het tekenen
-        # alleen de tekenlaag hoeft over te doen (zie _ververs_tekening). Alleen als er
-        # ook echt getekend wordt of kan worden — anders kost het elk frame een kopie van
-        # de hele pixmap voor niets.
-        self._basis_pixmap = (pixmap.copy()
-                              if self._tekening or self.teken_modus != DRAW_PAN
+        # The order isn't cosmetic: the overlay drawer (skeleton editor) computes via
+        # norm_to_widget using _display_scaled, so that must already be up to date.
+        self._display_scaled = pixmap.size()
+        # Keep the bare scaled image around, so a mouse move while drawing only has to
+        # redo the drawing layer (see _refresh_drawing). Only when something is actually
+        # being drawn or could be -- otherwise it costs a copy of the whole pixmap every
+        # frame for nothing.
+        self._base_pixmap = (pixmap.copy()
+                              if self._drawing or self.draw_mode != DRAW_PAN
                               else None)
-        self._teken_lagen(pixmap)
+        self._draw_layers(pixmap)
 
-    # ── Inzoomen op de schaatser ─────────────────────────────────────────────
-    def _kader_op(self, idx):
-        """Kader `(midden_x, midden_y, straal)` van frame `idx` (offline reeks), of None."""
-        if self._kader is None or not (0 <= idx < len(self._kader)):
+    # ── Zooming in on the skater ──────────────────────────────────────────
+    def _box_at(self, idx):
+        """Box `(center_x, center_y, radius)` of frame `idx` (offline sequence), or None."""
+        if self._box is None or not (0 <= idx < len(self._box)):
             return None
-        return self._kader[idx]
+        return self._box[idx]
 
-    def _zoom_plafond(self):
-        """Hoe ver de automaat mag inzoomen. Bij zoom 1× past het frame met factor `s` op het
-        paneel; bij zoom z wordt dat `z·s` schermpixels per videopixel. Boven
-        `BOX_MAX_MAGNIFICATION` wordt dat zichtbaar pap, dus daar houdt de automaat op."""
+    def _zoom_ceiling(self):
+        """How far the automaton may zoom in. At zoom 1x the frame fits the panel with
+        factor `s`; at zoom z that becomes `z*s` screen pixels per video pixel. Above
+        `BOX_MAX_MAGNIFICATION` that turns into visible mush, so that's where the
+        automaton stops."""
         info = self.video_info
         if info is None or not info.w or not info.h:
             return ZOOM_AUTO_MAX
@@ -3306,197 +3310,197 @@ class VideoSpeler(QWidget):
             return ZOOM_AUTO_MAX
         return min(ZOOM_AUTO_MAX, max(1.0, BOX_MAX_MAGNIFICATION / s))
 
-    def _bereken_zoom_eff(self, idx):
-        """De zoom die op frame `idx` daadwerkelijk toegepast wordt.
+    def _compute_effective_zoom(self, idx):
+        """The zoom actually applied to frame `idx`.
 
-        Handmatig is dat simpelweg de ingestelde zoom. Automatisch bepaalt het programma hem
-        uit de schaatser zelf: de uitsnede is (genormaliseerd) 0.5/zoom groot rondom het
-        kader-middelpunt, dus vullen we die met de ruimte die de schaatser nodig heeft plus
-        `BOX_MARGIN` lucht. Verder uitzoomen dan het volledige beeld kan niet, dus dichtbij
-        blijft de zoom gewoon op 1× staan."""
+        Manually, that's simply the set zoom. Automatically, the program determines it
+        from the skater itself: the crop is (normalized) 0.5/zoom in size around the box's
+        center point, so we fill that with the room the skater needs plus `BOX_MARGIN` of
+        air. It can't zoom out further than the full image, so up close the zoom simply
+        stays at 1x."""
         z = min(ZOOM_MAX, max(1.0, self._zoom))
         if not self._zoom_auto:
             return z
-        kader = self._kader_op(idx)
-        if kader is None or not kader[2]:
-            return z            # geen bruikbare pose: laat de handmatige zoom staan
-        return min(self._zoom_plafond(), max(1.0, 0.5 / (kader[2] * (1.0 + BOX_MARGIN))))
+        box = self._box_at(idx)
+        if box is None or not box[2]:
+            return z            # no usable pose: leave the manual zoom as is
+        return min(self._zoom_ceiling(), max(1.0, 0.5 / (box[2] * (1.0 + BOX_MARGIN))))
 
-    def _zet_zoom(self, z):
-        """Centrale zoom-setter: klemt, werkt slider+label bij (zonder signaal-lus) en
-        hertekent het huidige frame goedkoop (geen herlezen van de video)."""
+    def _set_zoom(self, z):
+        """Central zoom setter: clamps, updates the slider+label (without a signal loop),
+        and redraws the current frame cheaply (no re-reading the video)."""
         z = min(ZOOM_MAX, max(1.0, float(z)))
         self._zoom = z
         if z <= 1.0:
             self._pan_cx = self._pan_cy = 0.5
-        self._volg_forceren = True   # bewuste zoom-actie: meteen op de schaatser richten
-        self.lbl_zoom.setText(f"{z:.1f}×")     # _toon_frame zet er zo de effectieve zoom in
+        self._force_follow = True   # a deliberate zoom action: aim at the skater right away
+        self.lbl_zoom.setText(f"{z:.1f}×")     # _show_frame fills in the effective zoom this way
         self.slider_zoom.blockSignals(True)
         self.slider_zoom.setValue(int(round(z * 100)))
         self.slider_zoom.blockSignals(False)
-        self.toon_huidig_frame()
+        self.show_current_frame()
 
-    def _zoom_wiel(self, event):
-        """Muiswiel boven de video: in-/uitzoomen. Auto-volgen blijft aan, dus de uitsnede
-        blijft op de schaatser (geen zoom-naar-cursor, dat zou met 'volg schaatser' vechten)."""
+    def _zoom_wheel(self, event):
+        """Mouse wheel over the video: zoom in/out. Auto-follow stays on, so the crop
+        stays on the skater (no zoom-to-cursor, that would fight with 'follow skater')."""
         delta = event.angleDelta().y()
         if not self.resultaten or delta == 0:
-            # Niets te zoomen: het wiel teruggeven aan Qt, anders slikt het videolabel
-            # de scroll en gebeurt er buiten een geladen analyse helemaal niets.
+            # Nothing to zoom: give the wheel back to Qt, otherwise the video label
+            # swallows the scroll and, outside of a loaded analysis, nothing happens at all.
             QLabel.wheelEvent(self.label, event)
             return
         if self._zoom_auto:
-            # Aan het wiel draaien = de zoom overnemen, net zoals handmatig slepen het
-            # auto-volgen overneemt. `_zet_zoom_auto` neemt de huidige stand over, dus het
-            # beeld springt niet — er wordt vanaf hier alleen niet meer bijgestuurd.
+            # Turning the wheel = taking over the zoom, just like manual dragging takes
+            # over auto-follow. `_set_zoom_auto` picks up the current setting, so the
+            # image doesn't jump -- from here on it just no longer gets steered.
             self.chk_auto.setChecked(False)
         factor = ZOOM_STEP if delta > 0 else 1.0 / ZOOM_STEP
-        self._zet_zoom(self._zoom * factor)
+        self._set_zoom(self._zoom * factor)
         event.accept()
 
-    def _zet_zoom_volg(self, aan):
-        self._zoom_volg = bool(aan)
-        self._volg_forceren = True
-        self.toon_huidig_frame()
+    def _set_zoom_follow(self, on):
+        self._zoom_follow = bool(on)
+        self._force_follow = True
+        self.show_current_frame()
 
-    def _zet_zoom_auto(self, aan):
-        """Zet de automatische zoom aan/uit. Bij uitzetten wordt de laatst getoonde zoom de
-        handmatige stand, zodat het beeld op dat moment niet verspringt — behalve boven
-        `ZOOM_MAX`, waar de handmatige regelaar nu eenmaal ophoudt."""
-        self._zoom_auto = bool(aan)
-        self._zet_handzoom_actief()
+    def _set_zoom_auto(self, on):
+        """Turns automatic zoom on/off. On turning it off, the last shown zoom becomes the
+        manual setting, so the image doesn't jump at that moment -- except above
+        `ZOOM_MAX`, where the manual control simply stops."""
+        self._zoom_auto = bool(on)
+        self._set_manual_zoom_active()
         if not self._zoom_auto:
-            self._zet_zoom(self._zoom_eff)     # neemt over, hertekent en herstelt de slider
+            self._set_zoom(self._zoom_eff)     # takes over, redraws, and restores the slider
             return
-        self._volg_forceren = True
-        self.toon_huidig_frame()
+        self._force_follow = True
+        self.show_current_frame()
 
-    def _zoom_reset(self):
-        """Terug naar passend beeld en auto-volgen weer aan."""
+    def _reset_zoom(self):
+        """Back to a fitted image and auto-follow on again."""
         self._pan_cx = self._pan_cy = 0.5
-        self._zoom_volg = True
-        self.chk_volg.blockSignals(True)
-        self.chk_volg.setChecked(True)
-        self.chk_volg.blockSignals(False)
-        self._zet_zoom(1.0)
+        self._zoom_follow = True
+        self.chk_follow.blockSignals(True)
+        self.chk_follow.setChecked(True)
+        self.chk_follow.blockSignals(False)
+        self._set_zoom(1.0)
 
-    # ── Coördinaat-omrekening (letterbox + zoom-uitsnede) ────────────────────
-    def widget_naar_norm(self, pos):
-        """Muispositie op het videolabel → genormaliseerde (x, y) in het frame (0–1).
-        Buiten het getekende beeld kan het resultaat buiten [0,1] liggen (caller checkt)."""
-        if self._weergave_scaled is None:
+    # ── Coordinate conversion (letterbox + zoom crop) ─────────────────────
+    def widget_to_norm(self, pos):
+        """Mouse position on the video label -> normalized (x, y) in the frame (0-1).
+        Outside the drawn image the result can lie outside [0,1] (the caller checks)."""
+        if self._display_scaled is None:
             return None
-        sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+        sw, sh = self._display_scaled.width(), self._display_scaled.height()
         if sw <= 0 or sh <= 0:
             return None
         offx = (self.label.width() - sw) / 2
         offy = (self.label.height() - sh) / 2
-        fx = (pos.x() - offx) / sw          # fractie binnen de getoonde uitsnede
+        fx = (pos.x() - offx) / sw          # fraction within the shown crop
         fy = (pos.y() - offy) / sh
-        x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 is dit (0,0,1,1) → oude formule
+        x0n, y0n, wn, hn = self._crop_norm  # at zoom==1 this is (0,0,1,1) -> the old formula
         return (x0n + fx * wn, y0n + fy * hn)
 
-    def norm_naar_widget(self, nx, ny):
-        """Inverse: genormaliseerde (x, y) → positie op het videolabel (voor hittesten)."""
-        sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+    def norm_to_widget(self, nx, ny):
+        """Inverse: normalized (x, y) -> position on the video label (for hit testing)."""
+        sw, sh = self._display_scaled.width(), self._display_scaled.height()
         offx = (self.label.width() - sw) / 2
         offy = (self.label.height() - sh) / 2
-        x0n, y0n, wn, hn = self._crop_norm  # bij zoom==1 is dit (0,0,1,1) → oude formule
+        x0n, y0n, wn, hn = self._crop_norm  # at zoom==1 this is (0,0,1,1) -> the old formula
         return QPointF(offx + (nx - x0n) / wn * sw, offy + (ny - y0n) / hn * sh)
 
-    # ── Tekenen op het beeld ────────────────────────────────────────────────
+    # ── Drawing on the image ───────────────────────────────────────────────
     @property
-    def bewerk_modus(self):
-        return self._bewerk_modus
+    def edit_mode(self):
+        return self._edit_mode
 
-    @bewerk_modus.setter
-    def bewerk_modus(self, actief):
-        """De skelet-editor claimt de linkerknop, dus daar kan niet tegelijk mee getekend
-        worden. Een teken-stand die stilzwijgend niets meer doet (of erger: een sleep
-        opslokt die een landmark moest verplaatsen) is de slechtste van de twee uitkomsten,
-        dus zetten we de muis terug op schuiven en de combo op slot zolang de editor aan
-        staat. De tekening zelf blijft gewoon staan.
+    @edit_mode.setter
+    def edit_mode(self, active):
+        """The skeleton editor claims the left button, so drawing can't happen with it at
+        the same time. A drawing mode that silently stops doing anything (or worse:
+        swallows a drag that was meant to move a landmark) is the worse of the two
+        outcomes, so we put the mouse back to panning and lock the combo for as long as
+        the editor is on. The drawing itself is left exactly as is.
 
-        Speelt alleen waar tekenen aan staat (het kijkvenster) — en juist daar is er geen
-        skelet-editor, dus in de praktijk komen ze elkaar niet tegen. De regel staat er
-        omdat de vlag ergens anders aangezet kan worden."""
-        self._bewerk_modus = bool(actief)
-        if not self.tekenen_aan:
+        Only matters where drawing is on (the viewing window) -- and that's exactly where
+        there is no skeleton editor, so in practice they never meet. The rule is here
+        because the flag can be turned on from elsewhere."""
+        self._edit_mode = bool(active)
+        if not self.drawing_on:
             return
-        if self._bewerk_modus and self.teken_modus != DRAW_PAN:
-            self.combo_teken.setCurrentIndex(0)      # → _zet_teken_modus
-        self.combo_teken.setEnabled(not self._bewerk_modus and self.slider.isEnabled())
+        if self._edit_mode and self.draw_mode != DRAW_PAN:
+            self.combo_draw.setCurrentIndex(0)      # -> _set_draw_mode
+        self.combo_draw.setEnabled(not self._edit_mode and self.slider.isEnabled())
 
-    def _zet_teken_modus(self, _idx=None):
-        self.teken_modus = self.combo_teken.currentData() or DRAW_PAN
-        self._streek = None
-        # De cursor zegt wat de linkerknop nu doet.
-        self.label.setCursor(Qt.ArrowCursor if self.teken_modus == DRAW_PAN
+    def _set_draw_mode(self, _idx=None):
+        self.draw_mode = self.combo_draw.currentData() or DRAW_PAN
+        self._stroke = None
+        # The cursor says what the left button does right now.
+        self.label.setCursor(Qt.ArrowCursor if self.draw_mode == DRAW_PAN
                              else Qt.CrossCursor)
-        self.toon_huidig_frame()      # zet meteen de basis-pixmap klaar (of ruimt hem op)
+        self.show_current_frame()      # get the base pixmap ready right away (or clear it)
 
-    def wis_tekening(self, hertekenen=True):
-        """Alle aantekeningen van het beeld halen."""
-        bezig = bool(self._tekening) or self._streek is not None
-        self._tekening = []
-        self._streek = None
-        if hertekenen and bezig:
-            self._ververs_tekening()
+    def clear_drawing(self, redraw=True):
+        """Removes all annotations from the image."""
+        was_something = bool(self._drawing) or self._stroke is not None
+        self._drawing = []
+        self._stroke = None
+        if redraw and was_something:
+            self._refresh_drawing()
 
-    def wis_laatste_streek(self):
-        """Alleen de laatst getekende streek terugnemen — de gewone correctie, want één
-        misgeslagen lijn hoort niet de hele aantekening te kosten."""
-        if not self._tekening:
+    def clear_last_stroke(self):
+        """Takes back only the last drawn stroke -- the usual correction, since one
+        botched line shouldn't cost the whole annotation."""
+        if not self._drawing:
             return
-        self._tekening.pop()
-        self._ververs_tekening()
+        self._drawing.pop()
+        self._refresh_drawing()
 
-    def _teken_punt(self, pos):
-        """Muispositie → frame-genormaliseerd punt, geklemd op het beeld.
+    def _draw_point(self, pos):
+        """Mouse position -> frame-normalized point, clamped to the image.
 
-        Klemmen en niet weigeren: sleep je door tot in de zwarte rand naast het beeld, dan
-        hoort de lijn op de beeldrand te eindigen en niet buiten het frame te verdwijnen —
-        daar zou hij bij het uitzoomen ineens weer opduiken."""
-        punt = self.widget_naar_norm(pos)
-        if punt is None:
+        Clamp rather than reject: drag all the way into the black bar next to the image
+        and the line should end at the image edge instead of vanishing outside the frame
+        -- where it would suddenly reappear on zooming out."""
+        point = self.widget_to_norm(pos)
+        if point is None:
             return None
-        return (min(1.0, max(0.0, punt[0])), min(1.0, max(0.0, punt[1])))
+        return (min(1.0, max(0.0, point[0])), min(1.0, max(0.0, point[1])))
 
-    def _start_streek(self, pos):
-        punt = self._teken_punt(pos)
-        if punt is None:
+    def _start_stroke(self, pos):
+        point = self._draw_point(pos)
+        if point is None:
             return
-        self._streek = [punt, punt]   # het tweede punt loopt met de muis mee
-        self._ververs_tekening()
+        self._stroke = [point, point]   # the second point follows the mouse
+        self._refresh_drawing()
 
-    def _rek_streek(self, pos):
-        punt = self._teken_punt(pos)
-        if punt is None or not self._streek:
+    def _extend_stroke(self, pos):
+        point = self._draw_point(pos)
+        if point is None or not self._stroke:
             return
-        if self.teken_modus == DRAW_LINE:
-            self._streek[-1] = punt   # rechte lijn: alleen het eindpunt verplaatst
+        if self.draw_mode == DRAW_LINE:
+            self._stroke[-1] = point   # straight line: only the end point moves
         else:
-            self._streek.append(punt)
-        self._ververs_tekening()
+            self._stroke.append(point)
+        self._refresh_drawing()
 
-    def _stop_streek(self):
-        streek, self._streek = self._streek, None
-        if streek and _drag_distance(streek) >= DRAW_MIN_DRAG:
-            self._tekening.append(streek)
-        self._ververs_tekening()
+    def _stop_stroke(self):
+        stroke, self._stroke = self._stroke, None
+        if stroke and _drag_distance(stroke) >= DRAW_MIN_DRAG:
+            self._drawing.append(stroke)
+        self._refresh_drawing()
 
-    def _teken_tekening(self, pixmap):
-        """Zet de aantekeningen op de geschaalde pixmap.
+    def _paint_drawing(self, pixmap):
+        """Puts the annotations onto the scaled pixmap.
 
-        Genormaliseerd → pixmap-pixels via dezelfde uitsnede als de skelet-editor gebruikt,
-        zodat de tekening bij zoomen en pannen op het beeld blijft plakken. De dekking gaat
-        op de painter en niet in de pen: een streek wordt als één pad getekend, dus een
-        overlappende bocht wordt niet donkerder dan de rest van de lijn."""
-        streken = self._tekening + ([self._streek] if self._streek else [])
-        if not streken:
+        Normalized -> pixmap pixels via the same crop the skeleton editor uses, so the
+        drawing stays glued to the image while zooming and panning. The transparency sits
+        on the painter, not in the pen: a stroke is drawn as a single path, so an
+        overlapping bend doesn't come out darker than the rest of the line."""
+        strokes = self._drawing + ([self._stroke] if self._stroke else [])
+        if not strokes:
             return
         pw, ph = pixmap.width(), pixmap.height()
-        x0n, y0n, wn, hn = self._crop_norm   # bij zoom==1 (0,0,1,1) → nx*pw, ny*ph
+        x0n, y0n, wn, hn = self._crop_norm   # at zoom==1 (0,0,1,1) -> nx*pw, ny*ph
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setOpacity(DRAW_OPACITY)
@@ -3505,154 +3509,155 @@ class VideoSpeler(QWidget):
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
         try:
-            for streek in streken:
-                pad = QPainterPath()
-                pad.moveTo((streek[0][0] - x0n) / wn * pw, (streek[0][1] - y0n) / hn * ph)
-                for nx, ny in streek[1:]:
-                    pad.lineTo((nx - x0n) / wn * pw, (ny - y0n) / hn * ph)
-                painter.drawPath(pad)
+            for stroke in strokes:
+                path = QPainterPath()
+                path.moveTo((stroke[0][0] - x0n) / wn * pw, (stroke[0][1] - y0n) / hn * ph)
+                for nx, ny in stroke[1:]:
+                    path.lineTo((nx - x0n) / wn * pw, (ny - y0n) / hn * ph)
+                painter.drawPath(path)
         finally:
             painter.end()
 
-    def _teken_lagen(self, pixmap):
-        """De twee lagen op het geschaalde beeld en dan pas naar het scherm: eerst de
-        aantekeningen, daarna de haak van de eigenaar — de skelet-editor moet zijn handles
-        bovenop houden, want die zijn aanklikbaar."""
-        self._teken_tekening(pixmap)
-        if self.overlay_tekenaar is not None:
-            self.overlay_tekenaar(pixmap)
+    def _draw_layers(self, pixmap):
+        """The two layers onto the scaled image and only then to the screen: first the
+        annotations, then the owner's hook -- the skeleton editor must keep its handles on
+        top, since those are clickable."""
+        self._paint_drawing(pixmap)
+        if self.overlay_drawer is not None:
+            self.overlay_drawer(pixmap)
         self.label.setPixmap(pixmap)
 
-    def _ververs_tekening(self):
-        """Alleen de tekenlaag opnieuw zetten, zonder de video aan te raken.
+    def _refresh_drawing(self):
+        """Only redoes the drawing layer, without touching the video.
 
-        Tijdens het slepen komt er per muisbeweging een hertekening, en de volle weg
-        (frame kopiëren, uitsnede, QImage, schalen) kost op 4K-materiaal tientallen
-        milliseconden — dan loopt de lijn achter de cursor aan. `_basis_pixmap` is het al
-        geschaalde beeld zonder tekening; een kopie daarvan is een memcpy."""
-        if self._basis_pixmap is None:
-            self.toon_huidig_frame()
+        While dragging, a redraw happens on every mouse move, and the full path (copy the
+        frame, crop, QImage, scale) costs tens of milliseconds on 4K material -- then the
+        line lags behind the cursor. `_base_pixmap` is the already-scaled image without
+        the drawing; a copy of that is a memcpy."""
+        if self._base_pixmap is None:
+            self.show_current_frame()
             return
-        self._teken_lagen(self._basis_pixmap.copy())
+        self._draw_layers(self._base_pixmap.copy())
 
-    # ── Muis: pannen doet de speler zelf, de rest gaat naar de eigenaar ──────
-    def _muis_druk(self, event):
-        # Deze takken moeten bovenaan blijven, en in deze volgorde. Rechts-slepen pant
-        # áltijd — dat is de enige manier om te schuiven terwijl de linkerknop bezet is
-        # (door de skelet-editor of door het tekenen). Wat de línkerknop doet kiest de
-        # gebruiker in de muis-combo: in een teken-stand is dat tekenen, en anders het
-        # ingezoomde beeld verschuiven (buiten de bewerk-modus) of een punt verplaatsen
-        # (in de bewerk-modus, wat de eigenaar afhandelt).
+    # ── Mouse: the player itself does panning, the rest goes to the owner ────
+    def _mouse_press(self, event):
+        # These branches must stay at the top, and in this order. Right-drag *always*
+        # pans -- that's the only way to shift the view while the left button is taken
+        # (by the skeleton editor or by drawing). What the left button does is chosen by
+        # the user in the mouse combo: in a drawing mode that's drawing, and otherwise
+        # shifting the zoomed image (outside edit mode) or moving a point (in edit mode,
+        # which the owner handles).
         if self._zoom_eff > 1.0 and event.button() == Qt.RightButton:
-            self._pan_sleep = event.position()
+            self._pan_drag = event.position()
             return
-        if event.button() == Qt.LeftButton and self.teken_modus != DRAW_PAN:
-            self._start_streek(event.position())
+        if event.button() == Qt.LeftButton and self.draw_mode != DRAW_PAN:
+            self._start_stroke(event.position())
             return
         if (self._zoom_eff > 1.0 and event.button() == Qt.LeftButton
-                and not self.bewerk_modus):
-            self._pan_sleep = event.position()
+                and not self.edit_mode):
+            self._pan_drag = event.position()
             return
-        if self.op_muis_druk is not None:
-            self.op_muis_druk(event)
+        if self.on_mouse_press is not None:
+            self.on_mouse_press(event)
 
-    def _muis_beweeg(self, event):
-        if self._pan_sleep is not None:
-            if self._weergave_scaled is None:
+    def _mouse_move(self, event):
+        if self._pan_drag is not None:
+            if self._display_scaled is None:
                 return
-            d = event.position() - self._pan_sleep
-            self._pan_sleep = event.position()
-            sw, sh = self._weergave_scaled.width(), self._weergave_scaled.height()
+            d = event.position() - self._pan_drag
+            self._pan_drag = event.position()
+            sw, sh = self._display_scaled.width(), self._display_scaled.height()
             _, _, wn, hn = self._crop_norm
             if sw > 0 and sh > 0:
                 half = 0.5 / max(1.0, self._zoom_eff)
-                # slepen naar rechts toont de linkerkant → uitsnede-midden schuift mee
+                # dragging right shows the left side -> the crop center moves along
                 self._pan_cx = min(1.0 - half, max(half, self._pan_cx - d.x() / sw * wn))
                 self._pan_cy = min(1.0 - half, max(half, self._pan_cy - d.y() / sh * hn))
-            self._zoom_volg = False
-            self.chk_volg.blockSignals(True)
-            self.chk_volg.setChecked(False)
-            self.chk_volg.blockSignals(False)
-            self.toon_huidig_frame()
+            self._zoom_follow = False
+            self.chk_follow.blockSignals(True)
+            self.chk_follow.setChecked(False)
+            self.chk_follow.blockSignals(False)
+            self.show_current_frame()
             return
-        if self._streek is not None:
-            self._rek_streek(event.position())
+        if self._stroke is not None:
+            self._extend_stroke(event.position())
             return
-        if self.op_muis_beweeg is not None:
-            self.op_muis_beweeg(event)
+        if self.on_mouse_move is not None:
+            self.on_mouse_move(event)
 
-    def _muis_los(self, event):
-        if self._pan_sleep is not None:
-            self._pan_sleep = None
+    def _mouse_release(self, event):
+        if self._pan_drag is not None:
+            self._pan_drag = None
             return
-        if self._streek is not None:
-            self._stop_streek()
+        if self._stroke is not None:
+            self._stop_stroke()
             return
-        if self.op_muis_los is not None:
-            self.op_muis_los(event)
+        if self.on_mouse_release is not None:
+            self.on_mouse_release(event)
 
-    # ── Afspelen ─────────────────────────────────────────────────────────
-    def _speel_stap(self):
-        """Hoeveel frames er per timer-tik gemíddeld opgeschoven wordt — de tik-frequentie
-        volgt hieruit (`_speel_interval_ms`); wélk frame er getoond wordt bepaalt de
-        wandklok in `_speel_tick`.
+    # ── Playback ─────────────────────────────────────────────────────────
+    def _play_step(self):
+        """How many frames on average get advanced per timer tick -- the tick frequency
+        follows from this (`_play_interval_ms`); *which* frame gets shown is decided by
+        the wall clock in `_play_tick`.
 
-        Tot en met 1× is dat er één en regelt de timer het tempo. Sneller dan echte snelheid
-        kan geen decoder bijbenen (op een 1080p-opname ~9 ms per frame, dus 4× = 100 fps
-        halen we niet), dus daarboven slaan we frames óver: bij 4× vier frames per tik op het
-        normale fps-interval. Overgeslagen frames kosten alleen een `grab()` (~3 ms) i.p.v.
-        een volledige decode."""
-        factor = self.combo_snelheid.currentData() or 1.0
+        Up to and including 1x that's one, and the timer sets the pace. No decoder can
+        keep up faster than real speed (on a 1080p recording ~9 ms per frame, so 4x = 100
+        fps isn't achievable), so above that we skip frames: at 4x, four frames per tick
+        on the normal fps interval. Skipped frames only cost a `grab()` (~3 ms) instead of
+        a full decode."""
+        factor = self.combo_speed.currentData() or 1.0
         return max(1, int(round(factor))) if factor > 1.0 else 1
 
-    def _speel_interval_ms(self):
-        """Timer-interval per tik, geschaald met de gekozen afspeelsnelheid — en met de
-        stapgrootte erin verrekend, zodat 4× met stap 4 gewoon op het fps-tempo loopt.
+    def _play_interval_ms(self):
+        """Timer interval per tick, scaled by the chosen playback speed -- with the step
+        size factored in, so that 4x with a step of 4 simply runs at the fps pace.
 
-        Daar gaat `SPEEL_OVERSAMPLE` overheen: de timer vuurt een paar keer per frame, zodat
-        een te late tik hooguit een deel van een frame kost in plaats van een heel frame.
-        Zie de toelichting bij die constante."""
-        factor = self.combo_snelheid.currentData() or 1.0
-        tikken_per_s = (self.video_info.fps or 30.0) * factor / self._speel_stap()
-        return max(SPEEL_TIK_MIN_MS, int(1000 / (tikken_per_s * SPEEL_OVERSAMPLE)))
+        `PLAY_OVERSAMPLE` sits on top of that: the timer fires a few times per frame, so
+        a late tick costs at most part of a frame instead of a whole frame. See the note
+        by that constant."""
+        factor = self.combo_speed.currentData() or 1.0
+        ticks_per_s = (self.video_info.fps or 30.0) * factor / self._play_step()
+        return max(PLAY_TICK_MIN_MS, int(1000 / (ticks_per_s * PLAY_OVERSAMPLE)))
 
-    def _zet_snelheid(self, _idx=None):
-        # Draait de video al, herstart de timer meteen met het nieuwe tempo. De afspeelklok
-        # moet mee opnieuw geijkt: hij rekent verstreken tijd × factor, en zonder herijking
-        # zou de nieuwe factor met terugwerkende kracht op de al verstreken tijd gelden.
-        if self.speeltimer.isActive():
-            self._ijk_speelklok()
-            self.speeltimer.start(self._speel_interval_ms())
+    def _set_speed(self, _idx=None):
+        # If the video is already playing, restart the timer right away at the new pace.
+        # The playback clock has to be recalibrated along with it: it computes elapsed
+        # time * factor, and without recalibrating, the new factor would apply
+        # retroactively to the time that already elapsed.
+        if self.play_timer.isActive():
+            self._calibrate_play_clock()
+            self.play_timer.start(self._play_interval_ms())
 
-    def speelt(self):
-        return self.speeltimer.isActive()
+    def is_playing(self):
+        return self.play_timer.isActive()
 
-    def speel(self):
-        if not self.resultaten or self.speeltimer.isActive():
+    def play(self):
+        if not self.resultaten or self.play_timer.isActive():
             return
         if self.huidige_idx >= len(self.resultaten) - 1:
-            self.ga_naar(0)
-        self._ijk_speelklok()
+            self.go_to(0)
+        self._calibrate_play_clock()
         self._start_readahead()
-        self.speeltimer.start(self._speel_interval_ms())
+        self.play_timer.start(self._play_interval_ms())
         self.btn_play.setText("⏸")
 
-    def _ijk_speelklok(self):
-        """Legt vast vanaf welk frame en welk moment `_speel_tick` de tijd telt."""
-        self._speel_basis_idx = self.huidige_idx
-        self._speel_basis_t = time.perf_counter()
-        self._speel_laatste = self.huidige_idx
+    def _calibrate_play_clock(self):
+        """Records from which frame and which moment `_play_tick` counts time."""
+        self._play_base_idx = self.huidige_idx
+        self._play_base_t = time.perf_counter()
+        self._play_last = self.huidige_idx
 
     # ── Read-ahead ───────────────────────────────────────────────────────
     def _start_readahead(self):
         """Hands the capture to a `ForwardReader`, unless that would gain nothing.
 
         **Only up to and including 1x.** Above that the player skips frames and
-        `_lees_frame_exact` reads the ones in between with a bare `grab()` (~3 ms) instead
+        `_read_frame_exact` reads the ones in between with a bare `grab()` (~3 ms) instead
         of decoding them; a read-ahead reader would decode all of them and thereby become
         the bottleneck -- at 8x, 200 frames per second are needed and it manages ~63."""
         if (self._reader is not None or self.cap is None or self.video_info is None
-                or (self.combo_snelheid.currentData() or 1.0) > 1.0):
+                or (self.combo_speed.currentData() or 1.0) > 1.0):
             return
         frame_bytes = max(1, self.video_info.w * self.video_info.h * 3)
         count = max(2, min(READAHEAD_MAX_FRAMES, READAHEAD_MAX_BYTES // frame_bytes))
@@ -3660,7 +3665,7 @@ class VideoSpeler(QWidget):
         # frames lie before the capture position and would otherwise be skipped.
         carryover = sorted((i, f) for i, f in self._readahead_rest.items() if i > self.huidige_idx)
         self._readahead_rest = {}
-        self._reader = ForwardReader(self.cap, self._weergave_pos, count, carryover, self)
+        self._reader = ForwardReader(self.cap, self._display_pos, count, carryover, self)
         self._reader.start()
 
     def _stop_readahead(self):
@@ -3674,64 +3679,64 @@ class VideoSpeler(QWidget):
         # The capture now sits past the last frame it read -- further than what's been
         # shown. Keep the not-yet-shown frames, otherwise the next step forward would
         # look like a jump back and reopen and re-spool the video.
-        self._weergave_pos = reader.pos
+        self._display_pos = reader.pos
         self._readahead_rest = {i: f for i, f in reader.remaining() if i > self.huidige_idx}
 
-    def pauzeer(self):
-        if self.speeltimer.isActive():
-            self.speeltimer.stop()
+    def pause(self):
+        if self.play_timer.isActive():
+            self.play_timer.stop()
         self._stop_readahead()
         self.btn_play.setText("▶")
 
-    def _toggle_afspelen(self):
-        if self.speeltimer.isActive():
-            self.pauzeer()
+    def _toggle_playback(self):
+        if self.play_timer.isActive():
+            self.pause()
         else:
-            self.speel()
+            self.play()
 
-    def _speel_tick(self):
-        """Toont het frame dat op de **wandklok** aan de beurt is, niet simpelweg het
-        volgende.
+    def _play_tick(self):
+        """Shows the frame that's due on the **wall clock**, not simply the next one.
 
-        "Vorige + 1 per tik" loopt goed zolang één frame binnen het tik-interval past, en
-        gaat er stilzwijgend onderuit zodra dat niet meer zo is: de video speelt dan
-        vertraagd én schokkerig af, want elke uitschieter in de decodeertijd komt er direct
-        bovenop. Dat is geen randgeval — een 1080i-camcorderopname kost ~8 ms decoderen,
-        ~12 ms kamfilter en op een HiDPI-scherm nog eens ~15 ms schalen, samen tegen de
-        40 ms die er bij 25 fps zijn. Door het doel uit de verstreken tijd af te leiden
-        blijft het tempo kloppen en wordt een tekort in frames betaald in plaats van in
-        vertraging; een overgeslagen frame kost alleen een `grab()` (~3 ms) omdat
-        `_lees_frame_exact` er toch al sequentieel langs spoelt. Zelfde motief (en zelfde
-        vorm) als de masterklok van de vergelijkpagina en het spoelen in `SpelerToetsen`.
+        "Previous + 1 per tick" works fine as long as one frame fits inside the tick
+        interval, and silently falls apart the moment it doesn't: the video then plays
+        back slowed down *and* choppy, since every spike in decode time lands directly on
+        top. That's not an edge case -- a 1080i camcorder recording costs ~8 ms to decode,
+        ~12 ms for the comb filter, and on a HiDPI screen another ~15 ms to scale,
+        together against the 40 ms available at 25 fps. By deriving the target from
+        elapsed time, the pace stays correct and a shortfall gets paid in frames instead
+        of in delay; a skipped frame only costs a `grab()` (~3 ms) since
+        `_read_frame_exact` already spools past it sequentially anyway. Same motive (and
+        same shape) as the compare page's master clock and the scrubbing in
+        `SpelerToetsen`.
         """
-        if self.huidige_idx != self._speel_laatste:
-            self._ijk_speelklok()     # tussendoor gescrubd of gesprongen: opnieuw ijken
-        factor = self.combo_snelheid.currentData() or 1.0
+        if self.huidige_idx != self._play_last:
+            self._calibrate_play_clock()     # scrubbed or jumped in the meantime: recalibrate
+        factor = self.combo_speed.currentData() or 1.0
         fps = (self.video_info.fps if self.video_info else None) or 30.0
-        verstreken = time.perf_counter() - self._speel_basis_t
-        doel = self._speel_basis_idx + int(verstreken * fps * factor)
-        if doel >= len(self.resultaten):
-            # Het einde mag niet overgeslagen worden; nog even het laatste frame tonen.
+        elapsed = time.perf_counter() - self._play_base_t
+        target = self._play_base_idx + int(elapsed * fps * factor)
+        if target >= len(self.resultaten):
+            # The end must not be skipped over; still show the last frame for a moment.
             if self.huidige_idx < len(self.resultaten) - 1:
-                self._toon_frame(len(self.resultaten) - 1)
-            self.pauzeer()
+                self._show_frame(len(self.resultaten) - 1)
+            self.pause()
             return
-        if doel <= self.huidige_idx:  # onder 1× staat het doel meerdere tikken stil
+        if target <= self.huidige_idx:  # below 1x the target stands still for several ticks
             return
         if self._reader is not None:
-            idx, frame = self._reader.take(doel)
+            idx, frame = self._reader.take(target)
             if frame is None:
                 # The read-ahead reader has nothing ready yet. Show nothing and try again
                 # on the next tick: the clock keeps running, so this costs at most one frame.
                 if self._reader.at_end:
-                    self._toon_frame(len(self.resultaten) - 1)
-                    self.pauzeer()
+                    self._show_frame(len(self.resultaten) - 1)
+                    self.pause()
                 return
-            self._toon_frame(min(idx, len(self.resultaten) - 1), frame)
+            self._show_frame(min(idx, len(self.resultaten) - 1), frame)
         else:
             self._start_readahead()       # e.g. after a jump during playback
-            self._toon_frame(doel)
-        self._speel_laatste = self.huidige_idx
+            self._show_frame(target)
+        self._play_last = self.huidige_idx
 
 
 class SpelerToetsen(QObject):
@@ -3759,27 +3764,27 @@ class SpelerToetsen(QObject):
     voorwaarde daarboven — staat de juiste pagina wel open. Is `op_afspelen` gezet, dan gaat
     afspelen/pauzeren dáárheen in plaats van naar de spelers los: de vergelijkpagina loopt op
     één masterklok en die mag niet met twee losse timers omzeild worden. Wie `op_afspelen`
-    meegeeft moet ook `speelt` meegeven, want dan zegt de speeltimer van een speler niets
+    meegeeft moet ook `is_playing` meegeven, want dan zegt de play_timer van een speler niets
     meer: onder de masterklok staat die stil terwijl het beeld gewoon loopt, en zonder dat
     antwoord zou spatie het afspelen opnieuw starten in plaats van het te pauzeren.
     """
 
     def __init__(self, venster, spelers, extra=None, actief=None,
-                 op_afspelen=None, speelt=None, op_spoel=None):
+                 op_afspelen=None, is_playing=None, op_spoel=None):
         super().__init__(venster)
         self._venster = venster
         self._spelers = spelers
         self._extra = dict(extra or {})
         self._actief = actief
         self._op_afspelen = op_afspelen
-        self._speelt = speelt
+        self._speelt = is_playing
         self._op_spoel = op_spoel
 
         self._richting = 0      # −1 terug, 0 stil, +1 vooruit
         self._lopend = []       # [(speler, startframe)] tijdens het spoelen
         self._t0 = 0.0
         self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoSpeler.speeltimer
+        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoPlayer.play_timer
         self._timer.timeout.connect(self._spoel_tick)
         QApplication.instance().installEventFilter(self)
 
@@ -3793,22 +3798,22 @@ class SpelerToetsen(QObject):
     # ── Welke spelers ────────────────────────────────────────────────────
     def _actieve_spelers(self):
         spelers = self._spelers() if callable(self._spelers) else self._spelers
-        if isinstance(spelers, VideoSpeler):
+        if isinstance(spelers, VideoPlayer):
             spelers = [spelers]
         return [sp for sp in spelers if sp is not None and sp.resultaten]
 
     def _loopt(self, spelers):
-        """Loopt er beeld? Met een eigen afspeelroute is de speeltimer geen antwoord meer —
+        """Loopt er beeld? Met een eigen afspeelroute is de play_timer geen antwoord meer —
         onder de masterklok van de vergelijkpagina staat die stil terwijl het beeld loopt."""
         if self._speelt is not None:
             return self._speelt()
-        return any(sp.speelt() for sp in spelers)
+        return any(sp.is_playing() for sp in spelers)
 
     def _pauzeer(self, spelers):
         if self._op_afspelen is not None:
             self._op_afspelen(False)
         for sp in spelers:
-            sp.pauzeer()
+            sp.pause()
 
     # ── Doorspoelen met . en , ───────────────────────────────────────────
     def start_spoelen(self, richting):
@@ -3830,7 +3835,7 @@ class SpelerToetsen(QObject):
         self._lopend = [(sp, sp.huidige_idx) for sp in spelers]
         self._t0 = time.monotonic()
         for sp, vanaf in self._lopend:
-            sp.ga_naar(vanaf + richting)
+            sp.go_to(vanaf + richting)
         self._timer.start(SPOEL_TICK_MS)
         self._meld(f"{'▶▶' if richting > 0 else '◀◀'} {SPOEL_FACTOR:g}×")
 
@@ -3856,7 +3861,7 @@ class SpelerToetsen(QObject):
             stap = max(1, int(round(verstreken * fps * SPOEL_FACTOR)))
             laatste = len(sp.resultaten) - 1
             doel = vanaf + self._richting * stap
-            sp.ga_naar(max(0, min(doel, laatste)))
+            sp.go_to(max(0, min(doel, laatste)))
             if 0 < doel < laatste:
                 klaar = False
         if klaar:
@@ -3904,7 +3909,7 @@ class SpelerToetsen(QObject):
             return True
 
         if toets == Qt.Key_F11:
-            wissel_volledig_scherm(self._venster)
+            toggle_fullscreen(self._venster)
             return True
 
         spelers = self._actieve_spelers()
@@ -3921,21 +3926,21 @@ class SpelerToetsen(QObject):
                 self._op_afspelen(True)
             else:
                 for sp in spelers:
-                    sp.speel()
+                    sp.play()
         elif toets in (Qt.Key_Left, Qt.Key_Right):
             self.stop_spoelen()
             self._pauzeer(spelers)
             stap = 1 if toets == Qt.Key_Right else -1
             for sp in spelers:
-                sp.ga_naar(sp.huidige_idx + stap)
+                sp.go_to(sp.huidige_idx + stap)
         elif toets == Qt.Key_Home:
             self.stop_spoelen()
             for sp in spelers:
-                sp.ga_naar(0)
+                sp.go_to(0)
         elif toets == Qt.Key_End:
             self.stop_spoelen()
             for sp in spelers:
-                sp.ga_naar(len(sp.resultaten) - 1)
+                sp.go_to(len(sp.resultaten) - 1)
         else:
             return False
         return True
@@ -3962,9 +3967,9 @@ class MasterKlok(QObject):
         self._factor_bron = factor
         self._op_klaar = op_klaar      # aangeroepen als de klok zelf het einde bereikt
         self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoSpeler.speeltimer
+        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoPlayer.play_timer
         self._timer.timeout.connect(self._tick)
-        self._lopend = []     # [(VideoSpeler, basisframe)] tijdens het samen afspelen
+        self._lopend = []     # [(VideoPlayer, basisframe)] tijdens het samen afspelen
         self._t0 = 0.0
         self._factor = 1.0
 
@@ -3983,13 +3988,13 @@ class MasterKlok(QObject):
         timer stond al stil, maar hun vooruitlezer niet, en die houdt de capture vast plus
         tot 96 MB aan gedecodeerde frames waar niemand meer op wacht. Bewust niet álle
         spelers van de eigenaar: deze methode hangt ook aan de ▶-knop van elke kant
-        ("handmatig overnemen"), en die knop heeft zijn eigen `_toggle_afspelen` al vóór
+        ("handmatig overnemen"), en die knop heeft zijn eigen `_toggle_playback` al vóór
         ons laten lopen — wie dan alles pauzeert, maakt ▶ per kant onbruikbaar."""
         if self._timer.isActive():
             self._timer.stop()
         lopend, self._lopend = self._lopend, []
         for sp, _ in lopend:
-            sp.pauzeer()
+            sp.pause()
 
     def herijk(self):
         """Bij een snelheidswissel: opnieuw ijken vanaf de huidige stand, anders zou het
@@ -4006,12 +4011,12 @@ class MasterKlok(QObject):
     def _interval_ms(self):
         """Interval van de klok: een fractie van het kórtste frame van de spelers die
         meedraaien, want de klok moet elke speler kunnen bedienen — precies dezelfde
-        afweging als in `_speel_interval_ms`, inclusief `SPEEL_OVERSAMPLE`. Trager dan
+        afweging als in `_play_interval_ms`, inclusief `PLAY_OVERSAMPLE`. Trager dan
         `ALLES_TICK_MS` wordt hij nooit, zodat slow motion niet nodeloos vaak tikt."""
         fps = max((sp.video_info.fps or 30.0
                    for sp, _ in self._lopend if sp.video_info is not None), default=30.0)
         fps *= self._factor
-        return max(SPEEL_TIK_MIN_MS, min(ALLES_TICK_MS, int(1000 / (fps * SPEEL_OVERSAMPLE))))
+        return max(PLAY_TICK_MIN_MS, min(ALLES_TICK_MS, int(1000 / (fps * PLAY_OVERSAMPLE))))
 
     def _tick(self):
         t = (time.monotonic() - self._t0) * self._factor
@@ -4023,15 +4028,15 @@ class MasterKlok(QObject):
             laatste = len(sp.resultaten) - 1
             doel = basis + int(round(t * (info.fps or 30.0)))
             if doel < laatste:
-                # `toon_op_klok` en niet `ga_naar`: dit is sequentieel vooruit, dus de
+                # `show_on_clock` en niet `go_to`: dit is sequentieel vooruit, dus de
                 # vooruitlezer mag mee — hier draaien twee spelers naast elkaar.
-                sp.toon_op_klok(doel)
+                sp.show_on_clock(doel)
                 klaar = False
             else:
-                # Het einde: exact het laatste frame tonen. `toon_op_klok` laat een frame
+                # Het einde: exact het laatste frame tonen. `show_on_clock` laat een frame
                 # dat de lezer nog niet heeft aan de volgende tik over, en die komt niet
                 # meer — de klok stopt hieronder.
-                sp.ga_naar(laatste)
+                sp.go_to(laatste)
         if klaar:
             self.stop()
             if self._op_klaar is not None:
@@ -4040,7 +4045,7 @@ class MasterKlok(QObject):
 
 class VergelijkKant(QWidget):
     """
-    Eén kant van de vergelijkpagina: kop met de gekozen analyse, een eigen VideoSpeler,
+    Eén kant van de vergelijkpagina: kop met de gekozen analyse, een eigen VideoPlayer,
     een sync-punt (startframe voor 'Start alles') en een minimale afzettabel.
 
     De tabel toont bewust weinig — nummer, been en hoek — maar markeert wél onvolledige
@@ -4081,7 +4086,7 @@ class VergelijkKant(QWidget):
         # regels, vanaf ~435 in twee, en die regel plus 20 px beeld is precies wat de
         # vergelijkpagina (de hoogste van de drie) op een 1280×720-scherm te veel had.
         # Twee kanten van 440 passen nog ruim op 1280 (zie schaats_schermtest.py).
-        self.speler = VideoSpeler(min_grootte=(440, 180), toon_snelheid=False)
+        self.speler = VideoPlayer(min_size=(440, 180), show_speed=False)
         # De HUD wordt op vaste vol-frame-posities getekend en is in een half paneel
         # onleesbaar; per kant weer aan te zetten.
         self.speler.chk_hud.setChecked(False)
@@ -4124,18 +4129,18 @@ class VergelijkKant(QWidget):
         self.sync_frame = (min(self.sync_frame, max(0, len(data["resultaten"]) - 1))
                            if zelfde else 0)
         self.lbl_titel.setText(f"{schaatser_naam} — {data['titel']}")
-        self.speler.laad(data["info"], data["resultaten"], data["video_pad"],
+        self.speler.load(data["info"], data["resultaten"], data["video_pad"],
                          data.get("deinterlaced", False))
         self._vul_tabel()
         self.btn_kies.setText("Wisselen...")
         self.btn_sync.setEnabled(True)
         self.btn_leeg.setEnabled(True)
-        self.speler.ga_naar(self.sync_frame)
+        self.speler.go_to(self.sync_frame)
         self._toon_sync_label()
 
     def leeg(self):
         """Laat de video los (nodig voordat de mediamap gewist kan worden)."""
-        self.speler.sluit()
+        self.speler.release()
         self.analyse_id = None
         self.events = []
         self.sync_frame = 0
@@ -4165,7 +4170,7 @@ class VergelijkKant(QWidget):
 
     def naar_sync(self):
         if self.heeft_analyse():
-            self.speler.ga_naar(self.sync_frame)
+            self.speler.go_to(self.sync_frame)
 
     # ── Tabel ────────────────────────────────────────────────────────────
     def _vul_tabel(self):
@@ -4185,7 +4190,7 @@ class VergelijkKant(QWidget):
 
     def _klik_op_rij(self, rij, _kolom):
         if 0 <= rij < len(self.events):
-            self.speler.ga_naar(self.events[rij].start_frame)
+            self.speler.go_to(self.events[rij].start_frame)
 
 
 # ── Fragmenten knippen uit een lange opname (fase 8) ───────────────────────────
@@ -4322,10 +4327,10 @@ class FragmentKiezer(QDialog):
     komt geen seconde marge bij of af. De trainer kijkt, drukt op start en stop, en dát zijn
     de grenzen.
 
-    Hergebruikt `VideoSpeler` voor het afspelen (transportknoppen, snelheidcombo om op 4×
+    Hergebruikt `VideoPlayer` voor het afspelen (transportknoppen, snelheidcombo om op 4×
     door een half uur te scannen, zoom), met twee afwijkingen van de weergavepagina:
-    `snel_zoeken=True` — achteruit scrubben mag hier seeken, want het beeld is een kijkje en
-    geen meting — en `toon_overlay=False`, want er is geen analyse om te tekenen.
+    `fast_seek=True` — achteruit scrubben mag hier seeken, want het beeld is een kijkje en
+    geen meting — en `show_overlay=False`, want er is geen analyse om te tekenen.
     """
 
     def __init__(self, bron_pad, info, gedaan=(), deinterlacen=False, parent=None):
@@ -4353,16 +4358,16 @@ class FragmentKiezer(QDialog):
         self.lbl_spoel = QLabel("")
         self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
 
-        self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
-                                  toon_overlay=False)
-        self.speler.op_frame_getoond = self._frame_getoond
+        self.speler = VideoPlayer(min_size=(400, 200), fast_seek=True,
+                                  show_overlay=False)
+        self.speler.on_frame_shown = self._frame_getoond
         v.addWidget(self.speler, stretch=1)
 
         # De balk hangt ín de speler (onder de scrub-slider), zodat hij dezelfde breedte
         # als de tijdlijn heeft en er samen mee opschuift.
         self.balk = FragmentBalk()
         self.balk.KLIK.connect(self._klik_op_balk)
-        self.speler.voeg_onderbalk(self.balk)
+        self.speler.add_bottom_bar(self.balk)
 
         # Navigatiehulp: op een half uur is de slider te grof om een afzet terug te vinden.
         rij_nav = WrapBar()
@@ -4431,7 +4436,7 @@ class FragmentKiezer(QDialog):
         v.addWidget(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
 
-        hulp = QLabel(toetsen_hulp("<b>S</b> start fragment", "<b>E</b> stop fragment",
+        hulp = QLabel(keys_help("<b>S</b> start fragment", "<b>E</b> stop fragment",
                                    "<b>Del</b> fragment weg"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
@@ -4440,11 +4445,11 @@ class FragmentKiezer(QDialog):
         # Lege FrameResult-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is nog niets geanalyseerd. `box_sequence` geeft dan None en de zoom blijft handmatig.
         resultaten = [FrameResult(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.laad(info, resultaten, bron_pad, deinterlacen)
+        self.speler.load(info, resultaten, bron_pad, deinterlacen)
         self.balk.zet(totaal=len(resultaten),
                       gedaan=[(f["start_frame"], f["eind_frame"],
                                f["titel"] or "") for f in gedaan])
-        self.speler.ga_naar(0)
+        self.speler.go_to(0)
         self._werk_bij()
 
         # Dezelfde toetsen als overal, plus S/E/Del voor het markeren. Bewust géén QShortcut
@@ -4492,7 +4497,7 @@ class FragmentKiezer(QDialog):
 
     def _klik_op_rij(self, rij, _kolom=0):
         if 0 <= rij < len(self._fragmenten):
-            self.speler.ga_naar(self._fragmenten[rij][0])
+            self.speler.go_to(self._fragmenten[rij][0])
             self.balk.zet(selectie=rij)
 
     def _klik_op_balk(self, index):
@@ -4503,14 +4508,14 @@ class FragmentKiezer(QDialog):
 
     # ── Navigeren ────────────────────────────────────────────────────────
     def _spring(self, seconden):
-        self.speler.ga_naar(self.speler.huidige_idx + int(round(seconden * self.fps)))
+        self.speler.go_to(self.speler.huidige_idx + int(round(seconden * self.fps)))
 
     def _ga_naar_tijd(self):
         frame = _lees_tijd(self.veld_tijd.text(), self.fps)
         if frame is None:
             QMessageBox.information(self, "Tijd", "Gebruik m:ss (bijvoorbeeld 12:30).")
             return
-        self.speler.ga_naar(frame)
+        self.speler.go_to(frame)
 
     def _frame_getoond(self, idx):
         self.balk.zet(cursor=idx, lopend=self._start_open)
@@ -4585,10 +4590,10 @@ class FragmentKiezer(QDialog):
         super().changeEvent(event)
 
     def done(self, resultaat):
-        # Niet closeEvent: een modale dialoog die via accept()/reject() sluit krijgt er geen.
+        # Niet closeEvent: een modale dialoog die via accept()/reject() release krijgt er geen.
         # Het videobestand moet los, anders houdt Windows de opname vast.
         self.toetsen.losmaken()
-        self.speler.sluit()
+        self.speler.release()
         super().done(resultaat)
 
 
@@ -4666,7 +4671,7 @@ class PuntenBalk(QWidget):
 class BekijkKant(QWidget):
     """
     Eén video in het kijkvenster: een kop met de naam (en een ✕ zodra er twee staan), een
-    eigen `VideoSpeler` met de `PuntenBalk` eronder, en een sync-rij voor "Start alles".
+    eigen `VideoPlayer` met de `PuntenBalk` eronder, en een sync-rij voor "Start alles".
 
     De tegenhanger van `VergelijkKant`, zonder analyse en zonder tabel: hier wordt niets
     gemeten. Kop en sync-rij zijn alleen zichtbaar als er twee kanten zijn (zie
@@ -4703,12 +4708,12 @@ class BekijkKant(QWidget):
         # er over het beeld heen getekend worden. Dit is het venster waarin je kíjkt en
         # aanwijst; op de weergave- en vergelijkpagina is de linkerknop al bezet (pannen,
         # skelet-editor) en in het knipvenster ben je grenzen aan het zetten.
-        self.speler = VideoSpeler(min_grootte=(400, 200), snel_zoeken=True,
-                                  toon_overlay=False, toon_tekenen=True)
+        self.speler = VideoPlayer(min_size=(400, 200), fast_seek=True,
+                                  show_overlay=False, show_drawing=True)
         v.addWidget(self.speler, stretch=1)
         # De balk hangt ín de speler, zodat hij dezelfde breedte als de tijdlijn houdt.
         self.balk = PuntenBalk()
-        self.speler.voeg_onderbalk(self.balk)
+        self.speler.add_bottom_bar(self.balk)
 
         self.rij_sync = QWidget()
         rij = QHBoxLayout(self.rij_sync)
@@ -4729,12 +4734,12 @@ class BekijkKant(QWidget):
         # Lege FrameResult-lijst: de speler wil er één (sliderlengte, tijdlabel), maar er
         # is hier per definitie niets geanalyseerd — dat is de hele bedoeling.
         resultaten = [FrameResult(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.laad(info, resultaten, bron["pad"], bool(bron.get("interlaced")))
+        self.speler.load(info, resultaten, bron["pad"], bool(bron.get("interlaced")))
         self.balk.zet(totaal=len(resultaten))
         self._toon_sync_label()
 
-    def sluit(self):
-        self.speler.sluit()
+    def release(self):
+        self.speler.release()
 
     # ── Sync-punt (per sessie, niet opgeslagen) ──────────────────────────
     def _zet_sync(self):
@@ -4746,7 +4751,7 @@ class BekijkKant(QWidget):
             f"sync: frame {self.sync_frame}  ({_tijd_tekst(self.sync_frame, self.fps)})")
 
     def naar_sync(self):
-        self.speler.ga_naar(self.sync_frame)
+        self.speler.go_to(self.sync_frame)
 
 
 class BekijkVenster(QDialog):
@@ -4758,7 +4763,7 @@ class BekijkVenster(QDialog):
 
     Vier dingen maken het meer dan een speler:
       * **volledig scherm** — je kijkt naar techniek, niet naar knoppen (F11 → venster);
-      * **inzoomen en vertragen** komen ongewijzigd uit `VideoSpeler` (muiswiel/zoomregelaar
+      * **inzoomen en vertragen** komen ongewijzigd uit `VideoPlayer` (muiswiel/zoomregelaar
         en de snelheidcombo tot 1/16×);
       * de **standaardtoetsen** (spatie, `.`/`,`, pijltjes, Home/End) uit `SpelerToetsen` —
         hier bedacht, maar sindsdien overal in de app dezelfde;
@@ -4846,7 +4851,7 @@ class BekijkVenster(QDialog):
         self.btn_start_alles = QPushButton("▶ Start alles")
         self.btn_start_alles.setToolTip(
             "Speelt beide video's tegelijk af vanaf hun sync-punt, elk op z'n eigen fps.\n"
-            "Spatie speelt ook beide tegelijk, maar hervat waar ze nu staan.")
+            "Spatie is_playing ook beide tegelijk, maar hervat waar ze nu staan.")
         # lambda: clicked() zou anders `checked=False` als vanaf_sync doorgeven.
         self.btn_start_alles.clicked.connect(lambda: self._start_alles())
         balk.addWidget(self.btn_start_alles)
@@ -4867,9 +4872,9 @@ class BekijkVenster(QDialog):
         self.combo_alles_snelheid.setToolTip(
             "Afspeelsnelheid voor beide video's — ook als je er één los afspeelt, zodat ze "
             "altijd even snel lopen.")
-        for label, factor in SNELHEDEN:
+        for label, factor in SPEEDS:
             self.combo_alles_snelheid.addItem(label, factor)
-        self.combo_alles_snelheid.setCurrentIndex(ALLES_SNELHEID_IDX)
+        self.combo_alles_snelheid.setCurrentIndex(ALL_SPEED_IDX)
         self.combo_alles_snelheid.currentIndexChanged.connect(self._zet_alles_snelheid)
         balk.addWidget(self.combo_alles_snelheid)
         balk.addStretch(1)
@@ -4895,7 +4900,7 @@ class BekijkVenster(QDialog):
         self.toetsen = SpelerToetsen(
             self, lambda: [k.speler for k in self.kanten], extra=extra,
             op_afspelen=self._toetsen_afspelen,
-            speelt=lambda: self.klok.loopt() or any(k.speler.speelt() for k in self.kanten),
+            is_playing=lambda: self.klok.loopt() or any(k.speler.is_playing() for k in self.kanten),
             op_spoel=self.lbl_spoel.setText)
 
         self._zet_modus()
@@ -4914,7 +4919,7 @@ class BekijkVenster(QDialog):
         kant.balk.KLIK.connect(self._klik_op_balk)   # de balk is alleen zichtbaar mét punten
         self.kanten.append(kant)
         self.splitter_kanten.addWidget(kant)
-        kant.speler.ga_naar(0)
+        kant.speler.go_to(0)
         return kant
 
     def _verwijder_kant(self, kant):
@@ -4923,7 +4928,7 @@ class BekijkVenster(QDialog):
             return
         self._pauzeer_alles()
         self.kanten.remove(kant)
-        kant.sluit()
+        kant.release()
         kant.setParent(None)
         kant.deleteLater()
         self._zet_modus()
@@ -4953,8 +4958,8 @@ class BekijkVenster(QDialog):
         for kant in self.kanten:
             kant.kop.setVisible(twee)
             kant.rij_sync.setVisible(twee)
-            kant.speler.lbl_snelheid.setVisible(not twee)
-            kant.speler.combo_snelheid.setVisible(not twee)
+            kant.speler.lbl_speed.setVisible(not twee)
+            kant.speler.combo_speed.setVisible(not twee)
         self.balk_alles.setVisible(twee)
         self.btn_tweede.setVisible(not twee and self.kies_tweede is not None)
 
@@ -4963,12 +4968,12 @@ class BekijkVenster(QDialog):
             kant.balk.setVisible(kant is self._punt_kant)
         if twee:
             self._zet_alles_snelheid()
-            self.hulp.setText(toetsen_hulp("beide video's tegelijk",
+            self.hulp.setText(keys_help("beide video's tegelijk",
                                            "<b>Esc</b> sluiten"))
         else:
             punt_toetsen = (("<b>P</b> punt zetten", "<b>1&ndash;9</b> naar punt",
                              "<b>Del</b> punt weg") if self._punt_kant is not None else ())
-            self.hulp.setText(toetsen_hulp(*punt_toetsen, "<b>Esc</b> sluiten"))
+            self.hulp.setText(keys_help(*punt_toetsen, "<b>Esc</b> sluiten"))
 
     def _koppel_punten(self, kant):
         """Hangt het puntenpaneel aan deze kant (of aan geen: `None`)."""
@@ -4976,7 +4981,7 @@ class BekijkVenster(QDialog):
             kant = None
         vorige, self._punt_kant = self._punt_kant, kant
         if vorige is not None and vorige in self.kanten:
-            vorige.speler.op_frame_getoond = None
+            vorige.speler.on_frame_shown = None
         aan = kant is not None
         self.paneel.setVisible(aan and (self.btn_paneel.text() == "Punten verbergen"))
         self.btn_paneel.setVisible(aan)
@@ -4986,27 +4991,27 @@ class BekijkVenster(QDialog):
         if not aan:
             self._punten = []
             return
-        kant.speler.op_frame_getoond = self._frame_getoond
+        kant.speler.on_frame_shown = self._frame_getoond
         self._vernieuw_punten()
         kant.balk.zet(cursor=max(0, kant.speler.huidige_idx))
 
     # ── Samen afspelen (twee kanten, MasterKlok) ─────────────────────────
-    def _toetsen_afspelen(self, speel):
+    def _toetsen_afspelen(self, play):
         """Spatie: met twee video's de klok, met één gewoon de speler. Spatie is
         afspelen/pauze en **hervat dus waar de video's staan**; alleen de knop
         "Start alles" springt eerst naar de sync-punten."""
-        if not speel:
+        if not play:
             self._pauzeer_alles()
         elif len(self.kanten) > 1:
             self._start_alles(vanaf_sync=False)
         else:
-            self.kanten[0].speler.speel()
+            self.kanten[0].speler.play()
 
     def _start_alles(self, vanaf_sync=None):
         """`vanaf_sync`: None = wat het vinkje zegt (de knop), False = hervatten (spatie)."""
         if len(self.kanten) < 2:
             if self.kanten:
-                self.kanten[0].speler.speel()
+                self.kanten[0].speler.play()
             return
         self._pauzeer_alles()
         if vanaf_sync is None:
@@ -5030,7 +5035,7 @@ class BekijkVenster(QDialog):
         self.klok.stop()
         self.toetsen.stop_spoelen()
         for kant in self.kanten:
-            kant.speler.pauzeer()
+            kant.speler.pause()
 
     def _beide_naar_sync(self):
         self._pauzeer_alles()
@@ -5046,7 +5051,7 @@ class BekijkVenster(QDialog):
         video's op verschillend tempo naast elkaar zijn niet te vergelijken."""
         idx = self.combo_alles_snelheid.currentIndex()
         for kant in self.kanten:
-            kant.speler.combo_snelheid.setCurrentIndex(idx)   # herstart een lopende timer
+            kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
         self.klok.herijk()
 
     # ── Puntenpaneel ─────────────────────────────────────────────────────
@@ -5190,7 +5195,7 @@ class BekijkVenster(QDialog):
     def _ga_naar_punt(self, index):
         kant = self._punt_kant
         if kant is not None and 0 <= index < len(self._punten):
-            kant.speler.ga_naar(self._punten[index]["frame"])
+            kant.speler.go_to(self._punten[index]["frame"])
             self.tabel.selectRow(index)
             kant.balk.zet(selectie=index)
 
@@ -5213,7 +5218,7 @@ class BekijkVenster(QDialog):
         self.btn_paneel.setText("Punten verbergen" if zichtbaar else "Punten tonen")
 
     def _toggle_volledig_scherm(self):
-        wissel_volledig_scherm(self)
+        toggle_fullscreen(self)
 
     def _minimaliseer(self):
         # Eerst alles stil: een video die in de taakbalk doorloopt, decodeert voor niets.
@@ -5229,12 +5234,12 @@ class BekijkVenster(QDialog):
         super().changeEvent(event)
 
     def done(self, resultaat):
-        # Niet closeEvent: een modale dialoog die via accept()/reject() sluit krijgt er geen.
+        # Niet closeEvent: een modale dialoog die via accept()/reject() release krijgt er geen.
         # De videobestanden moeten los, anders houdt Windows de opname vast.
         self.toetsen.losmaken()
         self.klok.stop()
         for kant in self.kanten:
-            kant.sluit()
+            kant.release()
         super().done(resultaat)
 
 
@@ -5452,7 +5457,7 @@ class MainWindow(QMainWindow):
         self._backend_gemeld = False        # is een backend-terugval al gemeld? (zie
                                             # _warn_backend_fallback)
 
-        # Skelet-editor (fase 3) — de zoom/pan-state zit in de VideoSpeler
+        # Skelet-editor (fase 3) — de zoom/pan-state zit in de VideoPlayer
         self._editor_actief = False
         self._sleep = None          # {'idx', 'j', 'start_lm': Landmark} tijdens een sleep
         # Undo-items zijn getypeerd: 'sleep' verplaatst één landmark over een uitvloei-venster,
@@ -5478,7 +5483,7 @@ class MainWindow(QMainWindow):
         self._melding("Bibliotheek openen...")
         self._zet_bibliotheek(skate_db.library_path())
 
-    # De VideoSpeler is de enige eigenaar van deze drie; hier alleen doorkijkjes, zodat de
+    # De VideoPlayer is de enige eigenaar van deze drie; hier alleen doorkijkjes, zodat de
     # bestaande editor-/tabelcode ongewijzigd blijft werken én een stille tweede kopie
     # structureel onmogelijk is (een stray toewijzing geeft meteen een AttributeError).
     @property
@@ -5546,9 +5551,9 @@ class MainWindow(QMainWindow):
                      if k.heeft_analyse()],
             op_spoel=self.lbl_spoel.setText,
             op_afspelen=self._toetsen_vergelijk_afspelen,
-            speelt=lambda: (self.klok.loopt()
-                            or self.kant_links.speler.speelt()
-                            or self.kant_rechts.speler.speelt()),
+            is_playing=lambda: (self.klok.loopt()
+                            or self.kant_links.speler.is_playing()
+                            or self.kant_rechts.speler.is_playing()),
             actief=lambda: self.stack.currentWidget() is self.pagina_vergelijk)
         self._toetsen = [self.toetsen_analyse, self.toetsen_vergelijk]
 
@@ -5570,12 +5575,12 @@ class MainWindow(QMainWindow):
         cv.addWidget(self.voortgang_balk)
         self.setCentralWidget(centraal)
 
-    def _toetsen_vergelijk_afspelen(self, speel):
+    def _toetsen_vergelijk_afspelen(self, play):
         """Spatie op de vergelijkpagina bedient de masterklok, niet de twee spelers los —
         twee losse frame-timers lopen binnen seconden uit de pas (zie `_start_alles`).
         Spatie is afspelen/pauze en hervat dus waar de video's staan; alleen de knop
         "Start alles" springt eerst naar de sync-punten."""
-        if speel:
+        if play:
             self._start_alles(vanaf_sync=False)
         else:
             self._pauzeer_alles()
@@ -5586,9 +5591,9 @@ class MainWindow(QMainWindow):
         self._stop_alles()
         for toetsen in self._toetsen:
             toetsen.stop_spoelen()
-        self.speler.pauzeer()
+        self.speler.pause()
         for kant in (self.kant_links, self.kant_rechts):
-            kant.speler.pauzeer()
+            kant.speler.pause()
 
     def _paginawissel(self, _idx=None):
         """Bij het verlaten van een pagina: alles pauzeren, en de bewerk-modus uitzetten —
@@ -6109,7 +6114,7 @@ class MainWindow(QMainWindow):
         in streaming-stand): één sprong in het knipvenster haalde ~40 MB op en kostte
         5 tot 20 s, tegen 30-120 ms als dezelfde opname lokaal staat. Dat valt niet met
         code te verhelpen — de speler springt al gericht i.p.v. door te spoelen (zie
-        SEEK_DREMPEL_FRAMES), en die 40 MB is wat ffmpeg nodig heeft om in een MPEG-TS
+        SEEK_THRESHOLD_FRAMES), en die 40 MB is wat ffmpeg nodig heeft om in een MPEG-TS
         zonder index het juiste tijdstip te vinden. Het enige zinnige is het zéggen,
         vóórdat iemand denkt dat het programma hangt.
 
@@ -6439,9 +6444,9 @@ class MainWindow(QMainWindow):
         self.combo_alles_snelheid.setToolTip(
             "Afspeelsnelheid op deze pagina — geldt voor 'Start alles' én voor een kant "
             "die je los afspeelt, zodat de video's altijd even snel lopen.")
-        for label, factor in SNELHEDEN:
+        for label, factor in SPEEDS:
             self.combo_alles_snelheid.addItem(label, factor)
-        self.combo_alles_snelheid.setCurrentIndex(ALLES_SNELHEID_IDX)
+        self.combo_alles_snelheid.setCurrentIndex(ALL_SPEED_IDX)
         self.combo_alles_snelheid.currentIndexChanged.connect(self._zet_alles_snelheid)
         balk.addWidget(self.combo_alles_snelheid)
         self._zet_alles_snelheid()      # kanten meteen op de startsnelheid zetten
@@ -6451,24 +6456,24 @@ class MainWindow(QMainWindow):
 
         # Dezelfde toetsen als elders, maar ze sturen hier beide kanten tegelijk — dat is
         # het enige wat op deze pagina anders is en hoort er dus bij te staan.
-        hulp = QLabel(toetsen_hulp("beide kanten tegelijk"))
+        hulp = QLabel(keys_help("beide kanten tegelijk"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         v.addWidget(hulp)
         return paneel
 
     def _bouw_videopaneel(self):
-        """De gedeelde VideoSpeler plus de editor-onderdelen die alléén op de analysepagina
+        """De gedeelde VideoPlayer plus de editor-onderdelen die alléén op de analysepagina
         horen (de vergelijkpagina gebruikt dezelfde speler, zonder editor)."""
         # Bescheiden ondergrens: het beeld rekt toch mee met het venster, en een hoge
         # ondergrens tilt het venster-minimum boven de beschikbare schermhoogte uit —
         # dan negeert Qt de gevraagde venstergrootte (zie set_window_size).
-        self.speler = VideoSpeler(min_grootte=(400, 240))
-        self.speler.op_frame_getoond = self._speler_frame_getoond
-        self.speler.overlay_tekenaar = self._teken_handles
-        self.speler.op_muis_druk = self._editor_muis_druk
-        self.speler.op_muis_beweeg = self._editor_muis_beweeg
-        self.speler.op_muis_los = self._editor_muis_los
+        self.speler = VideoPlayer(min_size=(400, 240))
+        self.speler.on_frame_shown = self._speler_frame_getoond
+        self.speler.overlay_drawer = self._teken_handles
+        self.speler.on_mouse_press = self._editor_muis_druk
+        self.speler.on_mouse_move = self._editor_muis_beweeg
+        self.speler.on_mouse_release = self._editor_muis_los
 
         self.btn_bewerken = QPushButton("✏ Bewerken")
         self.btn_bewerken.setCheckable(True)
@@ -6477,14 +6482,14 @@ class MainWindow(QMainWindow):
             "De correctie vloeit uit naar de buurframes (instelbaar) en wordt\n"
             "direct opgeslagen.")
         self.btn_bewerken.toggled.connect(self._toggle_bewerken)
-        self.speler.voeg_bedieningsknop(self.btn_bewerken)
+        self.speler.add_control_button(self.btn_bewerken)
 
         self.btn_vergelijk_deze = QPushButton("⇄ Vergelijk met...")
         self.btn_vergelijk_deze.setToolTip(
             "Zet deze analyse links op de vergelijkpagina en kies er een andere naast.")
         self.btn_vergelijk_deze.clicked.connect(self._vergelijk_met_deze)
         self.btn_vergelijk_deze.setEnabled(False)
-        self.speler.voeg_bedieningsknop(self.btn_vergelijk_deze)
+        self.speler.add_control_button(self.btn_vergelijk_deze)
 
         self.btn_info = QPushButton("ℹ Info...")
         self.btn_info.setToolTip(
@@ -6492,7 +6497,7 @@ class MainWindow(QMainWindow):
         # lambda: clicked() geeft anders `checked=False` door als analyse_id.
         self.btn_info.clicked.connect(lambda: self._toon_analyse_info())
         self.btn_info.setEnabled(False)
-        self.speler.voeg_bedieningsknop(self.btn_info)
+        self.speler.add_control_button(self.btn_info)
 
         self.btn_bocht_nu = QPushButton("Bocht bepalen")
         self.btn_bocht_nu.setToolTip(
@@ -6504,7 +6509,7 @@ class MainWindow(QMainWindow):
             "zien wat het met de tabel doet en kunt dan pas beslissen.")
         self.btn_bocht_nu.clicked.connect(self._bepaal_bocht_nu)
         self.btn_bocht_nu.setEnabled(False)
-        self.speler.voeg_bedieningsknop(self.btn_bocht_nu)
+        self.speler.add_control_button(self.btn_bocht_nu)
 
         # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus. Afbrekend (WrapBar), want
         # met de plaats-knoppen erbij past hij op een laptopscherm niet meer op één regel —
@@ -6549,7 +6554,7 @@ class MainWindow(QMainWindow):
         self.lbl_editor_hint.setStyleSheet("color: #888;")
         self.editor_balk.addWidget(self.lbl_editor_hint)
         self.editor_balk.setVisible(False)
-        self.speler.voeg_onderbalk(self.editor_balk)
+        self.speler.add_bottom_bar(self.editor_balk)
 
         # Plaats-balk: alleen zichtbaar tijdens een lopende klikreeks. Apart van de
         # editor-balk zodat de gewone bewerk-knoppen niet met de reeks-knoppen mengen.
@@ -6575,14 +6580,14 @@ class MainWindow(QMainWindow):
         self.btn_plaats_annuleer.clicked.connect(self._plaats_annuleren)
         self.plaats_balk.addWidget(self.btn_plaats_annuleer)
         self.plaats_balk.setVisible(False)
-        self.speler.voeg_onderbalk(self.plaats_balk)
+        self.speler.add_bottom_bar(self.plaats_balk)
 
         # Dezelfde regel als onder het knip- en kijkvenster: de toetsen zijn overal gelijk,
-        # dus hoort de opsomming dat ook te zijn (zie VIDEO_TOETSEN_HULP).
-        hulp = QLabel(toetsen_hulp("<b>Ctrl+Z / Ctrl+Y</b> bewerking terug/opnieuw"))
+        # dus hoort de opsomming dat ook te zijn (zie VIDEO_KEYS_HELP).
+        hulp = QLabel(keys_help("<b>Ctrl+Z / Ctrl+Y</b> bewerking terug/opnieuw"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
-        self.speler.voeg_onderbalk(hulp)
+        self.speler.add_bottom_bar(hulp)
 
         # Sneltoetsen voor undo/redo (alleen actief in bewerk-modus, zie de handlers).
         QShortcut(QKeySequence.Undo, self).activated.connect(self._undo_edit)
@@ -6969,7 +6974,7 @@ class MainWindow(QMainWindow):
     def _sluit_weergave(self):
         """Maakt de weergavepagina leeg en laat het videobestand los (nodig voordat de
         mediamap van de geopende analyse verwijderd kan worden)."""
-        self.speler.sluit()
+        self.speler.release()
         self.events = []
         self.analyse_id = None
         self.analyse_schaatser_id = None
@@ -7386,7 +7391,7 @@ class MainWindow(QMainWindow):
         dan wordt die opnieuw geijkt vanaf de huidige stand (`MasterKlok.herijk`)."""
         idx = self.combo_alles_snelheid.currentIndex()
         for kant in (self.kant_links, self.kant_rechts):
-            kant.speler.combo_snelheid.setCurrentIndex(idx)   # herstart een lopende timer
+            kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
         self.klok.herijk()
 
     def _lees_eerste_frame(self, pad=None):
@@ -7456,7 +7461,7 @@ class MainWindow(QMainWindow):
 
     def _start_analyse(self):
         self._warn_backend_fallback()
-        self.speler.zet_besturing_actief(False)
+        self.speler.set_controls_active(False)
         self.btn_export.setEnabled(False)
         self._auto_toon_klaar = True          # nog niets anders geopend → resultaat straks tonen
         self._analyse_waarschuwingen = []     # meldingen uit de analyse zelf (na afloop tonen)
@@ -7543,7 +7548,7 @@ class MainWindow(QMainWindow):
         self._pending_opslag = None
         self._analyse_waarschuwingen = []      # de fout zegt al genoeg
         QMessageBox.critical(self, "Fout bij analyseren", bericht)
-        self.speler.zet_besturing_actief(False)
+        self.speler.set_controls_active(False)
 
     def _analyse_klaar(self, info, resultaten, events, analyse_id):
         if self._afsluiten:
@@ -7824,7 +7829,7 @@ class MainWindow(QMainWindow):
         return antwoord == QMessageBox.Yes
 
     def _start_batch(self, taken):
-        self.speler.zet_besturing_actief(False)
+        self.speler.set_controls_active(False)
         self.btn_export.setEnabled(False)
         self._auto_toon_klaar = False        # batch toont zelf geen resultaten
         self._zet_bezig(True)
@@ -7915,8 +7920,8 @@ class MainWindow(QMainWindow):
         self._stop_plaatsen()       # nog vóór de reset: hoort bij de vórige resultatenlijst
         self._editor_actief = False
         self._sleep = None
-        self.speler.bewerk_modus = False
-        self.speler.volgen_bevroren = False
+        self.speler.edit_mode = False
+        self.speler.follow_frozen = False
         self._undo.clear()
         self._redo.clear()
         self._handmatig.clear()
@@ -7927,7 +7932,7 @@ class MainWindow(QMainWindow):
         self._sluit_plaats_balk()
 
         # Capture heropenen, zoom resetten, besturing aan — toont nog géén frame.
-        self.speler.laad(info, resultaten, self.input_pad, self.deinterlacen)
+        self.speler.load(info, resultaten, self.input_pad, self.deinterlacen)
 
         self._vul_tabel()
         self._vul_grafiek()
@@ -7948,8 +7953,8 @@ class MainWindow(QMainWindow):
             f"{os.path.basename(self.input_pad)} — {info.w}×{info.h} @ {info.fps:.1f}fps, "
             f"{len(resultaten)} frames, {len(events)} afzetten gevonden{herkomst}")
 
-        # Pas nu tekenen: tabel en grafiek staan klaar voor de op_frame_getoond-haak.
-        self.speler.ga_naar(0)
+        # Pas nu tekenen: tabel en grafiek staan klaar voor de on_frame_shown-haak.
+        self.speler.go_to(0)
 
     # ── Tabel + grafiek vullen ───────────────────────────────────────────
     def _vul_tabel(self):
@@ -8065,8 +8070,8 @@ class MainWindow(QMainWindow):
 
     # ── Navigatie / weergave ─────────────────────────────────────────────
     def _speler_frame_getoond(self, idx):
-        """Haak van de VideoSpeler: alles wat de analysepagina aan een frame ophangt."""
-        # Wegnavigeren tijdens een plaats-reeks sluit die eerst netjes af. De idx-toets is
+        """Haak van de VideoPlayer: alles wat de analysepagina aan een frame ophangt."""
+        # Wegnavigeren tijdens een plaats-reeks release die eerst netjes af. De idx-toets is
         # nodig omdat _herbereken() zelf hertekent en dus hier terugkomt op hetzelfde frame.
         if self._plaats is not None and self._plaats['idx'] != idx:
             self._stop_plaatsen()
@@ -8108,7 +8113,7 @@ class MainWindow(QMainWindow):
         )
         self.lbl_live.setStyleSheet(f"font-weight: bold; padding-right: 10px; color: {kleur};")
 
-    # ── Skelet-editor: handles op de VideoSpeler ─────────────────────────────
+    # ── Skelet-editor: handles op de VideoPlayer ─────────────────────────────
     def _handle_straal(self):
         """Handle-/grijpradius in (geschaalde) schermpixels, evenredig met de schaatser:
         HANDLE_FRAC × torso-lengte-op-het-scherm, geklemd op [HANDLE_MIN_PX, HANDLE_MAX_PX].
@@ -8116,7 +8121,7 @@ class MainWindow(QMainWindow):
         een afstand weg), dus dit klopt op elke zoomstand en is exact consistent met het
         hittesten. Val terug op HANDLE_MAX_PX als er geen bruikbare pose/torso is."""
         if (not (0 <= self.huidige_idx < len(self.resultaten))
-                or self.speler.weergave_scaled is None):
+                or self.speler.display_scaled is None):
             return float(HANDLE_MAX_PX)
         r = self.resultaten[self.huidige_idx]
         if not (r.pose_gevonden and isinstance(r.lm, list)):
@@ -8133,8 +8138,8 @@ class MainWindow(QMainWindow):
         schouder, heup = _mid(11, 12), _mid(23, 24)   # schouder-midden → heup-midden
         if schouder is None or heup is None:
             return float(HANDLE_MAX_PX)
-        p1 = self.speler.norm_naar_widget(*schouder)
-        p2 = self.speler.norm_naar_widget(*heup)
+        p1 = self.speler.norm_to_widget(*schouder)
+        p2 = self.speler.norm_to_widget(*heup)
         torso = math.hypot(p1.x() - p2.x(), p1.y() - p2.y())
         return min(float(HANDLE_MAX_PX), max(float(HANDLE_MIN_PX), HANDLE_FRAC * torso))
 
@@ -8142,7 +8147,7 @@ class MainWindow(QMainWindow):
         """Tekent sleepbare ringen op elke zichtbare landmark van het huidige frame,
         rechtstreeks op de geschaalde pixmap (dus vaste grootte in schermpixels).
 
-        Hangt permanent als overlay_tekenaar aan de speler; de bewerk-modus-guard zit
+        Hangt permanent als overlay_drawer aan de speler; de bewerk-modus-guard zit
         daarom hier (die vlag wordt op twee plekken uitgezet — één guard is faalveilig)."""
         if not self._editor_actief:
             return
@@ -8199,15 +8204,15 @@ class MainWindow(QMainWindow):
         if not actief:
             self._stop_plaatsen()           # nooit een halve reeks achterlaten
         self._editor_actief = actief
-        self.speler.bewerk_modus = actief   # stuurt de pan-vs-editor-voorrang van de muis
+        self.speler.edit_mode = actief   # stuurt de pan-vs-editor-voorrang van de muis
         self.editor_balk.setVisible(actief)
         self._sleep = None
-        self.speler.volgen_bevroren = False
+        self.speler.follow_frozen = False
         if actief:
-            self.speler.pauzeer()
+            self.speler.pause()
             self.lbl_editor_hint.setText("Sleep een punt naar de juiste plek.")
             self._update_editor_knoppen()
-        self.speler.toon_huidig_frame()
+        self.speler.show_current_frame()
 
     def _update_editor_knoppen(self):
         bezig = self._plaats is not None
@@ -8249,14 +8254,14 @@ class MainWindow(QMainWindow):
     def _zoek_landmark(self, pos):
         """Index van de dichtstbijzijnde zichtbare landmark binnen de handle-radius
         (_handle_straal) van de muispositie (schermruimte), of None."""
-        if not self._frame_bewerkbaar(self.huidige_idx) or self.speler.weergave_scaled is None:
+        if not self._frame_bewerkbaar(self.huidige_idx) or self.speler.display_scaled is None:
             return None
         straal = self._handle_straal()      # zelfde radius als de getekende ring
         beste, beste_d2 = None, float(straal * straal)
         for j, lm in enumerate(self.resultaten[self.huidige_idx].lm):
             if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS:
                 continue
-            w = self.speler.norm_naar_widget(lm.x, lm.y)
+            w = self.speler.norm_to_widget(lm.x, lm.y)
             d2 = (w.x() - pos.x()) ** 2 + (w.y() - pos.y()) ** 2
             if d2 <= beste_d2:
                 beste, beste_d2 = j, d2
@@ -8274,7 +8279,7 @@ class MainWindow(QMainWindow):
         pos = (event.globalPosition() + QPointF(14, 10)).toPoint()
         QToolTip.showText(pos, naam, self.speler.label)
 
-    # De pan-tak (links-slepen bij zoom > 1 buiten bewerk-modus) zit in de VideoSpeler;
+    # De pan-tak (links-slepen bij zoom > 1 buiten bewerk-modus) zit in de VideoPlayer;
     # deze haken krijgen het event alleen als de speler het niet zelf heeft opgeslokt.
     def _editor_muis_druk(self, event):
         if not self._editor_actief:
@@ -8294,7 +8299,7 @@ class MainWindow(QMainWindow):
         self._sleep = {'idx': self.huidige_idx, 'j': j,
                        'start_lm': self.resultaten[self.huidige_idx].lm[j]}
         # auto-volgen bevriezen: anders verspringt de uitsnede onder de cursor
-        self.speler.volgen_bevroren = True
+        self.speler.follow_frozen = True
 
     def _editor_muis_beweeg(self, event):
         if not self._editor_actief or self._plaats is not None:
@@ -8303,28 +8308,28 @@ class MainWindow(QMainWindow):
             # geen sleep bezig → toon bij hover het lichaamsdeel onder de cursor
             self._toon_hover_naam(event)
             return
-        norm = self.speler.widget_naar_norm(event.position())
+        norm = self.speler.widget_to_norm(event.position())
         if norm is None:
             return
         nx = min(1.0, max(0.0, norm[0]))
         ny = min(1.0, max(0.0, norm[1]))
         idx, j = self._sleep['idx'], self._sleep['j']
         self._zet_landmark(idx, j, nx, ny, vis=1.0)   # live feedback; nog geen herbereken
-        self.speler.ga_naar(idx)
+        self.speler.go_to(idx)
 
     def _editor_muis_los(self, event):
         if self._plaats is not None:
             return                          # de klik is al bij het indrukken afgehandeld
         if not (self._editor_actief and self._sleep):
-            self.speler.volgen_bevroren = False
+            self.speler.follow_frozen = False
             return
         sleep, self._sleep = self._sleep, None
-        self.speler.volgen_bevroren = False
+        self.speler.follow_frozen = False
         idx, j, start_lm = sleep['idx'], sleep['j'], sleep['start_lm']
         eind = self.resultaten[idx].lm[j]
         dx, dy = eind.x - start_lm.x, eind.y - start_lm.y
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-            self.speler.ga_naar(idx)              # geen echte verplaatsing: alleen hertekenen
+            self.speler.go_to(idx)              # geen echte verplaatsing: alleen hertekenen
             return
         # Centrum terug op pre-edit zodat het hele venster gelijk begint.
         self.resultaten[idx].lm[j] = start_lm
@@ -8378,7 +8383,7 @@ class MainWindow(QMainWindow):
         if doel is None:
             self.lbl_editor_hint.setText("Elk frame heeft een skelet — niets meer te doen.")
             return
-        self.speler.ga_naar(doel)
+        self.speler.go_to(doel)
         hoeveelste, totaal = self._gat_positie(doel)
         self.lbl_editor_hint.setText(
             f"Frame {doel} — {hoeveelste} van {totaal} zonder skelet in dit gat.")
@@ -8409,7 +8414,7 @@ class MainWindow(QMainWindow):
         r.pose_gevonden = True
         # Het kader is berekend toen dit nog een gat was — op een gat > KADER_GAT_S staat de
         # automatische zoom volledig uit, precies wanneer je nauwkeurig moet werken.
-        self.speler.herbereken_kader()
+        self.speler.recompute_box()
 
         if bruikbaar:
             # Het skelet staat er; vanaf hier is dit een doodgewoon bewerkbaar frame.
@@ -8431,7 +8436,7 @@ class MainWindow(QMainWindow):
         self._plaats = {'idx': idx, 'stap': 0, 'geklikt': set(),
                         'oud_lm': oud_lm, 'oud_pose': oud_pose}
         self._herbereken()
-        self.speler.volgen_bevroren = True   # uitsnede mag niet verspringen tussen klikken
+        self.speler.follow_frozen = True   # uitsnede mag niet verspringen tussen klikken
         self.plaats_balk.setVisible(True)
         self._toon_plaats_stap()
 
@@ -8453,7 +8458,7 @@ class MainWindow(QMainWindow):
         self.lbl_editor_hint.setText(
             "Rechts slepen = beeld verschuiven, muiswiel = zoomen." + rest)
         self._update_editor_knoppen()
-        self.speler.toon_huidig_frame()
+        self.speler.show_current_frame()
 
     def _plaats_compleet(self):
         """Mag het skelet vastgelegd worden? Alleen als elk meetpunt een zichtbare positie
@@ -8471,7 +8476,7 @@ class MainWindow(QMainWindow):
         if stap >= len(PLACEMENT_ORDER):
             self.lbl_plaats.setText("Alle punten gehad — klik op ✔ Klaar.")
             return
-        norm = self.speler.widget_naar_norm(event.position())
+        norm = self.speler.widget_to_norm(event.position())
         if norm is None or not (0.0 <= norm[0] <= 1.0 and 0.0 <= norm[1] <= 1.0):
             # Niet klemmen: dat zou de knie stilzwijgend op de beeldrand leggen.
             self.lbl_editor_hint.setText("Klik binnen het beeld.")
@@ -8512,7 +8517,7 @@ class MainWindow(QMainWindow):
                            'nieuw_lm': list(self.resultaten[idx].lm), 'nieuw_pose': True,
                            'geklikt': set(plaats['geklikt'])})
         self._redo.clear()
-        self.speler.herbereken_kader()
+        self.speler.recompute_box()
         self._na_edit()
 
     def _plaats_annuleren(self):
@@ -8525,14 +8530,14 @@ class MainWindow(QMainWindow):
         r.lm, r.pose_gevonden = plaats['oud_lm'], plaats['oud_pose']
         self._handmatig.pop(idx, None)
         self._sluit_plaats_balk()
-        self.speler.herbereken_kader()
+        self.speler.recompute_box()
         self._herbereken()               # bewust niet opslaan: er is niets veranderd
         self.lbl_editor_hint.setText("Skelet plaatsen geannuleerd.")
 
     def _sluit_plaats_balk(self):
         self.plaats_balk.setVisible(False)
         self.lbl_plaats.setText("")
-        self.speler.volgen_bevroren = False
+        self.speler.follow_frozen = False
 
     def _stop_plaatsen(self):
         """Faalveilige uitgang voor elk pad dat de reeks kan onderbreken (wegnavigeren,
@@ -8571,7 +8576,7 @@ class MainWindow(QMainWindow):
         self._vul_grafiek()
         self.btn_export.setEnabled(bool(self.events))
         self._update_dekking()
-        self.speler.toon_huidig_frame()
+        self.speler.show_current_frame()
         self._update_editor_knoppen()
 
     def _update_dekking(self):
@@ -8682,7 +8687,7 @@ class MainWindow(QMainWindow):
                 self._handmatig[idx] = set(edit.get('geklikt', ()))
             else:
                 self._handmatig.pop(idx, None)
-            self.speler.herbereken_kader()   # de dekking veranderde, dus de auto-zoom ook
+            self.speler.recompute_box()   # de dekking veranderde, dus de auto-zoom ook
             return
         j = edit['j']
         for f, lm in edit[kant].items():
@@ -8756,7 +8761,7 @@ class MainWindow(QMainWindow):
 
     def _klik_op_rij(self, rij, _kolom):
         if 0 <= rij < len(self.events):
-            self.speler.ga_naar(self.events[rij].start_frame)
+            self.speler.go_to(self.events[rij].start_frame)
 
     # ── Export ───────────────────────────────────────────────────────────
     def _exporteer_csv(self):
@@ -8862,7 +8867,7 @@ class MainWindow(QMainWindow):
         self._pauzeer_alles()
         for toetsen in self._toetsen:
             toetsen.losmaken()
-        self.speler.sluit()
+        self.speler.release()
         self.kant_links.leeg()
         self.kant_rechts.leeg()
         self._ruim_knipmap_op()   # geknipte fragmenten die niet meer geanalyseerd worden
