@@ -5423,10 +5423,10 @@ def _remaining_text(seconden):
 class MainWindow(QMainWindow):
     def __init__(self, melding=None):
         super().__init__()
-        # Statusregel van het opstartscherm (of None): de opbouw hieronder duurt op een
-        # koude machine een paar seconden en dat mag te zien zijn.
+        # Status line from the splash screen (or None): the setup below takes a few
+        # seconds on a cold machine, and that's allowed to be visible.
         self._melding = melding or (lambda tekst: None)
-        self.setWindowTitle("Schaats Analyse")
+        self.setWindowTitle("SkateAnalysis")
         set_window_size(self, 1400, 820, maximize=True)
 
         self.input_pad = None
@@ -5434,68 +5434,68 @@ class MainWindow(QMainWindow):
         self.smooth_n = 5
         self.threshold = 0.015
         self.doel_punt = None
-        self.doel_kader = None       # getekend kader → kijkglas in de YOLO-backend
+        self.doel_kader = None       # drawn box -> spyglass in the YOLO backend
         self.horizon_deg = 0.0
         self.auto_horizon = False
         self.perspectief = None
         self.geen_smoothing = False
-        self.bocht_overslaan = True   # bochtframes niet analyseren/meten (checkbox in de dialoog)
-        self.deinterlacen = False     # kamfilter voor interlaced bron (per video vastgesteld)
-        # video_info / resultaten / huidige_idx wonen in self.speler (zie de properties
-        # hieronder); die wordt in _bouw_ui() aangemaakt en niets vóór die aanroep leest ze.
+        self.bocht_overslaan = True   # don't analyze/measure corner frames (checkbox in the dialog)
+        self.deinterlacen = False     # comb filter for an interlaced source (determined per video)
+        # video_info / resultaten / huidige_idx live on self.speler (see the properties
+        # below); it's created in _bouw_ui() and nothing before that call reads them.
         self.events = []
         self.worker = None
         self.batch_worker = None
-        self.bieb = None            # bibliotheekpad (gezet door _zet_bibliotheek)
-        self.lokaal = None          # de lokale bibliotheek (losse video's), zie _zet_bibliotheek
-        self._opnames = []          # fase 8: bronvideo-rijen achter de opnametabel
-        self._lokaal = {}           # pad -> 'lokaal'/'deels'/'cloud' (snelheidsproef)
-        self._lokaal_proef = None   # lopende LocalProbe-thread
-        self._knip_tmpmap = None    # tijdelijke map met zojuist geknipte fragmenten
+        self.bieb = None            # library path (set by _zet_bibliotheek)
+        self.lokaal = None          # the local library (loose videos), see _zet_bibliotheek
+        self._opnames = []          # phase 8: source-video rows behind the recordings table
+        self._lokaal = {}           # path -> 'local'/'partial'/'cloud' (speed probe)
+        self._lokaal_proef = None   # running LocalProbe thread
+        self._knip_tmpmap = None    # temp folder with the just-trimmed fragments
         self.knip_worker = None
-        self.trainer_naam = skate_db.trainer_name()  # fase 4: gaat mee als aangemaakt_door
-        self.analyse_id = None      # id van de geopende analyse in de bibliotheek
-        # Bij wie de geopende analyse hoort — nodig voor de kop op de vergelijkpagina
-        # (en als voorkeur in de analysekiezer); de DB kent alleen het id.
+        self.trainer_naam = skate_db.trainer_name()  # phase 4: passed along as aangemaakt_door
+        self.analyse_id = None      # id of the analysis currently open in the library
+        # Who the open analysis belongs to -- needed for the heading on the compare page
+        # (and as a preference in the analysis picker); the DB only knows the id.
         self.analyse_schaatser_id = None
         self.analyse_schaatser_naam = ""
-        self._pending_opslag = None # {schaatser_id, titel, instellingen} voor de worker
-        self._bezig = False         # draait er een (batch-)analyse op de achtergrond?
-        self._afsluiten = False     # venster gaat dicht: worker-slots niets meer laten doen
-        self._auto_toon_klaar = True  # mag de verse analyse bij afronden vanzelf getoond?
-        self._analyse_waarschuwingen = []   # meldingen uit de lopende analyse (na afloop tonen)
-        self._backend_gemeld = False        # is een backend-terugval al gemeld? (zie
+        self._pending_opslag = None # {schaatser_id, titel, instellingen} for the worker
+        self._bezig = False         # is a (batch) analysis running in the background?
+        self._afsluiten = False     # window is closing: worker slots should no longer act
+        self._auto_toon_klaar = True  # may the fresh analysis show itself automatically when done?
+        self._analyse_waarschuwingen = []   # messages from the running analysis (shown afterwards)
+        self._backend_gemeld = False        # has a backend fallback already been reported? (see
                                             # _warn_backend_fallback)
 
-        # Skelet-editor (fase 3) — de zoom/pan-state zit in de VideoPlayer
+        # Skeleton editor (phase 3) -- the zoom/pan state lives on the VideoPlayer
         self._editor_actief = False
-        self._sleep = None          # {'idx', 'j', 'start_lm': Landmark} tijdens een sleep
-        # Undo-items zijn getypeerd: 'sleep' verplaatst één landmark over een uitvloei-venster,
-        # 'skelet' zet een compleet handmatig geplaatst skelet neer (of weer weg).
+        self._sleep = None          # {'idx', 'j', 'start_lm': Landmark} during a drag
+        # Undo items are typed: 'sleep' moves one landmark over a blend-out window,
+        # 'skelet' places a fully manually-placed skeleton (or removes it again).
         self._undo = []
         self._redo = []
-        self._handmatig = {}        # {frame_idx: set(landmark_idx)} — alleen voor de overlay-markering
-        self._plaats = None         # lopende plaats-reeks, zie _start_plaatsen
+        self._handmatig = {}        # {frame_idx: set(landmark_idx)} -- only for the overlay marker
+        self._plaats = None         # running placement sequence, see _start_plaatsen
 
-        # De toetsafhandeling van de twee pagina's met beeld (gevuld in _bouw_ui). Als lijst,
-        # want `changeEvent` kan door Qt aangeroepen worden vóórdat het venster er staat.
+        # The key handling of the two pages with video (filled in _bouw_ui). As a list,
+        # because `changeEvent` can be called by Qt before the window even exists.
         self._toetsen = []
 
-        # Vergelijkpagina: één masterklok voor "Start alles" (zie MasterClock). De factor
-        # komt uit de gedeelde snelheidscombo, die pas in _bouw_ui ontstaat — de callable
-        # wordt pas bij het starten gelezen.
+        # Compare page: one master clock for "Start all" (see MasterClock). The factor
+        # comes from the shared speed combo, which only exists after _bouw_ui -- the
+        # callable is only read when starting.
         self.klok = MasterClock(
             self, factor=lambda: self.combo_alles_snelheid.currentData() or 1.0,
             on_done=self._stop_alles)
 
-        self._melding("Venster opbouwen...")
+        self._melding("Building window...")
         self._bouw_ui()
-        self._melding("Bibliotheek openen...")
+        self._melding("Opening library...")
         self._zet_bibliotheek(skate_db.library_path())
 
-    # De VideoPlayer is de enige eigenaar van deze drie; hier alleen doorkijkjes, zodat de
-    # bestaande editor-/tabelcode ongewijzigd blijft werken én een stille tweede kopie
-    # structureel onmogelijk is (een stray toewijzing geeft meteen een AttributeError).
+    # The VideoPlayer is the sole owner of these three; here just pass-throughs, so the
+    # existing table/editor code keeps working unchanged and a silent second copy is
+    # structurally impossible (a stray assignment immediately raises AttributeError).
     @property
     def resultaten(self):
         return self.speler.resultaten
@@ -5508,11 +5508,11 @@ class MainWindow(QMainWindow):
     def huidige_idx(self):
         return self.speler.huidige_idx
 
-    # ── UI opbouw ────────────────────────────────────────────────────────
+    # -- UI setup --------------------------------------------------------
     def _bouw_ui(self):
-        toolbar = QToolBar("Hoofd")
+        toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
-        self.actie_bibliotheek = QAction("Bibliotheek", self)
+        self.actie_bibliotheek = QAction("Library", self)
         self.actie_bibliotheek.triggered.connect(self._terug_naar_start)
         toolbar.addAction(self.actie_bibliotheek)
 
@@ -5525,15 +5525,15 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.pagina_vergelijk)
         self.stack.setCurrentWidget(self.pagina_start)
 
-        # Drie permanente statusbalk-widgets: hoeveel frames een skelet hebben (dekking), of
-        # er gespoeld wordt, en de live-status van het huidige frame. Permanent, want
-        # showMessage() overschrijft de gewone statusbalk-tekst en de dekking moet altijd
-        # afleesbaar blijven.
+        # Three permanent status-bar widgets: how many frames have a skeleton (coverage),
+        # whether scrubbing is happening, and the live status of the current frame.
+        # Permanent, because showMessage() overwrites the regular status-bar text and the
+        # coverage must always stay readable.
         self.lbl_dekking = QLabel("")
         self.lbl_dekking.setToolTip(
-            "Aantal frames met een skelet (gedetecteerd of handmatig geplaatst).\n"
-            "Frames zonder skelet breken een afzetmeting af — met '✏ Bewerken' zijn ze "
-            "handmatig aan te vullen.")
+            "Number of frames with a skeleton (detected or manually placed).\n"
+            "Frames without a skeleton break off a push measurement -- use '✏ Edit' to "
+            "fill them in by hand.")
         self.statusBar().addPermanentWidget(self.lbl_dekking)
         self.lbl_spoel = QLabel("")
         self.lbl_spoel.setStyleSheet("color: #5aaaf0; padding-right: 10px;")
@@ -5542,16 +5542,16 @@ class MainWindow(QMainWindow):
         self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px;")
         self.statusBar().addPermanentWidget(self.lbl_live)
         self.statusBar().showMessage(
-            f"Kies een schaatser en start of open een analyse.  ·  backend: {BACKEND_NAME}")
+            f"Choose a skater and start or open an analysis.  ·  backend: {BACKEND_NAME}")
 
-        # Dezelfde toetsen als in het kijk- en knipvenster, hier voor de twee pagina's met
-        # beeld. Twee losse objecten en niet één met een pagina-tak halverwege de
-        # afhandeling: op de vergelijkpagina zijn er twee spelers tegelijk te sturen en
-        # bedient spatie de masterklok (anders lopen de kanten binnen seconden uit de pas),
-        # en dat verschil hoort in de opbouw te staan.
+        # The same keys as in the view and trim windows, here for the two pages with
+        # video. Two separate objects rather than one with a page-branch halfway through
+        # the handling: on the compare page there are two players to drive at once and
+        # space controls the master clock (otherwise the two sides drift apart within
+        # seconds), and that difference belongs in the setup.
         #
-        # Beide moeten bestaan vóór de `currentChanged`-haak hieronder, want die loopt via
-        # `_pauzeer_alles` en dat stopt ook een lopende spoelactie.
+        # Both must exist before the `currentChanged` hook below, since that runs through
+        # `_pauzeer_alles`, which also stops a running scrub.
         self.toetsen_analyse = PlayerKeys(
             self, lambda: [self.speler], on_scrub=self.lbl_spoel.setText,
             active=lambda: self.stack.currentWidget() is self.pagina_analyse)
@@ -5567,15 +5567,15 @@ class MainWindow(QMainWindow):
             active=lambda: self.stack.currentWidget() is self.pagina_vergelijk)
         self._toetsen = [self.toetsen_analyse, self.toetsen_vergelijk]
 
-        # Eén haak i.p.v. bij elke setCurrentWidget-aanroep: een verlaten pagina mag niet
-        # doordecoderen op de achtergrond.
+        # One hook instead of one at every setCurrentWidget call: a page being left
+        # shouldn't keep decoding in the background.
         self.stack.currentChanged.connect(self._paginawissel)
         self._alleen_zichtbare_pagina_telt()
 
-        # Centraal = de stack + een blijvende voortgangsbalk onderin (verborgen tenzij
-        # er een analyse/batch draait). Doordat de balk buiten de stack staat, blijft ze
-        # over paginawissels heen zichtbaar en blokkeert ze het venster niet — zo kan er
-        # gebrowst worden terwijl een analyse op de achtergrond rekent.
+        # Central = the stack plus a persistent progress bar at the bottom (hidden unless
+        # an analysis/batch is running). Because the bar sits outside the stack, it stays
+        # visible across page switches and doesn't block the window -- so you can browse
+        # while an analysis is crunching in the background.
         self.voortgang_balk = self._bouw_voortgangsbalk()
         centraal = QWidget()
         cv = QVBoxLayout(centraal)
@@ -5586,18 +5586,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(centraal)
 
     def _toetsen_vergelijk_afspelen(self, play):
-        """Spatie op de vergelijkpagina bedient de masterklok, niet de twee spelers los —
-        twee losse frame-timers lopen binnen seconden uit de pas (zie `_start_alles`).
-        Spatie is afspelen/pauze en hervat dus waar de video's staan; alleen de knop
-        "Start alles" springt eerst naar de sync-punten."""
+        """Space on the compare page drives the master clock, not the two players
+        separately -- two separate frame timers drift apart within seconds (see
+        `_start_alles`). Space is play/pause and so resumes wherever the videos are;
+        only the "Start all" button jumps to the sync points first."""
         if play:
             self._start_alles(vanaf_sync=False)
         else:
             self._pauzeer_alles()
 
     def _pauzeer_alles(self):
-        """Stopt elke lopende weergave (analysepagina én beide vergelijk-spelers), inclusief
-        een lopende spoelactie. Idempotent, dus veilig om overal aan te roepen."""
+        """Stops any running playback (analysis page as well as both compare players),
+        including a running scrub. Idempotent, so safe to call from anywhere."""
         self._stop_alles()
         for toetsen in self._toetsen:
             toetsen.stop_scrubbing()
@@ -5606,29 +5606,28 @@ class MainWindow(QMainWindow):
             kant.speler.pause()
 
     def _paginawissel(self, _idx=None):
-        """Bij het verlaten van een pagina: alles pauzeren, en de bewerk-modus uitzetten —
-        de undo-sneltoetsen zijn venster-breed, dus Ctrl+Z op een andere pagina zou anders
-        een onzichtbare analyse bewerken én naar de bibliotheek wegschrijven."""
+        """When leaving a page: pause everything, and turn off edit mode -- the undo
+        shortcuts are window-wide, so Ctrl+Z on another page would otherwise edit an
+        invisible analysis and write it to the library."""
         self._pauzeer_alles()
         if self.stack.currentWidget() is not self.pagina_analyse:
             if self.btn_bewerken.isChecked():
-                self.btn_bewerken.setChecked(False)   # triggert _toggle_bewerken(False)
-            self._stop_plaatsen()                     # faalveilig: geen half skelet achterlaten
-            self.lbl_live.setText("")                 # geen stale status van een andere pagina
+                self.btn_bewerken.setChecked(False)   # triggers _toggle_bewerken(False)
+            self._stop_plaatsen()                     # fail-safe: don't leave a half skeleton
+            self.lbl_live.setText("")                 # no stale status from another page
             self.lbl_dekking.setText("")
         self._alleen_zichtbare_pagina_telt()
 
     def _alleen_zichtbare_pagina_telt(self):
-        """Laat alleen de getoonde pagina meetellen in het venster-minimum.
+        """Makes only the shown page count toward the window minimum.
 
-        Een QStackedLayout neemt het maximum over álle pagina's, ook de verborgen: de
-        startpagina is 318 px hoog, maar het hoofdvenster eiste 643 omdat de (verborgen)
-        vergelijkpagina 598 nodig heeft — en na één keer vergelijken met twee lange namen
-        bleef het venster 1489 px breed op een 1280 px-scherm, óók terug op de startpagina
-        (gemeten 12-9-2026). Een verborgen pagina op `Ignored` eist niets; bij het tonen
-        krijgt hij zijn eigen beleid terug. Het venster kan daardoor bij een paginawissel
-        gróeien (naar het minimum van de nieuwe pagina), maar niet meer voor een pagina die
-        niemand ziet."""
+        A QStackedLayout takes the maximum over ALL pages, including hidden ones: the
+        start page is 318 px tall, but the main window demanded 643 because the (hidden)
+        compare page needs 598 -- and after comparing once with two long names the window
+        stayed 1489 px wide on a 1280 px screen, even back on the start page (measured
+        12-9-2026). A hidden page on `Ignored` demands nothing; when shown it gets its own
+        policy back. The window can therefore grow on a page switch (to the new page's
+        minimum), but never for a page nobody sees."""
         huidig = self.stack.currentWidget()
         for i in range(self.stack.count()):
             pagina = self.stack.widget(i)
@@ -5639,36 +5638,36 @@ class MainWindow(QMainWindow):
         self.stack.layout().invalidate()
 
     def _bouw_startpagina(self):
-        """De bibliotheek (fase 1): links de schaatsers, rechts hun analyses.
-        Fase 8 zet daar een tweede tabblad naast: de nog te knippen opnames."""
+        """The library (phase 1): skaters on the left, their analyses on the right.
+        Phase 8 adds a second tab next to it: the recordings still to be trimmed."""
         paneel = QWidget()
         v = QVBoxLayout(paneel)
 
-        titel = QLabel("Schaatser Analyse — bibliotheek")
+        titel = QLabel("SkateAnalysis — library")
         titel.setStyleSheet("font-size: 22px; font-weight: bold; padding: 4px;")
         v.addWidget(titel)
 
-        # Twee tabbladen i.p.v. een derde kolom: de opnames horen bij niemand in het
-        # bijzonder (het is een werklijst voor het team), dus ze hangen niet aan de
-        # schaatserselectie links.
+        # Two tabs instead of a third column: the recordings don't belong to anyone in
+        # particular (it's a worklist for the team), so they don't hang off the skater
+        # selection on the left.
         self.tabs_bieb = QTabWidget()
         v.addWidget(self.tabs_bieb, stretch=1)
 
         splitter = QSplitter(Qt.Horizontal)
 
-        # Links: schaatsers.
+        # Left: skaters.
         links = QWidget()
         lv = QVBoxLayout(links)
-        lv.addWidget(QLabel("Schaatsers"))
+        lv.addWidget(QLabel("Skaters"))
         self.lijst_schaatsers = QListWidget()
         self.lijst_schaatsers.currentItemChanged.connect(lambda *_: self._vernieuw_analyses())
         lv.addWidget(self.lijst_schaatsers, stretch=1)
         rij_s = QHBoxLayout()
-        self.btn_nieuwe_schaatser = QPushButton("Nieuwe schaatser...")
+        self.btn_nieuwe_schaatser = QPushButton("New skater...")
         self.btn_nieuwe_schaatser.clicked.connect(self._nieuwe_schaatser)
-        self.btn_bewerk_schaatser = QPushButton("Bewerken...")
+        self.btn_bewerk_schaatser = QPushButton("Edit...")
         self.btn_bewerk_schaatser.clicked.connect(self._bewerk_schaatser)
-        self.btn_verwijder_schaatser = QPushButton("Verwijderen")
+        self.btn_verwijder_schaatser = QPushButton("Delete")
         self.btn_verwijder_schaatser.clicked.connect(self._verwijder_schaatser)
         for b in (self.btn_nieuwe_schaatser, self.btn_bewerk_schaatser,
                   self.btn_verwijder_schaatser):
@@ -5676,15 +5675,15 @@ class MainWindow(QMainWindow):
         lv.addLayout(rij_s)
         splitter.addWidget(links)
 
-        # Rechts: analyses van de geselecteerde schaatser (uit de events-cache).
+        # Right: analyses of the selected skater (from the events cache).
         rechts = QWidget()
         rv = QVBoxLayout(rechts)
-        rv.addWidget(QLabel("Analyses  (dubbelklik om te openen)"))
+        rv.addWidget(QLabel("Analyses  (double-click to open)"))
         self.tabel_analyses = QTableWidget(0, 4)
-        self.tabel_analyses.setHorizontalHeaderLabels(["Datum", "Titel", "Duur", ""])
+        self.tabel_analyses.setHorizontalHeaderLabels(["Date", "Title", "Duration", ""])
         kop = self.tabel_analyses.horizontalHeader()
-        # Alleen de titel rekt mee; datum/duur/knoppen krijgen precies wat ze nodig hebben,
-        # anders staan vier knoppen in een kwart van de tabelbreedte geperst.
+        # Only the title stretches; date/duration/buttons get exactly what they need,
+        # otherwise four buttons get squeezed into a quarter of the table width.
         kop.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         kop.setSectionResizeMode(1, QHeaderView.Stretch)
         kop.setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -5695,22 +5694,23 @@ class MainWindow(QMainWindow):
             lambda *_: self._open_analyse_uit_bibliotheek())
         rv.addWidget(self.tabel_analyses, stretch=1)
         rij_a = QHBoxLayout()
-        self.btn_nieuwe_analyse = QPushButton("Nieuwe analyse...")
+        self.btn_nieuwe_analyse = QPushButton("New analysis...")
         self.btn_nieuwe_analyse.clicked.connect(self._nieuwe_analyse)
-        self.btn_batch_analyse = QPushButton("Batch-analyse...")
+        self.btn_batch_analyse = QPushButton("Batch analysis...")
         self.btn_batch_analyse.setToolTip(
-            "Meerdere video's tegelijk kiezen en achter elkaar analyseren. Je stelt vooraf "
-            "per video de doelschaatser en horizon in; daarna draait de hele rij onbewaakt.")
-        # lambda: `clicked` geeft anders zijn `checked`-bool door als `voorgevuld`.
+            "Choose several videos at once and analyze them one after another. You set "
+            "the target skater and horizon per video up front; then the whole row runs "
+            "unattended.")
+        # lambda: `clicked` would otherwise pass its `checked` bool as `voorgevuld`.
         self.btn_batch_analyse.clicked.connect(lambda: self._nieuwe_batch_analyse())
-        self.btn_vergelijk = QPushButton("Vergelijk schaatsers...")
+        self.btn_vergelijk = QPushButton("Compare skaters...")
         self.btn_vergelijk.setToolTip(
-            "Twee opgeslagen analyses naast elkaar zetten. Elke video is los te bedienen;\n"
-            "met een sync-punt per kant en 'Start alles' lopen ze vanaf dezelfde fase\n"
-            "van de slag tegelijk.")
+            "Put two saved analyses side by side. Each video is controlled separately;\n"
+            "with a sync point per side and 'Start all' they run from the same phase\n"
+            "of the stroke at the same time.")
         self.btn_vergelijk.clicked.connect(self._vergelijk_schaatsers)
-        # Openen/Info/Hernoemen/Verwijderen horen bij één analyse en staan daarom in de rij
-        # zelf (zie _maak_rij_knoppen); hieronder blijven alleen de bibliotheek-brede acties.
+        # Open/Info/Rename/Delete belong to one analysis and therefore sit in the row
+        # itself (see _maak_rij_knoppen); below stay only the library-wide actions.
         for b in (self.btn_nieuwe_analyse, self.btn_batch_analyse, self.btn_vergelijk):
             rij_a.addWidget(b)
         rij_a.addStretch(1)
@@ -5718,21 +5718,21 @@ class MainWindow(QMainWindow):
         splitter.addWidget(rechts)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
-        self.tabs_bieb.addTab(splitter, "Schaatsers && analyses")
-        self.tabs_bieb.addTab(self._bouw_opnamespaneel(), "Opnames")
+        self.tabs_bieb.addTab(splitter, "Skaters && analyses")
+        self.tabs_bieb.addTab(self._bouw_opnamespaneel(), "Recordings")
 
-        # Onderin, bovenste rij: vernieuwen + trainersnaam (delen via een cloudmap, fase 4).
+        # At the bottom, top row: refresh + trainer name (sharing via a cloud folder, phase 4).
         rij_deel = QHBoxLayout()
-        knop_vernieuw = QPushButton("Vernieuwen")
+        knop_vernieuw = QPushButton("Refresh")
         knop_vernieuw.setToolTip(
-            "Lees de bibliotheek opnieuw in — toont analyses die collega's intussen aan de\n"
-            "gedeelde cloudmap hebben toegevoegd, zonder de app te herstarten.")
+            "Re-read the library -- shows analyses that colleagues have meanwhile added\n"
+            "to the shared cloud folder, without restarting the app.")
         knop_vernieuw.clicked.connect(self._vernieuw_bibliotheek)
         rij_deel.addWidget(knop_vernieuw)
-        knop_naam = QPushButton("Jouw naam...")
+        knop_naam = QPushButton("Your name...")
         knop_naam.setToolTip(
-            "Je naam wordt bij nieuwe analyses bewaard (aangemaakt door), zodat in een\n"
-            "gedeelde bibliotheek zichtbaar is wie welke analyse maakte.")
+            "Your name is stored with new analyses (created by), so in a shared\n"
+            "library it's visible who made which analysis.")
         knop_naam.clicked.connect(self._kies_trainer_naam)
         rij_deel.addWidget(knop_naam)
         self.lbl_trainer = QLabel("")
@@ -5742,18 +5742,17 @@ class MainWindow(QMainWindow):
         v.addLayout(rij_deel)
         self._toon_trainer_naam()
 
-        # Onderste rij: de bibliotheekmap (deelbaar via een cloudmap, zie ROADMAP fase 4).
+        # Bottom row: the library folder (shareable via a cloud folder, see ROADMAP phase 4).
         rij_b = QHBoxLayout()
-        knop_bieb = QPushButton("Bibliotheekmap...")
+        knop_bieb = QPushButton("Library folder...")
         knop_bieb.setToolTip(
-            "De map met de database en alle video's/landmarks. Zet deze map in een\n"
-            "gesynchroniseerde cloudmap (Google Drive/OneDrive/Dropbox) om de\n"
-            "bibliotheek met andere trainers te delen; elke trainer wijst dezelfde\n"
-            "map aan.")
+            "The folder with the database and all videos/landmarks. Put this folder in\n"
+            "a synced cloud folder (Google Drive/OneDrive/Dropbox) to share the\n"
+            "library with other trainers; each trainer points at the same folder.")
         knop_bieb.clicked.connect(self._kies_bibliotheekmap)
         rij_b.addWidget(knop_bieb)
-        # Afkorten in het midden: een lang Drive-pad maakte de startpagina anders 1039 px
-        # breed (de mapnaam aan het eind is het informatieve deel, dus die blijft staan).
+        # Elide in the middle: a long Drive path otherwise made the start page 1039 px
+        # wide (the folder name at the end is the informative part, so that stays put).
         self.lbl_bieb = ElideLabel("", Qt.ElideMiddle)
         self.lbl_bieb.setStyleSheet("color: #888;")
         rij_b.addWidget(self.lbl_bieb, stretch=1)
@@ -5762,116 +5761,120 @@ class MainWindow(QMainWindow):
         return paneel
 
     def _bouw_opnamespaneel(self):
-        """Fase 8: de werklijst met ruwe opnames uit `<bibliotheek>/opnames/`.
+        """Phase 8: the worklist of raw recordings from `<library>/opnames/`.
 
-        De **map** is de waarheid over welke bestanden er zijn (bij elke keer openen en bij
-        'Vernieuwen' opnieuw gescand), de **database** over wat wij ervan weten: status,
-        notitie en welke stukken al geanalyseerd zijn. Omdat de map net als de rest van de
-        bibliotheek in de gedeelde Drive staat, is dit geen persoonlijk lijstje maar een
-        werklijst voor het team."""
+        The **folder** is the truth about which files exist (rescanned every time it's
+        opened and on 'Refresh'), the **database** about what we know of them: status,
+        note, and which parts have already been analyzed. Because the folder, like the
+        rest of the library, lives in the shared Drive, this isn't a personal list but a
+        worklist for the team."""
         paneel = QWidget()
         v = QVBoxLayout(paneel)
 
         uitleg = QLabel(
-            "Ruwe trainingsopnames die nog geknipt moeten worden. Zet ze in de map "
-            "<b>opnames</b> in de bibliotheek; ze verschijnen hier vanzelf (of na "
-            "'Vernieuwen').<br>Dubbelklik op een opname om er fragmenten uit te knippen, "
-            "of open hem met <b>Bekijken</b> om alleen te kijken — volledig scherm, geen "
-            "analyse; selecteer <b>twee</b> rijen (Ctrl+klik) om ze naast elkaar te zien."
-            "<br>Wil je een video bekijken die hier niet in staat, waar hij ook op "
-            "deze pc staat? Gebruik <b>Nieuwe video bekijken</b>; hij komt daarna als "
-            "<i>losse video</i> onderaan deze lijst — alleen op deze pc, niet bij collega's. "
-            "Met <b>Van camera naar bibliotheek</b> kopieer je hele opnames van de camera "
-            "hierheen, mét voortgangsbalk.")
+            "Raw training recordings still to be trimmed. Put them in the "
+            "<b>opnames</b> folder in the library; they'll show up here automatically "
+            "(or after 'Refresh').<br>Double-click a recording to trim fragments from "
+            "it, or open it with <b>View</b> to just watch -- full screen, no "
+            "analysis; select <b>two</b> rows (Ctrl+click) to see them side by side."
+            "<br>Want to view a video that isn't listed here, wherever it may be on "
+            "this PC? Use <b>View new video</b>; it then appears as a "
+            "<i>loose video</i> at the bottom of this list -- only on this PC, not for "
+            "colleagues. With <b>From camera to library</b> you copy whole recordings from "
+            "the camera here, with a progress bar.")
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
         self.tabel_opnames = QTableWidget(0, 6)
         self.tabel_opnames.setHorizontalHeaderLabels(
-            ["Opname", "Duur", "Op deze pc", "Status", "Fragmenten / punten", "Notitie"])
+            ["Recording", "Duration", "On this PC", "Status", "Fragments / points", "Note"])
         kop = self.tabel_opnames.horizontalHeader()
         kop.setSectionResizeMode(0, QHeaderView.Stretch)
         for k in (1, 2, 3, 4):
             kop.setSectionResizeMode(k, QHeaderView.ResizeToContents)
         kop.setSectionResizeMode(OPNAME_KOL_NOTITIE, QHeaderView.Stretch)
         self.tabel_opnames.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # Twee rijen mogen tegelijk geselecteerd zijn: 'Bekijken' zet ze dan naast elkaar.
-        # Knippen, status en notitie blijven op de huidige rij werken.
+        # Two rows may be selected at once: 'View' then puts them side by side.
+        # Trimming, status and note keep working on the current row.
         self.tabel_opnames.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        # Dubbelklik = knippen, behalve op de notitie: daar is dubbelklik al 'bewerken'
-        # en hoort niet ook nog het knipvenster open te gaan.
+        # Double-click = trim, except on the note: there double-click is already 'edit'
+        # and shouldn't also open the trim window.
         self.tabel_opnames.cellDoubleClicked.connect(self._opname_dubbelklik)
-        # De notitie is ter plekke te bewerken; alleen die kolom is editeerbaar (zie
-        # _vul_opnames, dat de vlaggen per item zet).
+        # The note can be edited in place; only that column is editable (see
+        # _vul_opnames, which sets the flags per item).
         self.tabel_opnames.itemChanged.connect(self._opname_notitie_gewijzigd)
-        self._vullen_opnames = False   # onderdrukt itemChanged tijdens het opbouwen
+        self._vullen_opnames = False   # suppresses itemChanged while building
         v.addWidget(self.tabel_opnames, stretch=1)
 
-        # Een afbrekende balk: vijf knoppen op één regel eisen ~900 px en tilden de
-        # startpagina van 700 naar 897 px minimumbreedte (gemeten met schaats_schermtest);
-        # afgebroken kost een knop erbij hoogstens een regel.
+        # A wrapping bar: five buttons on one line demand ~900 px and pushed the start
+        # page's minimum width from 700 to 897 px (measured with schaats_schermtest);
+        # wrapping costs at most one extra line per added button.
         rij = WrapBar()
-        self.btn_bekijken = QPushButton("👁 Bekijken (volledig scherm)...")
+        self.btn_bekijken = QPushButton("👁 View (full screen)...")
         self.btn_bekijken.setToolTip(
-            "Speelt de gekozen opname af zoals hij uit de camera komt: geen detectie, geen\n"
-            "tracking, alleen beeld. Vertragen, inzoomen, met . en , op 6× door- en\n"
-            "terugspoelen, en punten zetten die bewaard blijven.\n"
-            "Twee rijen geselecteerd (Ctrl+klik)? Dan komen ze naast elkaar, met een\n"
-            "sync-punt per video en 'Start alles' om ze synchroon af te spelen.")
+            "Plays the chosen recording back exactly as it came from the camera: no\n"
+            "detection, no tracking, just video. Slow down, zoom in, scrub forward/back\n"
+            "at 6x with . and ,, and set points that are kept.\n"
+            "Two rows selected (Ctrl+click)? Then they appear side by side, with a\n"
+            "sync point per video and 'Start all' to play them in sync.")
         self.btn_bekijken.clicked.connect(self._bekijk_opname)
         rij.addWidget(self.btn_bekijken)
-        self.btn_knippen = QPushButton("✂ Fragmenten knippen...")
+        self.btn_knippen = QPushButton("✂ Trim fragments...")
         self.btn_knippen.setToolTip(
-            "Open de gekozen opname, markeer de bruikbare stukken (start/stop) en laat ze\n"
-            "daarna in één keer analyseren — dezelfde batch-flow als 'Batch-analyse...'.")
+            "Open the chosen recording, mark the usable parts (start/stop), and then "
+            "have them\nanalyzed in one go -- the same batch flow as 'Batch analysis...'.")
         self.btn_knippen.clicked.connect(self._knip_opname)
         rij.addWidget(self.btn_knippen)
-        knop_map = QPushButton("Map met opnames openen")
-        knop_map.setToolTip("Opent de map waar de ruwe opnames in horen te staan.")
+        knop_map = QPushButton("Open recordings folder")
+        knop_map.setToolTip("Opens the folder where the raw recordings belong.")
         knop_map.clicked.connect(self._open_opnamesmap)
         rij.addWidget(knop_map)
-        self.btn_losse_video = QPushButton("🎬 Nieuwe video bekijken...")
+        self.btn_losse_video = QPushButton("🎬 View new video...")
         self.btn_losse_video.setToolTip(
-            "Bekijk een video die ergens anders op deze pc staat — net van de camera\n"
-            "gehaald, van een collega gekregen — zonder hem eerst in de bibliotheek te\n"
-            "zetten. Hetzelfde kijkvenster: volledig scherm, vertragen, inzoomen, spoelen\n"
-            "en punten die bewaard blijven — en in het venster kun je er een tweede video\n"
-            "naast zetten. Er wordt niets geanalyseerd en niets gekopieerd;\n"
-            "de video komt als 'losse video' onderaan de lijst hierboven, zodat je hem de\n"
-            "volgende keer daar terugvindt. Dat wordt alleen op deze pc onthouden — het pad\n"
-            "komt niet in de gedeelde bibliotheek en collega's zien hem niet.")
+            "View a video that's somewhere else on this PC -- just taken from the\n"
+            "camera, received from a colleague -- without first putting it in the\n"
+            "library. The same view window: full screen, slow down, zoom, scrub, and\n"
+            "points that are kept -- and in the window you can put a second video\n"
+            "next to it. Nothing is analyzed and nothing is copied;\n"
+            "the video shows up as a 'loose video' at the bottom of the list above, so "
+            "you\n"
+            "find it there again next time. That's only remembered on this PC -- the "
+            "path\n"
+            "doesn't go into the shared library and colleagues won't see it.")
         self.btn_losse_video.clicked.connect(self._bekijk_losse_video)
         rij.addWidget(self.btn_losse_video)
-        self.btn_importeer = QPushButton("📥 Van camera naar bibliotheek...")
+        self.btn_importeer = QPushButton("📥 From camera to library...")
         self.btn_importeer.setToolTip(
-            "Kopieert hele opnames van de camera of geheugenkaart naar de map 'opnames' in\n"
-            "de bibliotheek, met een voortgangsbalk en de resterende tijd — zodat dat niet\n"
-            "buiten de app in de Verkenner hoeft. Ze staan daarna in deze lijst en Google\n"
-            "Drive zet ze vanzelf op de gedeelde schijf.\n"
-            "Op een camcorder staan de opnames meestal in PRIVATE\\AVCHD\\BDMV\\STREAM\n"
-            "(bestanden als 00005.MTS). Een bestand dat er al staat wordt nooit overschreven.")
+            "Copies whole recordings from the camera or memory card to the 'opnames'\n"
+            "folder in the library, with a progress bar and remaining time -- so that "
+            "doesn't\n"
+            "have to happen outside the app in Explorer. They then show up in this list "
+            "and\n"
+            "Google Drive uploads them by itself.\n"
+            "On a camcorder the recordings are usually in PRIVATE\\AVCHD\\BDMV\\STREAM\n"
+            "(files like 00005.MTS). A file that's already there is never overwritten.")
         self.btn_importeer.clicked.connect(self._importeer_van_camera)
         rij.addWidget(self.btn_importeer)
         v.addWidget(rij)
         return paneel
 
     def _vernieuw_opnames(self, selecteer=None):
-        """Scant `opnames/` en vult de tabel. Schrijft alleen als er echt nieuwe bestanden
-        zijn (synchroniseer_bronmap), zodat de gedeelde DB niet bij elke app-start van elke
-        trainer wordt aangeraakt.
+        """Scans `opnames/` and fills the table. Only writes if there really are new
+        files (sync_source_dir), so the shared DB isn't touched at every app start of
+        every trainer.
 
-        Losse video's van deze pc ("Nieuwe video bekijken") komen eronder, uit de **lokale**
-        bibliotheek (`_lokale_opnames`), gemarkeerd en met het volledige pad in de tooltip:
-        het bestand staat buiten de bibliotheek, dus de naam alleen zegt niet waar hij is.
-        De rij-identiteit is `_opname_sleutel` (bibliotheek + id), want de id's van de
-        twee databases overlappen. `selecteer` = de sleutel die na het vullen geselecteerd
-        moet zijn (de zojuist geopende video), anders blijft de selectie waar hij was."""
+        Loose videos from this PC ("View new video") appear below it, from the
+        **local** library (`_lokale_opnames`), marked and with the full path in the
+        tooltip: the file is outside the library, so the name alone doesn't say where it
+        is. Row identity is `_opname_sleutel` (library + id), since the ids of the two
+        databases overlap. `selecteer` = the key that should be selected after filling
+        (the video just opened); otherwise the selection stays where it was."""
         try:
             skate_db.sync_source_dir(self.bieb)
             opnames = skate_db.list_source_videos(self.bieb)
         except Exception as e:
             self.tabel_opnames.setRowCount(0)
-            self.statusBar().showMessage(f"Opnames konden niet gelezen worden: {e}", 6000)
+            self.statusBar().showMessage(f"Could not read recordings: {e}", 6000)
             return
         opnames += self._lokale_opnames()
         self._opnames = opnames
@@ -5882,23 +5885,23 @@ class MainWindow(QMainWindow):
             for rij, b in enumerate(opnames):
                 ontbreekt = b["sync"] == "ontbreekt"
                 naam = QTableWidgetItem(
-                    b["naam"] + ("  (losse video)" if b["extern"] else "")
-                    + ("  (bestand niet gevonden)" if ontbreekt else ""))
+                    b["naam"] + ("  (loose video)" if b["extern"] else "")
+                    + ("  (file not found)" if ontbreekt else ""))
                 naam.setData(Qt.UserRole, _opname_sleutel(b))
                 naam.setFlags(naam.flags() & ~Qt.ItemIsEditable)
                 uitleg = []
                 if b["extern"]:
                     uitleg.append(
-                        f"Losse video, geopend via 'Nieuwe video bekijken':\n{b['pad']}\n"
-                        "Alleen op deze pc onthouden (met de punten) — niet in de gedeelde "
-                        "bibliotheek, dus collega's zien hem niet. Verdwijnt uit de lijst "
-                        "zolang het bestand er niet staat.")
+                        f"Loose video, opened via 'View new video':\n{b['pad']}\n"
+                        "Only remembered on this PC (with the points) -- not in the shared "
+                        "library, so colleagues won't see it. Disappears from the list as "
+                        "long as the file isn't there.")
                 if b["bijgewerkt_door"]:
-                    uitleg.append(f"Status gezet door {b['bijgewerkt_door']}")
+                    uitleg.append(f"Status set by {b['bijgewerkt_door']}")
                 if ontbreekt:
                     naam.setForeground(QColor(150, 150, 150))
                 elif b["sync"] == "onvolledig":
-                    uitleg.append("De cloudsync is dit bestand nog aan het downloaden.")
+                    uitleg.append("The cloud sync is still downloading this file.")
                 if uitleg:
                     naam.setToolTip("\n\n".join(uitleg))
                 self.tabel_opnames.setItem(rij, 0, naam)
@@ -5909,8 +5912,9 @@ class MainWindow(QMainWindow):
                 duur.setFlags(duur.flags() & ~Qt.ItemIsEditable)
                 self.tabel_opnames.setItem(rij, 1, duur)
 
-                # De status zet je zélf: er wordt nooit automatisch iets op 'klaar' gezet,
-                # want het programma kan niet weten of jij een opname af vindt.
+                # You set the status yourself: nothing is ever automatically set to
+                # 'done', since the program can't know whether you consider a recording
+                # finished.
                 combo = QComboBox()
                 combo.addItems(skate_db.SOURCE_STATUSES)
                 idx = combo.findText(b["status"])
@@ -5922,15 +5926,15 @@ class MainWindow(QMainWindow):
                 n_frag, n_sch = b["aantal_fragmenten"], b["aantal_schaatsers"]
                 n_pt = b.get("aantal_punten", 0)
                 telling = QTableWidgetItem(
-                    f"{n_frag} fragment{'en' if n_frag != 1 else ''}"
-                    + (f" · {n_sch} schaatser{'s' if n_sch != 1 else ''}" if n_frag else "")
-                    + (f" · {n_pt} punt{'en' if n_pt != 1 else ''}" if n_pt else ""))
+                    f"{n_frag} fragment{'s' if n_frag != 1 else ''}"
+                    + (f" · {n_sch} skater{'s' if n_sch != 1 else ''}" if n_frag else "")
+                    + (f" · {n_pt} point{'s' if n_pt != 1 else ''}" if n_pt else ""))
                 telling.setFlags(telling.flags() & ~Qt.ItemIsEditable)
                 self.tabel_opnames.setItem(rij, OPNAME_KOL_TELLING, telling)
 
                 notitie = QTableWidgetItem(b["notitie"] or "")
-                notitie.setToolTip("Dubbelklik om te bewerken (bv. 'training 3 aug, "
-                                   "tempo-serie').")
+                notitie.setToolTip("Double-click to edit (e.g. 'training Aug 3, "
+                                   "tempo series').")
                 self.tabel_opnames.setItem(rij, OPNAME_KOL_NOTITIE, notitie)
 
                 self._zet_lokaal_cel(rij, self._lokaal.get(b["pad"]))
@@ -5942,21 +5946,21 @@ class MainWindow(QMainWindow):
             self.tabel_opnames.selectRow(gevraagd)
             self.tabel_opnames.scrollToItem(self.tabel_opnames.item(gevraagd, 0))
         elif opnames and self.tabel_opnames.currentRow() < 0:
-            self.tabel_opnames.selectRow(0)   # 'Knippen...' werkt dan meteen
-        self.tabs_bieb.setTabText(1, f"Opnames ({len(opnames)})" if opnames else "Opnames")
+            self.tabel_opnames.selectRow(0)   # so 'Trim...' works right away
+        self.tabs_bieb.setTabText(1, f"Recordings ({len(opnames)})" if opnames else "Recordings")
         self._start_lokaal_proef(opnames)
 
     def _lokale_opnames(self):
-        """De losse video's van deze pc uit de lokale bibliotheek, voor onder de werklijst.
+        """The loose videos from this PC out of the local library, for under the worklist.
 
-        Eerst de opruiming (`verhuis_losse_videos`): wat een oudere versie van de app nog
-        met een absoluut pad in de gedeelde database zette, gaat mét punten naar de lokale —
-        de gebruiker wil die paden niet in de Drive hebben, en een collega zag er alleen
-        "bestand niet gevonden" van. Een losse video waarvan het bestand er (nu) niet is
-        wordt **niet getoond** maar ook niet gewist: een USB-stick die even niet in zit of
-        een hernoemd bestand mag de punten niet kosten, en zo'n rij in de lijst laten staan
-        is precies waar niemand op zit te wachten. Faalt het lezen, dan alleen de werklijst —
-        de gedeelde bibliotheek mag niet stranden op de lokale."""
+        First the cleanup (`migrate_loose_videos`): what an older version of the app put
+        into the shared database with an absolute path moves, with its points, to the
+        local one -- the user doesn't want those paths in the Drive, and a colleague only
+        ever saw "file not found" from it. A loose video whose file is (now) not there
+        is **not shown** but also not deleted: a USB stick that's momentarily unplugged
+        or a renamed file shouldn't cost the points, and leaving such a row in the list
+        is exactly what nobody wants. If reading fails, only the worklist -- the shared
+        library must not get stuck on the local one."""
         if self.lokaal is None:
             return []
         try:
@@ -5964,7 +5968,7 @@ class MainWindow(QMainWindow):
             return [b for b in skate_db.list_source_videos(self.lokaal, extern=True)
                     if b["sync"] != "ontbreekt"]
         except Exception as e:
-            self.statusBar().showMessage(f"Losse video's konden niet gelezen worden: {e}",
+            self.statusBar().showMessage(f"Could not read loose videos: {e}",
                                          6000)
             return []
 
@@ -5976,8 +5980,8 @@ class MainWindow(QMainWindow):
         return self._opname_bij_sleutel(item.data(Qt.UserRole) if item else None)
 
     def _geselecteerde_opnames(self):
-        """Alle geselecteerde rijen (op rijvolgorde) als bron-dicts — voor 'Bekijken', dat
-        er twee naast elkaar kan zetten."""
+        """All selected rows (in row order) as source dicts -- for 'View', which can put
+        two of them side by side."""
         rijen = sorted({idx.row() for idx in self.tabel_opnames.selectedIndexes()})
         bronnen = []
         for rij in rijen:
@@ -5988,18 +5992,18 @@ class MainWindow(QMainWindow):
         return bronnen
 
     def _opname_bij_sleutel(self, sleutel):
-        """De bron-dict achter een tabelrij (`Qt.UserRole` van de naamcel), of None."""
+        """The source dict behind a table row (`Qt.UserRole` of the name cell), or None."""
         if sleutel is None:
             return None
         return next((b for b in getattr(self, "_opnames", [])
                      if _opname_sleutel(b) == tuple(sleutel)), None)
 
     def _start_lokaal_proef(self, opnames):
-        """Laat op de achtergrond meten welke opnames op deze pc staan.
+        """Measures in the background which recordings are on this PC.
 
-        Alleen voor bestanden die er zijn: bij 'ontbreekt' zegt de sync-check het al. Een
-        lopende meting wordt afgebroken — na een verversing kunnen de rijen anders zijn, en
-        een uitkomst van een oude lijst hoort niet meer in de tabel."""
+        Only for files that exist: for 'missing' the sync check already says so. A
+        running measurement is aborted -- after a refresh the rows may differ, and a
+        result from an old list no longer belongs in the table."""
         self._stop_lokaal_proef()
         paden = [b["pad"] for b in opnames if b["sync"] != "ontbreekt"]
         if not paden:
@@ -6009,8 +6013,8 @@ class MainWindow(QMainWindow):
         self._lokaal_proef.start()
 
     def _stop_lokaal_proef(self):
-        """Breekt een lopende meting af. `wait` mag hier: de thread controleert de vlag
-        tussen twee opnames door en één monster duurt hooguit een seconde."""
+        """Aborts a running measurement. `wait` is fine here: the thread checks the flag
+        between two recordings and one sample takes at most a second."""
         proef = self._lokaal_proef
         self._lokaal_proef = None
         if proef is not None and proef.isRunning():
@@ -6018,7 +6022,7 @@ class MainWindow(QMainWindow):
             proef.wait(3000)
 
     def _lokaal_gemeten(self, pad, status):
-        """Eén uitkomst binnen: onthouden en de cel bijwerken (de rij kan intussen weg zijn)."""
+        """One result in: remember it and update the cell (the row may meanwhile be gone)."""
         self._lokaal[pad] = status
         for rij, b in enumerate(self._opnames):
             if b["pad"] == pad:
@@ -6028,10 +6032,10 @@ class MainWindow(QMainWindow):
                 return
 
     def _zet_lokaal_cel(self, rij, status):
-        """Vult de kolom 'Op deze pc'. Zonder uitkomst een streepje: de meting loopt nog, en
-        'nee' zou dan een bewering zijn die we nog niet kunnen doen."""
+        """Fills the 'On this PC' column. Without a result yet, a dash: the measurement is
+        still running, and 'no' would then be a claim we can't make yet."""
         tekst, kleur, uitleg = LOKAAL_WEERGAVE.get(
-            status, ("—", QColor(150, 150, 150), "De snelheidsproef loopt nog."))
+            status, ("—", QColor(150, 150, 150), "The speed probe is still running."))
         cel = QTableWidgetItem(tekst)
         cel.setFlags(cel.flags() & ~Qt.ItemIsEditable)
         cel.setForeground(kleur)
@@ -6045,7 +6049,7 @@ class MainWindow(QMainWindow):
             skate_db.edit_source_video(bron["bieb"], bron["id"], status=status,
                                         bijgewerkt_door=self.trainer_naam)
         except Exception as e:
-            QMessageBox.warning(self, "Opname", f"Status opslaan mislukte:\n{e}")
+            QMessageBox.warning(self, "Recording", f"Saving the status failed:\n{e}")
             return
         bron["status"] = status
         self.statusBar().showMessage(f"Status → {status}", 3000)
@@ -6065,40 +6069,40 @@ class MainWindow(QMainWindow):
             skate_db.edit_source_video(bron["bieb"], bron["id"], notitie=item.text(),
                                         bijgewerkt_door=self.trainer_naam)
         except Exception as e:
-            QMessageBox.warning(self, "Opname", f"Notitie opslaan mislukte:\n{e}")
+            QMessageBox.warning(self, "Recording", f"Saving the note failed:\n{e}")
 
     def _opname_beschikbaar(self, bron):
-        """Staat het bestand er, en helemaal? Meldt zelf wat eraan schort en geeft False.
+        """Is the file there, and complete? Reports itself what's wrong and returns False.
 
-        Zowel het knipvenster als het kijkvenster openen de opname rechtstreeks van schijf.
-        In een gedeelde cloudmap is een opname van een half uur minutenlang onderweg, en dan
-        is één nette melding beter dan een venster dat op een half bestand stukloopt."""
+        Both the trim window and the view window open the recording directly from disk.
+        In a shared cloud folder a half-hour recording is on its way for minutes, and then
+        one clean message beats a window that crashes on a half file."""
         if bron["sync"] == "ontbreekt":
             QMessageBox.warning(
-                self, "Opname niet gevonden",
-                f"Het bestand staat niet (meer) op schijf:\n{bron['pad']}\n\n"
-                "Is de bibliotheek een gedeelde cloudmap, dan is de opname mogelijk nog niet "
-                "gesynchroniseerd.")
+                self, "Recording not found",
+                f"The file is no longer on disk:\n{bron['pad']}\n\n"
+                "If the library is a shared cloud folder, the recording may not have "
+                "synced yet.")
             return False
         if bron["sync"] == "onvolledig":
             QMessageBox.warning(
-                self, "Opname wordt nog gedownload",
-                f"'{bron['naam']}' is op deze pc nog kleiner dan bij de collega die hem "
-                "toevoegde — de cloudsync is er nog mee bezig.\n\n"
-                "Probeer het opnieuw zodra de download klaar is.")
+                self, "Recording still downloading",
+                f"'{bron['naam']}' is on this PC still smaller than at the colleague who "
+                "added it -- the cloud sync is still working on it.\n\n"
+                "Try again once the download is finished.")
             return False
         if not self._waarschuw_niet_lokaal(bron):
             return False
-        # Nu vaststellen, zodat zowel het kijkvenster als het knipvenster het antwoord al
-        # heeft en er niet halverwege een meting van een paar seconden tussen valt.
+        # Determine this now, so both the view window and the trim window already have
+        # the answer and there's no measurement of a few seconds partway through.
         self._bron_interlaced(bron)
         return True
 
     def _bron_interlaced(self, bron):
-        """Is deze opname interlaced (kamtanden)? Eén keer meten per opname en het antwoord
-        in de bibliotheek bewaren: het kost een paar seconden — op een streaming Drive meer —
-        terwijl het antwoord nooit verandert. Lukt het meten niet, dan niet filteren: liever
-        het ruwe beeld dan pixels aanraken op grond van een mislukte meting."""
+        """Is this recording interlaced (combing)? Measure once per recording and store
+        the answer in the library: it costs a few seconds -- more on a streaming Drive --
+        while the answer never changes. If the measurement fails, don't filter: better
+        the raw image than touching pixels based on a failed measurement."""
         if bron.get("interlaced") is not None:
             return bool(bron["interlaced"])
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -6112,28 +6116,27 @@ class MainWindow(QMainWindow):
             if bron.get("id") is not None:
                 skate_db.set_source_interlaced(bron["bieb"], bron["id"], uitkomst)
         except Exception:
-            pass                      # meten lukte; alleen het onthouden niet
+            pass                      # measuring worked; only remembering it didn't
         bron["interlaced"] = 1 if uitkomst else 0
         return uitkomst
-
     def _waarschuw_niet_lokaal(self, bron):
-        """Waarschuwt als de opname niet offline op deze pc staat; True = doorgaan.
+        """Warns if the recording isn't stored offline on this PC; True = go ahead.
 
-        Het bestand is er wél — de cloudmap laat hem gewoon zien — maar het beeld komt
-        er per stukje overheen. Gemeten op deze bibliotheek (24 aug 2026, Google Drive
-        in streaming-stand): één sprong in het knipvenster haalde ~40 MB op en kostte
-        5 tot 20 s, tegen 30-120 ms als dezelfde opname lokaal staat. Dat valt niet met
-        code te verhelpen — de speler springt al gericht i.p.v. door te spoelen (zie
-        SEEK_THRESHOLD_FRAMES), en die 40 MB is wat ffmpeg nodig heeft om in een MPEG-TS
-        zonder index het juiste tijdstip te vinden. Het enige zinnige is het zéggen,
-        vóórdat iemand denkt dat het programma hangt.
+        The file IS there -- the cloud folder just shows it -- but the image arrives
+        piece by piece. Measured on this library (24 Aug 2026, Google Drive in streaming
+        mode): one jump in the trim window fetched ~40 MB and took 5 to 20 s, versus
+        30-120 ms when the same recording is local. That can't be fixed in code -- the
+        player already seeks precisely instead of scrubbing through (see
+        SEEK_THRESHOLD_FRAMES), and those 40 MB are what ffmpeg needs to find the right
+        moment in an MPEG-TS without an index. The only sensible thing is to say so,
+        before anyone thinks the program has hung.
 
-        Doorgaan mag: soms wil je alleen even het begin zien, en wat je al bekeken hebt
-        zit in de cloudcache en is daarna wél meteen terug."""
-        # De cache is op pad gesleuteld, dus ook een losse video die niet geregistreerd kon
-        # worden (geen id) heeft er gewoon zijn eigen plek in.
+        Continuing is allowed: sometimes you just want to see the start, and whatever
+        you've already viewed sits in the cloud cache and comes right back."""
+        # The cache is keyed on path, so even a loose video that couldn't be registered
+        # (no id) simply gets its own spot in it.
         status = self._lokaal.get(bron["pad"])
-        if status is None:                 # de achtergrondmeting was nog niet zover
+        if status is None:                 # the background measurement hadn't gotten there yet
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 status = skate_db.file_is_local(bron["pad"])
@@ -6144,53 +6147,53 @@ class MainWindow(QMainWindow):
             if status:
                 self._lokaal[bron["pad"]] = status
         if status not in ("cloud", "deels"):
-            return True                    # lokaal, of niet te meten → niet zeuren
+            return True                    # local, or unmeasurable -> don't make a fuss
 
         antwoord = QMessageBox.warning(
-            self, "Opname staat nog in de cloud",
-            f"'{bron['naam']}' staat "
-            + ("nog maar gedeeltelijk" if status == "deels" else "niet")
-            + " offline op deze pc; het beeld wordt tijdens het kijken uit de cloud "
-              "gedownload.\n\n"
-              "Doorbladeren wordt daardoor traag: een sprong naar een ander moment "
-              "kost al gauw 5 tot 20 seconden, tegen een tiende seconde als de opname "
-              "lokaal staat. Ook het knippen leest de opname helemaal door.\n\n"
-              "Beter: rechtsklik in Verkenner de map 'opnames' → Google Drive → "
-              "'Offline beschikbaar maken', wacht tot hij binnen is en druk daarna "
-              "op 'Vernieuwen'.\n\n"
-              "Toch nu openen?",
+            self, "Recording is still in the cloud",
+            f"'{bron['naam']}' is "
+            + ("still only partly" if status == "deels" else "not")
+            + " offline on this PC; the image is downloaded from the cloud while "
+              "viewing.\n\n"
+              "Browsing will therefore be slow: jumping to another moment easily "
+              "costs 5 to 20 seconds, versus a tenth of a second when the recording "
+              "is local. Trimming also reads through the whole recording.\n\n"
+              "Better: right-click the 'opnames' folder in Explorer -> Google Drive -> "
+              "'Make available offline', wait until it's downloaded, then press "
+              "'Refresh'.\n\n"
+              "Open it now anyway?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return antwoord == QMessageBox.Yes
 
     def _bekijk_opname(self):
-        """Een opname handmatig doorkijken: alleen beeld, geen analyse. Twee geselecteerde
-        rijen komen naast elkaar.
+        """Manually view a recording: video only, no analysis. Two selected rows appear
+        side by side.
 
-        Bewust zónder de controles die het knippen wél doet (draait er een analyse, bestaat
-        er al een schaatser): er wordt niets gemeten en er komt niets in de bibliotheek
-        terecht behalve de punten, en die horen bij de opname zelf."""
+        Deliberately without the checks that trimming does (is an analysis running,
+        does a skater profile already exist): nothing is measured and nothing ends up in
+        the library except the points, and those belong to the recording itself."""
         bronnen = self._geselecteerde_opnames()
         if not bronnen:
             QMessageBox.information(
-                self, "Opname bekijken",
-                "Kies eerst een opname in de lijst.\n\n"
-                "Staat er niets? Zet je opnames in de map 'opnames' in de bibliotheek en "
-                "druk op 'Vernieuwen'. Wil je een video bekijken die daar niet in staat, "
-                "gebruik dan 'Nieuwe video bekijken...'.")
+                self, "View recording",
+                "First choose a recording in the list.\n\n"
+                "Nothing there? Put your recordings in the 'opnames' folder in the "
+                "library and press 'Refresh'. Want to view a video that isn't there, "
+                "use 'View new video...'.")
             return
         if len(bronnen) > 2:
             QMessageBox.information(
-                self, "Opname bekijken",
-                "Kies één opname, of twee om ze naast elkaar te bekijken.")
+                self, "View recording",
+                "Choose one recording, or two to view them side by side.")
             return
-        self._open_bekijkvenster(bronnen, "Opname")
-        self._vernieuw_opnames()      # de puntentelling in de lijst bijwerken
+        self._open_bekijkvenster(bronnen, "Recording")
+        self._vernieuw_opnames()      # update the point count in the list
 
     def _open_bekijkvenster(self, bronnen, titel):
-        """Het gedeelde stuk van `_bekijk_opname` en `_bekijk_losse_video`: beschikbaarheid
-        controleren, de video('s) openen en het kijkvenster tonen. `titel` is de kop van
-        een eventuele foutmelding. Faalt er één van twee, dan gaat het venster niet open —
-        beter dan stilzwijgend één video tonen waar er twee gevraagd zijn."""
+        """The shared part of `_bekijk_opname` and `_bekijk_losse_video`: check
+        availability, open the video(s), and show the view window. `titel` is the
+        heading of a possible error message. If one of two fails, the window doesn't
+        open -- better than silently showing one video when two were requested."""
         paren = []
         for bron in bronnen:
             paar = self._open_bron(bron, titel)
@@ -6202,26 +6205,26 @@ class MainWindow(QMainWindow):
                             kies_tweede=self._kies_tweede_video, parent=self)
         show_dialog(dlg)
         if self._losse_toegevoegd:
-            self._vernieuw_opnames()  # de video die in het venster is toegevoegd, in de lijst
+            self._vernieuw_opnames()  # the video added in the window, into the list
 
     def _open_bron(self, bron, titel):
-        """Beschikbaarheidscheck + `video_info` voor één bron → `(bron, info)` of None
-        (melding is dan al getoond). De punten gaan naar de bibliotheek waar de rij in
-        staat: gedeeld voor een opname, lokaal voor een losse video (`bron["bieb"]`)."""
+        """Availability check + `video_info` for one source -> `(bron, info)` or None
+        (the message has then already been shown). The points go to the library the row
+        belongs to: shared for a recording, local for a loose video (`bron["bieb"]`)."""
         if not self._opname_beschikbaar(bron):
             return None
         try:
             return bron, video_info(bron["pad"])
         except Exception as e:
-            QMessageBox.critical(self, titel, f"Kan de video niet openen:\n{e}")
+            QMessageBox.critical(self, titel, f"Can't open the video:\n{e}")
             return None
 
     def _kies_losse_video(self):
-        """Bestandskiezer voor een video ergens op deze pc + registratie als losse video
-        (zie `_bekijk_losse_video`). Geeft de bron-dict, of None bij annuleren."""
+        """File picker for a video somewhere on this PC + registering it as a loose video
+        (see `_bekijk_losse_video`). Returns the source dict, or None on cancel."""
         cfg = skate_db.load_config()
         pad, _ = QFileDialog.getOpenFileName(
-            self, "Kies een video om te bekijken", cfg.get("laatste_videomap", ""),
+            self, "Choose a video to view", cfg.get("laatste_videomap", ""),
             VIDEO_FILTER)
         if not pad:
             return None
@@ -6229,74 +6232,74 @@ class MainWindow(QMainWindow):
         try:
             skate_db.save_config(cfg)
         except Exception:
-            pass                      # de map onthouden is comfort, geen voorwaarde
+            pass                      # remembering the folder is a convenience, not a requirement
 
         try:
             if self.lokaal is None:
-                raise RuntimeError("de lokale bibliotheek kon bij het opstarten niet "
-                                   "geopend worden (zie het logboek)")
+                raise RuntimeError("the local library could not be opened at startup "
+                                   "(see the log file)")
             bron = skate_db.loose_video(self.bieb, self.lokaal, pad)
         except Exception as e:
             QMessageBox.warning(
-                self, "Video bekijken",
-                f"De video kan bekeken worden, maar wordt niet onthouden en punten kunnen "
-                f"nu niet bewaard worden:\n{e}")
+                self, "View video",
+                f"The video can be viewed, but won't be remembered and points can't "
+                f"be saved right now:\n{e}")
             bron = {"id": None, "bieb": None, "naam": os.path.basename(pad), "pad": pad,
                     "sync": None, "interlaced": None}
         return bron
 
     def _kies_tweede_video(self):
-        """Voor "➕ Tweede video ernaast..." in het kijkvenster: dezelfde route als een
-        losse video (kiezer, registratie, beschikbaarheid), maar het venster staat al open.
-        Geeft `(bron, info)` of None; onthoudt dat de lijst straks ververst moet worden."""
+        """For "➕ Second video alongside..." in the view window: the same route as a
+        loose video (picker, registration, availability), but the window is already
+        open. Returns `(bron, info)` or None; remembers that the list needs a refresh
+        afterwards."""
         bron = self._kies_losse_video()
         if bron is None:
             return None
         if bron["id"] is not None:
-            self._losse_toegevoegd = True    # de rij bestaat al, ook als het openen faalt
-        return self._open_bron(bron, "Video bekijken")
+            self._losse_toegevoegd = True    # the row already exists, even if opening fails
+        return self._open_bron(bron, "View video")
 
     def _bekijk_losse_video(self):
-        """Een video ergens anders op deze pc bekijken, zonder hem naar de bibliotheek te
-        kopiëren.
+        """View a video somewhere else on this PC, without copying it into the library.
 
-        Voor "alleen kijken" is er niets uit de bibliotheek nodig — geen schaatser, geen
-        analyse, geen kopie — maar je kwam er tot nu toe alleen in via een rij in de
-        opnamelijst, en die bestaat per definitie uit bestanden in `opnames/`. Een clip die
-        net van de camera komt of van een collega, was dus niet te bekijken.
+        For "just watching" nothing from the library is needed -- no skater, no
+        analysis, no copy -- but until now you could only get there via a row in the
+        recordings list, and that by definition consists of files in `opnames/`. A clip
+        fresh from the camera or from a colleague couldn't be viewed.
 
-        De video krijgt wél een rij, maar in de **lokale** bibliotheek (`skate_db.
-        losse_video` → `lokale_bibliotheek`): het pad is van deze pc en hoort niet in de
-        gedeelde Drive, terwijl de punten die je zet wél bewaard moeten blijven én de video
-        de volgende keer gewoon in de lijst moet staan i.p.v. opnieuw via de bestandskiezer
-        opgezocht te worden. Daarom wordt de lijst ná het kijken ververst met deze rij
-        geselecteerd — ook als het venster uiteindelijk niet openging (cloudwaarschuwing
-        geweigerd), want de rij is er dan al. Lukt het registreren niet (lokale bibliotheek
-        niet te openen), dan gaat het kijken gewoon door zonder punten — daar hoort de
-        database niet tussen te komen."""
+        The video does get a row, but in the **local** library (`skate_db.loose_video`
+        -> `local_library`): the path belongs to this PC and doesn't belong in the
+        shared Drive, while the points you set do need to be kept and the video should
+        simply appear in the list next time instead of being sought out again via the
+        file picker. That's why the list is refreshed after viewing with this row
+        selected -- even if the window ultimately didn't open (cloud warning declined),
+        since the row already exists by then. If registering fails (local library can't
+        be opened), viewing just proceeds without points -- the database shouldn't get
+        in the way there."""
         bron = self._kies_losse_video()
         if bron is None:
             return
         try:
-            self._open_bekijkvenster([bron], "Video bekijken")
+            self._open_bekijkvenster([bron], "View video")
         finally:
             if bron["id"] is not None:
                 self._vernieuw_opnames(selecteer=_opname_sleutel(bron))
 
     def _importeer_van_camera(self):
-        """Hele opnames van de camera/geheugenkaart naar `opnames/` kopiëren, ín de app.
+        """Copy whole recordings from the camera/memory card to `opnames/`, inside the app.
 
-        Tot nu toe moest dat in de Verkenner, terwijl alles wat erna komt (scannen,
-        knippen, bekijken) hier zit; en een kopie van 4 GB naar een Drive-map is precies
-        het soort wachten waar je een balk met resterende tijd bij wilt. De route:
-        `kopieer_plan` beslist vooraf wat er wél en niet gaat (bestaande bestanden worden
-        nooit overschreven — daar hangen fragmenten en punten aan, zie skate_db), een
-        ruimtecheck, dan `CopyWorker` + `CopyDialog`, en ná afloop de gewone
-        `_vernieuw_opnames`, want vanaf dat moment is het een opname als elke andere:
-        de scan registreert hem, Drive uploadt hem, collega's zien hem verschijnen."""
+        Until now that had to happen in Explorer, while everything that follows
+        (scanning, trimming, viewing) lives here; and a 4 GB copy to a Drive folder is
+        exactly the kind of wait where you want a bar with remaining time. The route:
+        `copy_plan` decides in advance what will and won't happen (existing files are
+        never overwritten -- fragments and points hang off them, see skate_db), a space
+        check, then `CopyWorker` + `CopyDialog`, and afterwards the regular
+        `_vernieuw_opnames`, since from that point it's a recording like any other:
+        the scan registers it, Drive uploads it, colleagues see it appear."""
         cfg = skate_db.load_config()
         paden, _ = QFileDialog.getOpenFileNames(
-            self, "Kies de opnames op de camera of geheugenkaart",
+            self, "Choose the recordings on the camera or memory card",
             cfg.get("laatste_cameramap", ""), VIDEO_FILTER)
         if not paden:
             return
@@ -6304,41 +6307,41 @@ class MainWindow(QMainWindow):
         try:
             skate_db.save_config(cfg)
         except Exception:
-            pass                      # de map onthouden is comfort, geen voorwaarde
+            pass                      # remembering the folder is a convenience, not a requirement
 
         try:
             plan = skate_db.copy_plan(self.bieb, paden)
         except Exception as e:
-            QMessageBox.critical(self, "Kopiëren", f"Kan de map 'opnames' niet bereiken:\n{e}")
+            QMessageBox.critical(self, "Copying", f"Can't reach the 'opnames' folder:\n{e}")
             return
         te_doen = [i for i in plan if i["reden"] is None]
         overgeslagen = [i for i in plan if i["reden"] is not None]
         if not te_doen:
             QMessageBox.information(
-                self, "Kopiëren",
-                "Er valt niets te kopiëren:\n\n" + self._kopieer_redenen(overgeslagen))
+                self, "Copying",
+                "There's nothing to copy:\n\n" + self._kopieer_redenen(overgeslagen))
             return
         totaal = sum(i["bytes"] for i in te_doen)
 
-        # Ruimte: op een Drive-map is de vrije ruimte die van de lokale cache/schijf, en
-        # een kopie die op 90% strandt kost een kwartier voor niets.
+        # Space: on a Drive folder the free space is that of the local cache/disk, and
+        # a copy that runs aground at 90% costs a quarter of an hour for nothing.
         try:
             vrij = shutil.disk_usage(skate_db.recordings_path(self.bieb)).free
         except OSError:
             vrij = None
         if vrij is not None and totaal > vrij:
             QMessageBox.warning(
-                self, "Te weinig ruimte",
-                f"Deze opnames zijn samen {_bytes_text(totaal)}, maar op de schijf van de "
-                f"bibliotheek is nog {_bytes_text(vrij)} vrij.\n\nMaak ruimte (of kies "
-                f"minder opnames) en probeer het opnieuw.")
+                self, "Not enough space",
+                f"These recordings together are {_bytes_text(totaal)}, but the "
+                f"library's disk only has {_bytes_text(vrij)} free.\n\nMake space (or "
+                f"choose fewer recordings) and try again.")
             return
         if overgeslagen:
             antwoord = QMessageBox.question(
-                self, "Kopiëren",
-                f"{len(te_doen)} van de {len(plan)} gekozen bestanden worden gekopieerd "
-                f"({_bytes_text(totaal)}). De rest niet:\n\n"
-                + self._kopieer_redenen(overgeslagen) + "\n\nDoorgaan?",
+                self, "Copying",
+                f"{len(te_doen)} of the {len(plan)} chosen files will be copied "
+                f"({_bytes_text(totaal)}). The rest won't:\n\n"
+                + self._kopieer_redenen(overgeslagen) + "\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if antwoord != QMessageBox.Yes:
                 return
@@ -6348,12 +6351,12 @@ class MainWindow(QMainWindow):
         worker.start()
         try:
             show_dialog(dlg)
-            worker.wait()             # accept() komt uit klaar(), dus dit is meteen klaar
+            worker.wait()             # accept() comes from done(), so this is already finished
         finally:
             worker.deleteLater()
 
         gekopieerd = dlg.paden
-        mislukt = [i for i in te_doen if i["reden"] is not None]   # reden gezet door de worker
+        mislukt = [i for i in te_doen if i["reden"] is not None]   # reason set by the worker
         sleutel = None
         if gekopieerd:
             try:
@@ -6365,20 +6368,20 @@ class MainWindow(QMainWindow):
 
         regels = []
         if gekopieerd:
-            regels.append(f"{len(gekopieerd)} opname(s) gekopieerd naar de bibliotheek "
+            regels.append(f"{len(gekopieerd)} recording(s) copied to the library "
                           f"({_bytes_text(sum(os.path.getsize(p) for p in gekopieerd))}). "
-                          f"Ze staan nu in de lijst; staat de bibliotheek in Google Drive, dan "
-                          f"uploadt Drive ze vanzelf en zien collega's ze daarna ook.")
+                          f"They're now in the list; if the library is in Google Drive, "
+                          f"Drive uploads them by itself and colleagues will see them too.")
         if dlg.afgebroken:
-            regels.append("Het kopiëren is gestopt; het half gekopieerde bestand is weggehaald.")
+            regels.append("Copying was stopped; the half-copied file has been removed.")
         if dlg.fout is not None:
-            regels.append(f"Het kopiëren is onverwacht gestopt:\n{dlg.fout}")
+            regels.append(f"Copying stopped unexpectedly:\n{dlg.fout}")
         if mislukt:
-            regels.append("Niet gelukt:\n" + self._kopieer_redenen(mislukt))
+            regels.append("Failed:\n" + self._kopieer_redenen(mislukt))
         if not regels:
-            regels.append("Er is niets gekopieerd.")
+            regels.append("Nothing was copied.")
         (QMessageBox.warning if (mislukt or dlg.fout is not None)
-         else QMessageBox.information)(self, "Kopiëren", "\n\n".join(regels))
+         else QMessageBox.information)(self, "Copying", "\n\n".join(regels))
 
     @staticmethod
     def _kopieer_redenen(items):
@@ -6387,9 +6390,9 @@ class MainWindow(QMainWindow):
     def _open_opnamesmap(self):
         pad = skate_db.recordings_path(self.bieb)
         try:
-            os.startfile(pad)                      # Windows; elders valt hij netjes terug
+            os.startfile(pad)                      # Windows; falls back gracefully elsewhere
         except Exception:
-            QMessageBox.information(self, "Map met opnames", pad)
+            QMessageBox.information(self, "Recordings folder", pad)
 
     def _bouw_analysepagina(self):
         paneel = QWidget()
@@ -6405,25 +6408,25 @@ class MainWindow(QMainWindow):
         return paneel
 
     def _bouw_vergelijkpagina(self):
-        """Twee analyses naast elkaar: elke kant los te bedienen, plus een gedeelde
-        'Start alles' die beide vanaf hun sync-punt tegelijk laat lopen."""
+        """Two analyses side by side: each side controlled separately, plus a shared
+        'Start all' that runs both from their sync point at the same time."""
         paneel = QWidget()
         v = QVBoxLayout(paneel)
 
-        titel = QLabel("Vergelijk schaatsers")
+        titel = QLabel("Compare skaters")
         titel.setStyleSheet("font-size: 18px; font-weight: bold; padding: 2px;")
         v.addWidget(titel)
 
         splitter = QSplitter(Qt.Horizontal)
         self.kant_links = CompareSide(
-            "Links", lambda: self._kies_vergelijk_kant(self.kant_links))
+            "Left", lambda: self._kies_vergelijk_kant(self.kant_links))
         self.kant_rechts = CompareSide(
-            "Rechts", lambda: self._kies_vergelijk_kant(self.kant_rechts))
+            "Right", lambda: self._kies_vergelijk_kant(self.kant_rechts))
         for kant in (self.kant_links, self.kant_rechts):
             splitter.addWidget(kant)
-            # Zelf op ▶ drukken = handmatige besturing overnemen: de masterklok laten los.
+            # Pressing ▶ yourself = taking over manual control: let go of the master clock.
             kant.speler.btn_play.clicked.connect(self._stop_alles)
-            # Een kant leegmaken terwijl de masterklok loopt: eerst de klok los.
+            # Clearing a side while the master clock runs: stop the clock first.
             kant.btn_leeg.clicked.connect(
                 lambda _=False, k=kant: (self._stop_alles(), k.leeg()))
         splitter.setStretchFactor(0, 1)
@@ -6431,53 +6434,54 @@ class MainWindow(QMainWindow):
         v.addWidget(splitter, stretch=1)
 
         balk = QHBoxLayout()
-        self.btn_start_alles = QPushButton("▶ Start alles")
+        self.btn_start_alles = QPushButton("▶ Start all")
         self.btn_start_alles.setToolTip(
-            "Speelt beide video's tegelijk af vanaf hun sync-punt, elk op z'n eigen fps.")
-        # lambda: clicked() zou anders `checked=False` als vanaf_sync doorgeven.
+            "Plays both videos at once from their sync point, each at its own fps.")
+        # lambda: clicked() would otherwise pass `checked=False` as vanaf_sync.
         self.btn_start_alles.clicked.connect(lambda: self._start_alles())
         balk.addWidget(self.btn_start_alles)
-        self.btn_pauzeer_alles = QPushButton("⏸ Pauzeer alles")
+        self.btn_pauzeer_alles = QPushButton("⏸ Pause all")
         self.btn_pauzeer_alles.clicked.connect(self._pauzeer_alles)
         balk.addWidget(self.btn_pauzeer_alles)
-        self.btn_naar_sync = QPushButton("⏮ Beide naar sync")
+        self.btn_naar_sync = QPushButton("⏮ Both to sync")
         self.btn_naar_sync.clicked.connect(self._beide_naar_sync)
         balk.addWidget(self.btn_naar_sync)
-        self.chk_vanaf_sync = QCheckBox("vanaf sync-punt")
+        self.chk_vanaf_sync = QCheckBox("from sync point")
         self.chk_vanaf_sync.setChecked(True)
         self.chk_vanaf_sync.setToolTip(
-            "Uit: 'Start alles' hervat waar beide video's nu staan, zonder terug te springen.")
+            "Off: 'Start all' resumes wherever both videos currently are, without "
+            "jumping back.")
         balk.addWidget(self.chk_vanaf_sync)
 
-        balk.addWidget(QLabel("Snelheid"))
+        balk.addWidget(QLabel("Speed"))
         self.combo_alles_snelheid = QComboBox()
         self.combo_alles_snelheid.setToolTip(
-            "Afspeelsnelheid op deze pagina — geldt voor 'Start alles' én voor een kant "
-            "die je los afspeelt, zodat de video's altijd even snel lopen.")
+            "Playback speed on this page -- applies to 'Start all' as well as to a side "
+            "you play on its own, so the videos always run at the same speed.")
         for label, factor in SPEEDS:
             self.combo_alles_snelheid.addItem(label, factor)
         self.combo_alles_snelheid.setCurrentIndex(ALL_SPEED_IDX)
         self.combo_alles_snelheid.currentIndexChanged.connect(self._zet_alles_snelheid)
         balk.addWidget(self.combo_alles_snelheid)
-        self._zet_alles_snelheid()      # kanten meteen op de startsnelheid zetten
+        self._zet_alles_snelheid()      # set both sides to the start speed right away
 
         balk.addStretch(1)
         v.addLayout(balk)
 
-        # Dezelfde toetsen als elders, maar ze sturen hier beide kanten tegelijk — dat is
-        # het enige wat op deze pagina anders is en hoort er dus bij te staan.
-        hulp = QLabel(keys_help("beide kanten tegelijk"))
+        # The same keys as elsewhere, but here they drive both sides at once -- that's
+        # the only thing different on this page, and belongs here.
+        hulp = QLabel(keys_help("both sides at once"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         v.addWidget(hulp)
         return paneel
 
     def _bouw_videopaneel(self):
-        """De gedeelde VideoPlayer plus de editor-onderdelen die alléén op de analysepagina
-        horen (de vergelijkpagina gebruikt dezelfde speler, zonder editor)."""
-        # Bescheiden ondergrens: het beeld rekt toch mee met het venster, en een hoge
-        # ondergrens tilt het venster-minimum boven de beschikbare schermhoogte uit —
-        # dan negeert Qt de gevraagde venstergrootte (zie set_window_size).
+        """The shared VideoPlayer plus the editor parts that belong only on the analysis
+        page (the compare page uses the same player, without the editor)."""
+        # A modest minimum: the video stretches with the window anyway, and a high
+        # minimum pushes the window minimum above the available screen height -- Qt then
+        # ignores the requested window size (see set_window_size).
         self.speler = VideoPlayer(min_size=(400, 240))
         self.speler.on_frame_shown = self._speler_frame_getoond
         self.speler.overlay_drawer = self._teken_handles
@@ -6485,79 +6489,82 @@ class MainWindow(QMainWindow):
         self.speler.on_mouse_move = self._editor_muis_beweeg
         self.speler.on_mouse_release = self._editor_muis_los
 
-        self.btn_bewerken = QPushButton("✏ Bewerken")
+        self.btn_bewerken = QPushButton("✏ Edit")
         self.btn_bewerken.setCheckable(True)
         self.btn_bewerken.setToolTip(
-            "Skelet-editor: sleep foute landmarkpunten naar de juiste plek.\n"
-            "De correctie vloeit uit naar de buurframes (instelbaar) en wordt\n"
-            "direct opgeslagen.")
+            "Skeleton editor: drag wrong landmark points to the right spot.\n"
+            "The correction blends into neighboring frames (adjustable) and is\n"
+            "saved right away.")
         self.btn_bewerken.toggled.connect(self._toggle_bewerken)
         self.speler.add_control_button(self.btn_bewerken)
 
-        self.btn_vergelijk_deze = QPushButton("⇄ Vergelijk met...")
+        self.btn_vergelijk_deze = QPushButton("⇄ Compare with...")
         self.btn_vergelijk_deze.setToolTip(
-            "Zet deze analyse links op de vergelijkpagina en kies er een andere naast.")
+            "Put this analysis on the left of the compare page and choose another one "
+            "next to it.")
         self.btn_vergelijk_deze.clicked.connect(self._vergelijk_met_deze)
         self.btn_vergelijk_deze.setEnabled(False)
         self.speler.add_control_button(self.btn_vergelijk_deze)
 
         self.btn_info = QPushButton("ℹ Info...")
         self.btn_info.setToolTip(
-            "Met welke appversie, backend en instellingen is deze analyse gemaakt?")
-        # lambda: clicked() geeft anders `checked=False` door als analyse_id.
+            "With which app version, backend and settings was this analysis made?")
+        # lambda: clicked() would otherwise pass `checked=False` as analyse_id.
         self.btn_info.clicked.connect(lambda: self._toon_analyse_info())
         self.btn_info.setEnabled(False)
         self.speler.add_control_button(self.btn_info)
 
-        self.btn_bocht_nu = QPushButton("Bocht bepalen")
+        self.btn_bocht_nu = QPushButton("Determine corner")
         self.btn_bocht_nu.setToolTip(
-            "Voor analyses van vóór de bochtdetectie: bepaal alsnog welke frames in de\n"
-            "bocht liggen en haal ze uit de meting.\n"
+            "For analyses from before corner detection: determine which frames are in\n"
+            "the corner after the fact, and remove them from the measurement.\n"
             "\n"
-            "Er wordt niets opnieuw geanalyseerd — de landmarks van de hele clip staan al\n"
-            "opgeslagen, dus de heupstand valt er zo uit af te lezen. Je krijgt eerst te\n"
-            "zien wat het met de tabel doet en kunt dan pas beslissen.")
+            "Nothing is re-analyzed -- the landmarks of the whole clip are already\n"
+            "saved, so the hip stance can be read straight from them. You'll first "
+            "see\n"
+            "what it does to the table before deciding.")
         self.btn_bocht_nu.clicked.connect(self._bepaal_bocht_nu)
         self.btn_bocht_nu.setEnabled(False)
         self.speler.add_control_button(self.btn_bocht_nu)
 
-        # Editor-balk (fase 3): alleen zichtbaar in bewerk-modus. Afbrekend (WrapBar), want
-        # met de plaats-knoppen erbij past hij op een laptopscherm niet meer op één regel —
-        # en een te brede balk tilt het venster-minimum boven de schermhoogte uit.
+        # Editor bar (phase 3): only visible in edit mode. Wrapping (WrapBar), because
+        # with the placement buttons added it no longer fits a laptop screen on one line
+        # -- and a too-wide bar pushes the window minimum above the screen height.
         self.editor_balk = WrapBar()
-        self.editor_balk.addWidget(QLabel("Uitvloeien ±"))
+        self.editor_balk.addWidget(QLabel("Blend ±"))
         self.spin_uitvloei = QSpinBox()
         self.spin_uitvloei.setRange(0, 60)
         self.spin_uitvloei.setValue(8)
         self.spin_uitvloei.setSuffix(" frames")
         self.spin_uitvloei.setToolTip(
-            "Hoe ver de correctie naar de buurframes uitvloeit (cosinus-afbouw).\n"
-            "0 = alleen dit frame. Stopt bij een detectiegat.")
+            "How far the correction blends into neighboring frames (cosine falloff).\n"
+            "0 = this frame only. Stops at a detection gap.")
         self.editor_balk.addWidget(self.spin_uitvloei)
-        self.btn_undo = QPushButton("↶ Ongedaan")
+        self.btn_undo = QPushButton("↶ Undo")
         self.btn_undo.clicked.connect(self._undo_edit)
         self.editor_balk.addWidget(self.btn_undo)
-        self.btn_redo = QPushButton("↷ Opnieuw")
+        self.btn_redo = QPushButton("↷ Redo")
         self.btn_redo.clicked.connect(self._redo_edit)
         self.editor_balk.addWidget(self.btn_redo)
-        self.btn_volgend_gat = QPushButton("⏭ Volgend gat")
+        self.btn_volgend_gat = QPushButton("⏭ Next gap")
         self.btn_volgend_gat.setToolTip(
-            "Spring naar het eerstvolgende frame zonder skelet.\n"
-            "Na het laatste gat begint de zoektocht weer vooraan.\n"
-            "Frames in de bocht worden overgeslagen — daar wordt toch niet gemeten.")
+            "Jump to the next frame without a skeleton.\n"
+            "After the last gap the search starts over from the front.\n"
+            "Frames in the corner are skipped -- nothing is measured there anyway.")
         self.btn_volgend_gat.clicked.connect(self._ga_naar_volgend_gat)
         self.editor_balk.addWidget(self.btn_volgend_gat)
-        self.btn_maak_skelet = QPushButton("➕ Maak skelet")
+        self.btn_maak_skelet = QPushButton("➕ Make skeleton")
         self.btn_maak_skelet.setToolTip(
-            "Zet een skelet op dit frame. Het wordt overgenomen van de buurframes,\n"
-            "daarna sleep je de punten naar de juiste plek — net als op elk ander frame.\n"
-            "Valt er niets over te nemen, dan vraagt het programma de punten\n"
-            "één voor één (schouders, heupen, knieën, enkels).\n"
-            "Alleen beschikbaar op een frame zonder gedetecteerde pose dat niet in de bocht ligt.")
+            "Places a skeleton on this frame. It's taken over from the neighboring "
+            "frames,\n"
+            "then you drag the points into place -- just like on any other frame.\n"
+            "If there's nothing to take over, the program asks for the points\n"
+            "one at a time (shoulders, hips, knees, ankles).\n"
+            "Only available on a frame without a detected pose that isn't in the corner.")
         self.btn_maak_skelet.clicked.connect(self._start_plaatsen)
         self.editor_balk.addWidget(self.btn_maak_skelet)
-        self.btn_herstel = QPushButton("Herstel origineel")
-        self.btn_herstel.setToolTip("Zet alle landmarks terug naar de oorspronkelijke detectie.")
+        self.btn_herstel = QPushButton("Restore original")
+        self.btn_herstel.setToolTip("Resets all landmarks to the original detection.")
         self.btn_herstel.clicked.connect(self._herstel_origineel)
         self.editor_balk.addWidget(self.btn_herstel)
         self.lbl_editor_hint = QLabel("")
@@ -6566,40 +6573,40 @@ class MainWindow(QMainWindow):
         self.editor_balk.setVisible(False)
         self.speler.add_bottom_bar(self.editor_balk)
 
-        # Plaats-balk: alleen zichtbaar tijdens een lopende klikreeks. Apart van de
-        # editor-balk zodat de gewone bewerk-knoppen niet met de reeks-knoppen mengen.
+        # Placement bar: only visible during a running click sequence. Separate from the
+        # editor bar so the regular edit buttons don't mix with the sequence buttons.
         self.plaats_balk = WrapBar()
         self.lbl_plaats = QLabel("")
         self.lbl_plaats.setStyleSheet("font-weight: bold;")
         self.plaats_balk.addWidget(self.lbl_plaats)
-        self.btn_plaats_vorige = QPushButton("← Vorige punt")
+        self.btn_plaats_vorige = QPushButton("← Previous point")
         self.btn_plaats_vorige.clicked.connect(self._plaats_vorige)
         self.plaats_balk.addWidget(self.btn_plaats_vorige)
-        self.btn_plaats_over = QPushButton("Overslaan →")
+        self.btn_plaats_over = QPushButton("Skip →")
         self.btn_plaats_over.setToolTip(
-            "Dit punt overslaan — het houdt de positie uit de voorvulling.")
+            "Skip this point -- it keeps the position from the prefill.")
         self.btn_plaats_over.clicked.connect(self._plaats_overslaan)
         self.plaats_balk.addWidget(self.btn_plaats_over)
-        self.btn_plaats_klaar = QPushButton("✔ Klaar")
+        self.btn_plaats_klaar = QPushButton("✔ Done")
         self.btn_plaats_klaar.setToolTip(
-            "Het skelet vastleggen. Kan pas als heup, knie en enkel van beide benen\n"
-            "een zichtbare positie hebben — daar rusten alle metingen op.")
+            "Commits the skeleton. Only possible once hip, knee and ankle of both legs\n"
+            "have a visible position -- every measurement rests on those.")
         self.btn_plaats_klaar.clicked.connect(self._plaats_klaar)
         self.plaats_balk.addWidget(self.btn_plaats_klaar)
-        self.btn_plaats_annuleer = QPushButton("✕ Annuleren")
+        self.btn_plaats_annuleer = QPushButton("✕ Cancel")
         self.btn_plaats_annuleer.clicked.connect(self._plaats_annuleren)
         self.plaats_balk.addWidget(self.btn_plaats_annuleer)
         self.plaats_balk.setVisible(False)
         self.speler.add_bottom_bar(self.plaats_balk)
 
-        # Dezelfde regel als onder het knip- en kijkvenster: de toetsen zijn overal gelijk,
-        # dus hoort de opsomming dat ook te zijn (zie VIDEO_KEYS_HELP).
-        hulp = QLabel(keys_help("<b>Ctrl+Z / Ctrl+Y</b> bewerking terug/opnieuw"))
+        # The same line as under the trim and view windows: the keys are the same
+        # everywhere, so the summary should be too (see VIDEO_KEYS_HELP).
+        hulp = QLabel(keys_help("<b>Ctrl+Z / Ctrl+Y</b> undo/redo an edit"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         self.speler.add_bottom_bar(hulp)
 
-        # Sneltoetsen voor undo/redo (alleen actief in bewerk-modus, zie de handlers).
+        # Shortcuts for undo/redo (only active in edit mode, see the handlers).
         QShortcut(QKeySequence.Undo, self).activated.connect(self._undo_edit)
         QShortcut(QKeySequence.Redo, self).activated.connect(self._redo_edit)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self._redo_edit)
@@ -6608,21 +6615,21 @@ class MainWindow(QMainWindow):
     def _bouw_datapaneel(self):
         paneel = QSplitter(Qt.Vertical)
 
-        tabel_groep = QGroupBox("Afzethoeken")
+        tabel_groep = QGroupBox("Push angles")
         tv = QVBoxLayout(tabel_groep)
         self.tabel = QTableWidget(0, 4)
-        self.tabel.setHorizontalHeaderLabels(["#", "Tijd (s)", "Been", "Hoek (°)"])
+        self.tabel.setHorizontalHeaderLabels(["#", "Time (s)", "Leg", "Angle (°)"])
         self.tabel.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabel.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tabel.cellClicked.connect(self._klik_op_rij)
         tv.addWidget(self.tabel)
 
-        self.lbl_stats = QLabel("gem — | min — | max —")
+        self.lbl_stats = QLabel("avg — | min — | max —")
         tv.addWidget(self.lbl_stats)
 
         knoppen = QHBoxLayout()
-        self.btn_export = QPushButton("Exporteer CSV")
+        self.btn_export = QPushButton("Export CSV")
         self.btn_export.clicked.connect(self._exporteer_csv)
         self.btn_export.setEnabled(False)
         knoppen.addWidget(self.btn_export)
@@ -6630,7 +6637,7 @@ class MainWindow(QMainWindow):
 
         paneel.addWidget(tabel_groep)
 
-        grafiek_groep = QGroupBox("Hoek per tijd")
+        grafiek_groep = QGroupBox("Angle over time")
         gv = QVBoxLayout(grafiek_groep)
         self.chart = QChart()
         self.chart.legend().hide()
@@ -6640,8 +6647,8 @@ class MainWindow(QMainWindow):
         self.chart.addSeries(self.serie_marker)
         self.as_x = QValueAxis()
         self.as_y = QValueAxis()
-        self.as_x.setTitleText("tijd (s)")
-        self.as_y.setTitleText("hoek (°)")
+        self.as_x.setTitleText("time (s)")
+        self.as_y.setTitleText("angle (°)")
         self.chart.addAxis(self.as_x, Qt.AlignBottom)
         self.chart.addAxis(self.as_y, Qt.AlignLeft)
         self.serie_hoek.attachAxis(self.as_x)
@@ -6656,10 +6663,10 @@ class MainWindow(QMainWindow):
         paneel.setStretchFactor(1, 1)
         return paneel
 
-    # ── Voortgangsbalk (niet-blokkerend, blijft over paginawissels heen staan) ──
+    # -- Progress bar (non-blocking, stays put across page switches) --
     def _bouw_voortgangsbalk(self):
-        """Een dunne balk onderin met label + voortgang en (voor batch) een stopknop.
-        Vervangt de vroegere modale voortgangsdialoog die het hele venster blokkeerde."""
+        """A thin bar at the bottom with a label + progress and (for a batch) a stop
+        button. Replaces the earlier modal progress dialog that blocked the whole window."""
         balk = QWidget()
         h = QHBoxLayout(balk)
         h.setContentsMargins(10, 4, 10, 4)
@@ -6667,7 +6674,7 @@ class MainWindow(QMainWindow):
         self.bar_voortgang = QProgressBar()
         self.bar_voortgang.setRange(0, 100)
         self.bar_voortgang.setFixedWidth(260)
-        self.btn_voortgang_stop = QPushButton("Stop na deze video")
+        self.btn_voortgang_stop = QPushButton("Stop after this video")
         self.btn_voortgang_stop.clicked.connect(self._batch_stop_gevraagd)
         self.btn_voortgang_stop.hide()
         h.addWidget(self.lbl_voortgang, stretch=1)
@@ -6688,65 +6695,65 @@ class MainWindow(QMainWindow):
         self.voortgang_balk.hide()
 
     def _zet_bezig(self, bezig):
-        """Schakelt tijdens een lopende (batch-)analyse de knoppen uit die met de worker
-        kunnen botsen (een tweede analyse/batch starten, of de schaatser weggooien onder
-        wie straks wordt opgeslagen). Openen/afspelen blijft bewust bruikbaar, zodat er
-        gebrowst kan worden terwijl de analyse draait."""
+        """During a running (batch) analysis, disables the buttons that could clash with
+        the worker (starting a second analysis/batch, or deleting the skater the result
+        is about to be saved under). Opening/playing stays deliberately usable, so
+        browsing is possible while the analysis is running."""
         self._bezig = bezig
         self.btn_nieuwe_analyse.setEnabled(not bezig)
         self.btn_batch_analyse.setEnabled(not bezig)
         if bezig:
             self.btn_verwijder_schaatser.setEnabled(False)
         else:
-            self._vernieuw_analyses()   # selectie-afhankelijke knoppen terug in hun stand
+            self._vernieuw_analyses()   # selection-dependent buttons back to their state
 
-    # ── Bibliotheek (fase 1) ─────────────────────────────────────────────
+    # -- Library (phase 1) ------------------------------------------------
     def _zet_bibliotheek(self, pad):
-        """Opent (of maakt) de bibliotheek op `pad` en vult de lijsten. Faalt het pad
-        (bv. verdwenen netwerkmap), dan valt de app terug op de standaardmap."""
+        """Opens (or creates) the library at `pad` and fills the lists. If the path fails
+        (e.g. a vanished network folder), the app falls back to the default folder."""
         try:
             skate_db.open_db(pad)
         except skate_db.LibraryTooNew as e:
-            # Gedeelde cloudmap waarin een collega met een nieuwere app heeft geschreven:
-            # niet aanraken (schrijven zou z'n schema kunnen slopen), wel duidelijk melden.
+            # A shared cloud folder a colleague with a newer app has written to: don't
+            # touch it (writing could break its schema), but do report it clearly.
             QMessageBox.critical(
-                self, "Bibliotheek is nieuwer dan deze app",
-                f"{e}\n\nMap:\n{pad}\n\n"
-                "Er wordt zolang met de standaard-bibliotheekmap gewerkt.")
+                self, "Library is newer than this app",
+                f"{e}\n\nFolder:\n{pad}\n\n"
+                "Working with the default library folder for now.")
             standaard = skate_db.default_library()
             if pad != standaard:
                 return self._zet_bibliotheek(standaard)
             raise
         except Exception as e:
             QMessageBox.critical(
-                self, "Bibliotheek",
-                f"Kan de bibliotheek niet openen in:\n{pad}\n\n{e}")
+                self, "Library",
+                f"Can't open the library at:\n{pad}\n\n{e}")
             standaard = skate_db.default_library()
             if pad != standaard:
                 return self._zet_bibliotheek(standaard)
             raise
         self.bieb = pad
         self.lbl_bieb.setText(pad)
-        # De lokale bibliotheek (losse video's van deze pc) staat los van de gedeelde en
-        # verandert niet mee bij het wisselen van bibliotheekmap: één keer openen. Lukt dat
-        # niet, dan blijft alles werken behalve het onthouden van losse video's.
+        # The local library (loose videos from this PC) is separate from the shared one
+        # and doesn't change when the library folder is switched: open it once. If that
+        # fails, everything else keeps working except remembering loose videos.
         if self.lokaal is None:
             try:
                 self.lokaal = skate_db.local_library()
             except Exception as e:
                 self.statusBar().showMessage(
-                    f"Lokale bibliotheek niet beschikbaar (losse video's worden niet "
-                    f"onthouden): {e}", 8000)
+                    f"Local library not available (loose videos won't be "
+                    f"remembered): {e}", 8000)
         self._waarschuw_conflictkopieen()
         self._vernieuw_schaatsers()
-        # Tijdens het opstarten de traagste stap apart melden: bij een nieuwe opname leest
-        # de scan de videometa, en op een cloudmap kan dat seconden duren.
-        self._melding("Opnames scannen...")
-        self._vernieuw_opnames()      # fase 8: werklijst met nog te knippen opnames
+        # During startup, report the slowest step separately: for a new recording the
+        # scan reads the video metadata, and on a cloud folder that can take seconds.
+        self._melding("Scanning recordings...")
+        self._vernieuw_opnames()      # phase 8: worklist of recordings still to be trimmed
 
     def _waarschuw_conflictkopieen(self):
-        """Fase 4: waarschuwt als de cloudsync naast schaats.db conflictkopieën van de
-        database heeft achtergelaten (zie skate_db.detect_conflict_copies)."""
+        """Phase 4: warns if the cloud sync has left conflict copies of the database
+        alongside schaats.db (see skate_db.detect_conflict_copies)."""
         try:
             kopieen = skate_db.detect_conflict_copies(self.bieb)
         except Exception:
@@ -6754,30 +6761,31 @@ class MainWindow(QMainWindow):
         if not kopieen:
             return
         QMessageBox.warning(
-            self, "Mogelijke conflictkopie van de database",
-            "In de bibliotheekmap staan naast 'schaats.db' nog andere database­bestanden:\n\n"
+            self, "Possible database conflict copy",
+            "There are other database files in the library folder next to "
+            "'schaats.db':\n\n"
             "• " + "\n• ".join(kopieen) + "\n\n"
-            "Zulke kopieën ontstaan als de cloudsync (Google Drive/OneDrive/Dropbox) een "
-            "conflict maakt doordat twee trainers bijna tegelijk schreven. 'schaats.db' "
-            "blijft de actieve bibliotheek; bekijk de kopie(ën) en verwijder of hernoem ze "
-            "om verwarring te voorkomen.")
+            "Such copies are created when the cloud sync (Google Drive/OneDrive/Dropbox) "
+            "creates a conflict because two trainers wrote at nearly the same time. "
+            "'schaats.db' stays the active library; check the copy/copies and delete or "
+            "rename them to avoid confusion.")
 
     def _vernieuw_bibliotheek(self):
-        """Fase 4: leest de bibliotheek opnieuw van schijf, zodat analyses van collega's
-        (via de gedeelde cloudmap) zichtbaar worden zonder herstart."""
+        """Phase 4: re-reads the library from disk, so colleagues' analyses (via the
+        shared cloud folder) become visible without restarting."""
         self._waarschuw_conflictkopieen()
         self._vernieuw_schaatsers()
-        self._vernieuw_opnames()      # ook nieuwe opnames van collega's oppikken
-        self.statusBar().showMessage("Bibliotheek vernieuwd.", 4000)
+        self._vernieuw_opnames()      # also pick up new recordings from colleagues
+        self.statusBar().showMessage("Library refreshed.", 4000)
 
     def _toon_trainer_naam(self):
         self.lbl_trainer.setText(
-            f"jij: {self.trainer_naam}" if self.trainer_naam else "jij: (naam niet ingesteld)")
+            f"you: {self.trainer_naam}" if self.trainer_naam else "you: (name not set)")
 
     def _kies_trainer_naam(self):
         naam, ok = QInputDialog.getText(
-            self, "Jouw naam",
-            "Je naam (wordt bij nieuwe analyses bewaard als 'aangemaakt door'):",
+            self, "Your name",
+            "Your name (stored with new analyses as 'created by'):",
             text=self.trainer_naam)
         if not ok:
             return
@@ -6788,7 +6796,7 @@ class MainWindow(QMainWindow):
         self._toon_trainer_naam()
 
     def _kies_bibliotheekmap(self):
-        pad = QFileDialog.getExistingDirectory(self, "Kies bibliotheekmap", self.bieb or "")
+        pad = QFileDialog.getExistingDirectory(self, "Choose library folder", self.bieb or "")
         if not pad:
             return
         cfg = skate_db.load_config()
@@ -6801,7 +6809,7 @@ class MainWindow(QMainWindow):
         return item.data(Qt.UserRole) if item else None
 
     def _schaatser_naam(self, schaatser_id):
-        """Naam bij een schaatser-id, of "" als die er niet (meer) is."""
+        """Name for a skater id, or "" if it no longer exists."""
         if schaatser_id is None:
             return ""
         s = next((x for x in skate_db.list_skaters(self.bieb)
@@ -6820,22 +6828,22 @@ class MainWindow(QMainWindow):
         return item.text() if item else ""
 
     def _vernieuw_schaatsers(self, selecteer_id=None):
-        """Herlaadt de schaatserslijst uit de database (en daarmee de analysetabel)."""
+        """Reloads the skater list from the database (and with it the analysis table)."""
         if selecteer_id is None:
             selecteer_id = self._geselecteerde_schaatser_id()
         self.lijst_schaatsers.blockSignals(True)
         self.lijst_schaatsers.clear()
         selecteer_rij = None
         schaatsers = skate_db.list_skaters(self.bieb)
-        # Vergelijken werkt over schaatsers heen, dus niet aan de selectie hangen maar aan
-        # "staat er ergens een analyse".
+        # Comparing works across skaters, so hang it off "is there an analysis
+        # anywhere" rather than off the selection.
         self.btn_vergelijk.setEnabled(any(s["aantal_analyses"] for s in schaatsers))
         for rij, s in enumerate(schaatsers):
             tekst = s["naam"]
             if s["geboortejaar"]:
                 tekst += f" ({s['geboortejaar']})"
             n = s["aantal_analyses"]
-            tekst += f"  ·  {n} analyse{'s' if n != 1 else ''}"
+            tekst += f"  ·  {n} analys{'e' if n == 1 else 'es'}"
             item = QListWidgetItem(tekst)
             item.setData(Qt.UserRole, s["id"])
             item.setData(Qt.UserRole + 1, s["naam"])
@@ -6848,28 +6856,28 @@ class MainWindow(QMainWindow):
         if selecteer_rij is None and self.lijst_schaatsers.count():
             selecteer_rij = 0
         if selecteer_rij is not None:
-            self.lijst_schaatsers.setCurrentRow(selecteer_rij)  # triggert _vernieuw_analyses
+            self.lijst_schaatsers.setCurrentRow(selecteer_rij)  # triggers _vernieuw_analyses
         else:
             self._vernieuw_analyses()
 
     def _maak_rij_knoppen(self, analyse_id, titel):
-        """De vier per-analyse acties als widget voor de laatste tabelkolom.
-        Elke knop draagt zijn eigen analyse-id mee (default-argument in de lambda —
-        anders zou de laatste lus-waarde gelden voor álle rijen), zodat een klik werkt
-        op de rij waar hij op staat en niet op de toevallige tabelselectie."""
+        """The four per-analysis actions as a widget for the last table column.
+        Each button carries its own analysis id (default argument in the lambda --
+        otherwise the last loop value would apply to ALL rows), so a click works on the
+        row it's on and not on whatever the table happens to have selected."""
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(2, 2, 2, 2)
         h.setSpacing(4)
         knoppen = (
-            ("Openen", "Deze analyse openen op de weergavepagina.",
+            ("Open", "Open this analysis on the view page.",
              lambda _=False, a=analyse_id: self._open_analyse_uit_bibliotheek(a)),
-            ("ℹ Info...", "Met welke appversie, backend en instellingen is deze "
-                          "analyse gemaakt?",
+            ("ℹ Info...", "With which app version, backend and settings was this "
+                          "analysis made?",
              lambda _=False, a=analyse_id: self._toon_analyse_info(a)),
-            ("Hernoemen...", "Deze analyse een andere titel geven.",
+            ("Rename...", "Give this analysis a different title.",
              lambda _=False, a=analyse_id, t=titel: self._hernoem_analyse(a, t)),
-            ("Verwijderen", "Deze analyse verwijderen, inclusief video en landmarks.",
+            ("Delete", "Delete this analysis, including video and landmarks.",
              lambda _=False, a=analyse_id, t=titel: self._verwijder_analyse(a, t)),
         )
         for tekst, tip, slot in knoppen:
@@ -6880,20 +6888,21 @@ class MainWindow(QMainWindow):
         return w
 
     def _vernieuw_analyses(self):
-        """Vult de analysetabel voor de geselecteerde schaatser uit de events-cache
-        (geen npz/video nodig — daarom is de bibliotheek direct snel)."""
+        """Fills the analysis table for the selected skater from the events cache
+        (no npz/video needed -- that's why the library is instantly fast)."""
         sid = self._geselecteerde_schaatser_id()
         self.tabel_analyses.setRowCount(0)
         if sid is not None:
             analyses = skate_db.list_analyses(self.bieb, sid)
             self.tabel_analyses.setRowCount(len(analyses))
             for rij, a in enumerate(analyses):
-                # Herkomst in de tooltip: wie hem maakte (fase 4) en met welke appversie —
-                # zo is zonder openen te zien of een analyse nog met oude code is gedraaid.
+                # Provenance in the tooltip: who made it (phase 4) and with which app
+                # version -- so without opening it you can see whether an analysis was
+                # still run with old code.
                 door = (a.get("aangemaakt_door") or "").strip()
                 versie = ((a.get("instellingen") or {}).get("app_versie") or "").strip()
-                tip = "\n".join(r for r in (f"Aangemaakt door {door}" if door else "",
-                                            f"Appversie: {versie}" if versie else "") if r)
+                tip = "\n".join(r for r in (f"Created by {door}" if door else "",
+                                            f"App version: {versie}" if versie else "") if r)
                 for kolom, tekst in enumerate(
                         [a["datum"], a["titel"], _duration_text(a)]):
                     item = QTableWidgetItem(tekst)
@@ -6904,7 +6913,8 @@ class MainWindow(QMainWindow):
                     self.tabel_analyses.setItem(rij, kolom, item)
                 knoppen = self._maak_rij_knoppen(a["id"], a["titel"])
                 self.tabel_analyses.setCellWidget(rij, 3, knoppen)
-                # Rijhoogte volgt de knoppen niet vanzelf; zonder dit worden ze afgeknepen.
+                # Row height doesn't follow the buttons automatically; without this
+                # they get squeezed.
                 self.tabel_analyses.setRowHeight(rij, knoppen.sizeHint().height() + 4)
         self.btn_bewerk_schaatser.setEnabled(sid is not None)
         self.btn_verwijder_schaatser.setEnabled(sid is not None)
@@ -6936,29 +6946,29 @@ class MainWindow(QMainWindow):
             return
         naam = self.lijst_schaatsers.currentItem().data(Qt.UserRole + 1)
         analyses = skate_db.list_analyses(self.bieb, sid)
-        tekst = f"Schaatser '{naam}' verwijderen?"
+        tekst = f"Delete skater '{naam}'?"
         if analyses:
-            tekst += (f"\n\nDe {len(analyses)} bijbehorende analyse"
-                      f"{'s' if len(analyses) != 1 else ''} (inclusief video's en "
-                      "landmarks) worden dan ook verwijderd.")
-        tekst += "\n\nDit kan niet ongedaan worden gemaakt."
-        if QMessageBox.question(self, "Schaatser verwijderen", tekst) != QMessageBox.Yes:
+            tekst += (f"\n\nThe {len(analyses)} associated analys"
+                      f"{'is' if len(analyses) == 1 else 'es'} (including videos and "
+                      "landmarks) will then also be deleted.")
+        tekst += "\n\nThis cannot be undone."
+        if QMessageBox.question(self, "Delete skater", tekst) != QMessageBox.Yes:
             return
         ids = {a["id"] for a in analyses}
         if self.analyse_id in ids:
-            self._sluit_weergave()   # laat de geopende video los vóór het wissen
+            self._sluit_weergave()   # let go of the open video before deleting
         self._sluit_vergelijk_voor(ids)
         skate_db.delete_skater(self.bieb, sid)
         self._vernieuw_schaatsers()
 
     def _hernoem_analyse(self, aid=None, huidig=""):
-        # aid/huidig komen van de knop in de rij zelf; zonder die twee valt hij terug op
-        # de tabelselectie (bv. een sneltoets die er ooit bij komt).
+        # aid/huidig come from the button in the row itself; without those two it falls
+        # back to the table selection (e.g. a shortcut that gets added someday).
         if aid is None:
             aid, huidig = self._geselecteerde_analyse_id(), self._geselecteerde_titel()
         if aid is None:
             return
-        titel, ok = QInputDialog.getText(self, "Analyse hernoemen", "Nieuwe titel:",
+        titel, ok = QInputDialog.getText(self, "Rename analysis", "New title:",
                                          text=huidig)
         if not ok or not titel.strip():
             return
@@ -6971,19 +6981,19 @@ class MainWindow(QMainWindow):
         if aid is None:
             return
         if QMessageBox.question(
-                self, "Analyse verwijderen",
-                f"Analyse '{titel}' verwijderen, inclusief de gekopieerde video en "
-                "landmarks?\n\nDit kan niet ongedaan worden gemaakt.") != QMessageBox.Yes:
+                self, "Delete analysis",
+                f"Delete analysis '{titel}', including the copied video and "
+                "landmarks?\n\nThis cannot be undone.") != QMessageBox.Yes:
             return
         if aid == self.analyse_id:
-            self._sluit_weergave()   # Windows weigert een nog geopende video te wissen
+            self._sluit_weergave()   # Windows refuses to delete a still-open video
         self._sluit_vergelijk_voor({aid})
         skate_db.delete_analysis(self.bieb, aid)
         self._vernieuw_schaatsers()
 
     def _sluit_weergave(self):
-        """Maakt de weergavepagina leeg en laat het videobestand los (nodig voordat de
-        mediamap van de geopende analyse verwijderd kan worden)."""
+        """Clears the view page and lets go of the video file (needed before the media
+        folder of the open analysis can be deleted)."""
         self.speler.release()
         self.events = []
         self.analyse_id = None
@@ -6994,17 +7004,16 @@ class MainWindow(QMainWindow):
         self.tabel.setRowCount(0)
         self.serie_hoek.clear()
         self.serie_marker.clear()
-        self.lbl_stats.setText("gem — | min — | max —")
+        self.lbl_stats.setText("avg — | min — | max —")
         self.lbl_live.setText("")
         self.btn_export.setEnabled(False)
-
-    # ── Nieuwe analyse + openen ──────────────────────────────────────────
+    # -- New analysis + opening --------------------------------------------
     def _nieuwe_analyse(self):
         schaatsers = skate_db.list_skaters(self.bieb)
         if not schaatsers:
             QMessageBox.information(
-                self, "Nieuwe analyse",
-                "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
+                self, "New analysis",
+                "First create a skater -- every analysis belongs to a profile.")
             return
         dlg = NewAnalysisDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
                                 parent=self)
@@ -7012,8 +7021,8 @@ class MainWindow(QMainWindow):
             return
         self.input_pad = dlg.video_pad
 
-        # Modelkeuze is alleen relevant voor de MediaPipe-backend; YOLO gebruikt zijn
-        # eigen model (yolo26x-pose.pt) en negeert model_pad.
+        # Model choice only matters for the MediaPipe backend; YOLO uses its own model
+        # (yolo26x-pose.pt) and ignores model_pad.
         heavy = False
         if not IS_YOLO:
             if dlg.chk_heavy.isChecked():
@@ -7022,43 +7031,43 @@ class MainWindow(QMainWindow):
                     heavy = True
                 else:
                     QMessageBox.warning(
-                        self, "Heavy-model ontbreekt",
-                        "pose_landmarker_heavy.task staat niet naast het script.\n\n"
-                        "Download het via:\nhttps://storage.googleapis.com/mediapipe-models/"
+                        self, "Heavy model missing",
+                        "pose_landmarker_heavy.task isn't next to the script.\n\n"
+                        "Download it from:\nhttps://storage.googleapis.com/mediapipe-models/"
                         "pose_landmarker/pose_landmarker_heavy/float16/latest/"
-                        "pose_landmarker_heavy.task\n\nEr wordt nu met het full-model gewerkt.")
+                        "pose_landmarker_heavy.task\n\nUsing the full model for now.")
                     self.model_pad = DEFAULT_MODEL
             else:
                 self.model_pad = DEFAULT_MODEL
 
             if not os.path.isfile(self.model_pad):
                 gekozen, _ = QFileDialog.getOpenFileName(
-                    self, "Kies pose_landmarker .task model", "", "Model (*.task)")
+                    self, "Choose pose_landmarker .task model", "", "Model (*.task)")
                 if not gekozen:
                     return
                 self.model_pad = gekozen
 
-        # Eerste frame lezen; delen door doel- en horizon-kiezer.
+        # Read the first frame; shared by the target and horizon pickers.
         frame0 = self._lees_eerste_frame()
         if frame0 is None:
             return
 
-        # Doelschaatser laten kiezen op het eerste frame (klik of kader).
+        # Have the target skater chosen on the first frame (click or box).
         keuze = self._kies_doelschaatser(frame0)
-        if keuze is False:               # dialoog afgebroken
+        if keuze is False:               # dialog cancelled
             return
         self.doel_punt, self.doel_kader = keuze
 
-        # Perspectiefkalibratie (baanlijnen) óf de klassieke horizon-stap.
+        # Perspective calibration (track lines) or the classic horizon step.
         self.perspectief = None
         if dlg.chk_perspectief.isChecked():
             self.perspectief = self._kies_perspectief(frame0)
-            if self.perspectief is None:     # dialoog afgebroken
+            if self.perspectief is None:     # dialog cancelled
                 return
-            self.horizon_deg, self.auto_horizon = 0.0, False   # kalibratie vervangt de horizon
+            self.horizon_deg, self.auto_horizon = 0.0, False   # calibration replaces the horizon
         else:
             horizon = self._kies_horizon(frame0)
-            if horizon is False:         # dialoog afgebroken
+            if horizon is False:         # dialog cancelled
                 return
             self.horizon_deg, self.auto_horizon = horizon
 
@@ -7068,8 +7077,8 @@ class MainWindow(QMainWindow):
         self.bocht_overslaan = dlg.chk_bocht.isChecked()
         self.deinterlacen = dlg.deinterlacen
 
-        # Wat het .npz níet bevat maar heropenen wél nodig heeft/wil documenteren.
-        # (De bocht-vlag per frame zit wél in het npz; dit is puur de instelling.)
+        # What the .npz does NOT contain but reopening needs/wants documented.
+        # (The per-frame corner flag IS in the npz; this is purely the setting.)
         instellingen = {
             "smooth_n": self.smooth_n,
             "threshold": self.threshold,
@@ -7083,29 +7092,28 @@ class MainWindow(QMainWindow):
             "heavy": heavy,
             "backend_naam": BACKEND_NAME,
             "perspectief_gebruikt": self.perspectief is not None,
-            # De kalibratie-invoer (lijnen + parameters), zodat heropenen de correctie
-            # herberekent i.p.v. hem te laten verdampen — en zodat een volgende analyse
-            # uit dezelfde camerastand hem kan overnemen.
+            # The calibration input (lines + parameters), so reopening recomputes the
+            # correction instead of letting it evaporate -- and so a next analysis from
+            # the same camera position can reuse it.
             "perspectief": self.perspectief.naar_dict() if self.perspectief else None,
         }
         self._pending_opslag = {"schaatser_id": dlg.schaatser_id, "titel": dlg.titel,
                                 "instellingen": instellingen}
 
-        # Op de bibliotheek blijven; de voortgangsbalk loopt onderin en bij afronden
-        # springt de weergave vanzelf naar het resultaat (zolang er niets anders geopend is).
+        # Stay on the library; the progress bar runs at the bottom and when done the
+        # view jumps to the result automatically (as long as nothing else is open).
         self._start_analyse()
 
     def _kies_perspectief(self, frame0):
-        """Perspectiefkalibratie voor één video: eerst aanbieden om er een uit een
-        eerdere analyse over te nemen (zelfde camerastand), dan de `CalibrationPicker`
-        — voorgevuld als er iets overgenomen is, zodat controleren en corrigeren
-        dezelfde handeling blijft. Retourneert een PerspectiveConfig, of None bij
-        afbreken.
+        """Perspective calibration for one video: first offers to take one over from an
+        earlier analysis (same camera position), then the `CalibrationPicker` --
+        prefilled if something was taken over, so checking and correcting stays one
+        action. Returns a PerspectiveConfig, or None on cancel.
 
-        Hergebruik is hier geen gemak maar een meetkundige voorwaarde: analyses die je
-        onderling wilt vergelijken moeten op dezelfde kalibratie rusten, anders meet je
-        de spreiding tussen zeven keer natrekken in plaats van het effect van de
-        correctie.
+        Reuse here isn't a convenience but a geometric requirement: analyses you want to
+        compare against each other must rest on the same calibration, otherwise you're
+        measuring the spread between seven separate tracings instead of the effect of
+        the correction.
         """
         h, w = frame0.shape[:2]
         invoer = config = None
@@ -7114,18 +7122,18 @@ class MainWindow(QMainWindow):
         except Exception:
             eerdere = []
         if eerdere:
-            keuzes = ["Nieuwe kalibratie (lijnen zelf natrekken)"]
+            keuzes = ["New calibration (trace the lines yourself)"]
             for k in eerdere[:15]:
                 datum = k["datum"] or ""
                 naam = k["schaatser"] or "?"
                 extra = f" — {k['notitie']}" if k["notitie"] else ""
                 keuzes.append(f"{k['titel']} ({naam}, {datum}){extra}")
             keuze, ok = QInputDialog.getItem(
-                self, "Kalibratie overnemen?",
-                "Er staan al kalibraties in de bibliotheek voor beeld van "
-                f"{w}×{h}. Een kalibratie hoort bij één camerastand, dus clips uit\n"
-                "dezelfde opname horen dezelfde te gebruiken — alleen dan zijn hun "
-                "hoeken onderling vergelijkbaar.\n\nOvernemen van:",
+                self, "Reuse a calibration?",
+                "There are already calibrations in the library for "
+                f"{w}×{h} video. A calibration belongs to one camera position, so clips "
+                "from\nthe same recording should use the same one -- only then are "
+                "their\nangles comparable to each other.\n\nReuse from:",
                 keuzes, 0, False)
             if not ok:
                 return None
@@ -7136,9 +7144,9 @@ class MainWindow(QMainWindow):
                     invoer = config.invoer
                 except Exception as e:
                     QMessageBox.warning(
-                        self, "Kalibratie onbruikbaar",
-                        f"Die opgeslagen kalibratie is niet te herberekenen:\n\n{e}\n\n"
-                        "Trek de lijnen opnieuw na.")
+                        self, "Calibration unusable",
+                        f"That saved calibration can't be recomputed:\n\n{e}\n\n"
+                        "Trace the lines again.")
                     config = invoer = None
 
         kdlg = CalibrationPicker(frame0, self, calibration_input=invoer, config=config)
@@ -7148,36 +7156,36 @@ class MainWindow(QMainWindow):
 
     def _laad_analyse_data(self, analyse_id):
         """
-        Laadt één analyse uit de bibliotheek en herberekent de afgeleiden met de ópgeslagen
-        instellingen (de fase 0-naad). Retourneert een dict, of None als het niet lukt (dan
-        is de melding al getoond).
+        Loads one analysis from the library and recomputes the derivatives with the
+        saved settings (the phase 0 seam). Returns a dict, or None if it fails (the
+        message has then already been shown).
 
-        Raakt bewust géén MainWindow-state aan — `smooth_n`/`threshold` komen als waarde
-        terug i.p.v. op self gezet te worden. Zo kan de vergelijkpagina analyses laden
-        zonder de instellingen van de geopende analyse (die `_na_edit` gebruikt) te
-        overschrijven.
+        Deliberately touches no MainWindow state -- `smooth_n`/`threshold` come back as
+        a value instead of being set on self. That way the compare page can load
+        analyses without overwriting the settings of the open analysis (which `_na_edit`
+        uses).
         """
         try:
             data = skate_db.load_analysis(self.bieb, analyse_id)
         except Exception as e:
-            QMessageBox.critical(self, "Fout bij openen",
-                                 f"Kan de analyse niet laden:\n\n{e}")
+            QMessageBox.critical(self, "Error opening",
+                                 f"Can't load the analysis:\n\n{e}")
             return None
 
         sync = skate_db.video_sync_status(data["video_pad"], data["meta"].get("video_bytes"))
         if sync == "ontbreekt":
             QMessageBox.warning(
-                self, "Video ontbreekt",
-                "Het videobestand van deze analyse staat (nog) niet op schijf — "
-                "mogelijk is de cloudmap nog aan het synchroniseren.\n\n"
-                "Probeer het later opnieuw.")
+                self, "Video missing",
+                "The video file for this analysis isn't (yet) on disk -- "
+                "the cloud folder may still be syncing.\n\n"
+                "Try again later.")
             return None
         if sync == "onvolledig":
             QMessageBox.warning(
-                self, "Video nog niet gesynchroniseerd",
-                "Het videobestand is nog niet volledig binnengehaald uit de gedeelde "
-                "cloudmap (het is kleiner dan bij het opslaan).\n\n"
-                "Wacht tot de synchronisatie klaar is en probeer het opnieuw.")
+                self, "Video not fully synced yet",
+                "The video file hasn't been fully downloaded from the shared "
+                "cloud folder yet (it's smaller than when it was saved).\n\n"
+                "Wait for the sync to finish and try again.")
             return None
 
         info, resultaten = data["info"], data["resultaten"]
@@ -7185,9 +7193,9 @@ class MainWindow(QMainWindow):
         smooth_n = int(inst.get("smooth_n", 5))
         threshold = float(inst.get("threshold", 0.015))
 
-        # Perspectiefkalibratie terug uit de instellingen (de lijnen zijn bewaard, de
-        # matrices worden hier herberekend). Faalt dat, dan gaat het openen gewoon door
-        # zónder correctie — met een melding, want de hoeken wijken dan af.
+        # Perspective calibration back from the settings (the lines are saved, the
+        # matrices are recomputed here). If that fails, opening just continues without
+        # correction -- with a warning, since the angles then deviate.
         perspectief, persp_fout = None, None
         if inst.get("perspectief"):
             try:
@@ -7195,15 +7203,15 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 persp_fout = str(e)
 
-        # De horizon zit al per frame in het .npz; alleen de afgeleiden herberekenen.
+        # The horizon is already per frame in the .npz; only the derivatives need recomputing.
         process_derivatives(resultaten, info.w, info.h, info.fps, smooth_n, threshold,
                            perspectief=perspectief)
         events = segment_pushes(resultaten)
-        # De events-cache is een momentopname van de berekening bij het opslaan; wat je
-        # hier ziet is vers herberekend. Bijwerken houdt de lijstweergave (aantal afzetten,
-        # gemiddelde hoek) gelijk aan de tabel — ook voor analyses van vóór een
-        # algoritme-verbetering. Mislukt het (bv. DB even op slot in de cloudmap), dan is
-        # dat geen reden om het openen af te breken.
+        # The events cache is a snapshot of the computation at save time; what you see
+        # here is freshly recomputed. Updating it keeps the list view (push count,
+        # average angle) in sync with the table -- even for analyses from before an
+        # algorithm improvement. If it fails (e.g. the DB briefly locked in the cloud
+        # folder), that's no reason to abort opening.
         try:
             skate_db.refresh_events_cache(self.bieb, analyse_id, events)
         except Exception:
@@ -7221,14 +7229,14 @@ class MainWindow(QMainWindow):
             "perspectief_gebruikt": bool(inst.get("perspectief_gebruikt")),
             "perspectief": perspectief,
             "perspectief_fout": persp_fout,
-            # Zo krijgt de speler exact de pixels te zien waarop gemeten is. Een analyse
-            # van vóór deze functie mist de sleutel en toont dus het ruwe beeld — precies
-            # wat er toen ook gemeten is.
+            # This way the player sees exactly the pixels the measurement was made on. An
+            # analysis from before this function is missing the key and so shows the raw
+            # image -- exactly what was measured back then too.
             "deinterlaced": bool(inst.get("deinterlaced")),
         }
 
     def _open_analyse_uit_bibliotheek(self, analyse_id=None):
-        """Opent een opgeslagen analyse op de weergavepagina."""
+        """Opens a saved analysis on the view page."""
         if analyse_id is None:
             analyse_id = self._geselecteerde_analyse_id()
         if analyse_id is None:
@@ -7237,63 +7245,63 @@ class MainWindow(QMainWindow):
         if data is None:
             return
 
-        # Deze twee stuurt de skelet-editor aan (_na_edit herberekent ermee).
+        # These two drive the skeleton editor (_na_edit recomputes with them).
         self.smooth_n = data["smooth_n"]
         self.threshold = data["threshold"]
         self.deinterlacen = data["deinterlaced"]
         self.perspectief = data["perspectief"]
         if data["perspectief_fout"]:
             QMessageBox.warning(
-                self, "Kalibratie kon niet herberekend worden",
-                "Deze analyse is met perspectiefcorrectie gedraaid, maar de bewaarde "
-                "kalibratie levert nu geen geldige camerastand op:\n\n"
+                self, "Calibration couldn't be recomputed",
+                "This analysis was run with perspective correction, but the saved "
+                "calibration no longer produces a valid camera position:\n\n"
                 f"{data['perspectief_fout']}\n\n"
-                "De hoeken zijn zonder correctie herberekend en wijken dus af.")
+                "The angles have been recomputed without correction and so deviate.")
         elif data["perspectief_gebruikt"] and self.perspectief is None:
             QMessageBox.information(
-                self, "Zonder perspectiefcorrectie",
-                "Deze analyse is destijds met perspectiefcorrectie gedraaid, van vóór "
-                "het bewaren van de kalibratie. De hoeken zijn nu zonder correctie "
-                "herberekend en kunnen dus afwijken.")
+                self, "Without perspective correction",
+                "This analysis was run with perspective correction at the time, from "
+                "before calibrations were saved. The angles have now been recomputed "
+                "without correction and may therefore deviate.")
 
         self.input_pad = data["video_pad"]
         self.analyse_id = analyse_id
         self.analyse_schaatser_id = data["meta"]["schaatser_id"]
         self.analyse_schaatser_naam = self._schaatser_naam(self.analyse_schaatser_id)
-        # De gebruiker bekijkt nu bewust deze analyse; een op de achtergrond lopende
-        # analyse mag hem hier straks niet uit wegrukken.
+        # The user is now deliberately viewing this analysis; an analysis running in
+        # the background shouldn't yank it out from under them in a moment.
         self._auto_toon_klaar = False
         self.stack.setCurrentWidget(self.pagina_analyse)
         self._toon_resultaten(data["info"], data["resultaten"], data["events"],
                               bron=data["titel"])
 
-    # ── Vergelijken (twee analyses naast elkaar) ─────────────────────────
+    # -- Comparing (two analyses side by side) --------------------------
     def _vergelijk_schaatsers(self):
-        """Opent de vergelijkpagina; vraagt eerst om de analyses die nog ontbreken."""
+        """Opens the compare page; first asks for whichever analyses are still missing."""
         if not any(s["aantal_analyses"] for s in skate_db.list_skaters(self.bieb)):
             QMessageBox.information(
-                self, "Nog niets te vergelijken",
-                "Er staan nog geen analyses in de bibliotheek.")
+                self, "Nothing to compare yet",
+                "There are no analyses in the library yet.")
             return
         for kant in (self.kant_links, self.kant_rechts):
             if kant.heeft_analyse():
-                continue          # al gevuld (bv. bij terugkeren) — laten staan
+                continue          # already filled (e.g. on returning) -- leave it
             if not self._kies_vergelijk_kant(kant):
-                break             # afgebroken: met wat er ligt doorgaan
+                break             # cancelled: continue with what's there
         if not (self.kant_links.heeft_analyse() or self.kant_rechts.heeft_analyse()):
-            return                # helemaal niets gekozen → niet naar een lege pagina
+            return                # nothing chosen at all -> don't go to an empty page
         self.stack.setCurrentWidget(self.pagina_vergelijk)
         self.statusBar().showMessage(
-            "Vergelijken: zet per kant een sync-punt op dezelfde fase van de slag en "
-            "druk op 'Start alles'.")
+            "Comparing: set a sync point per side on the same phase of the stroke and "
+            "press 'Start all'.")
 
     def _toon_analyse_info(self, analyse_id=None):
-        """Info over een analyse: appversie/commit, backend, datum, maker en de
-        belangrijkste instellingen. Gedeeld door de knop op de weergavepagina (de geopende
-        analyse) en die op de startpagina (de rij die in de bibliotheek geselecteerd is).
-        De meta wordt hier vers uit de DB gehaald (goedkoop — `analyse_meta` leest het npz
-        niet), zodat er geen kopie op MainWindow hoeft te leven die na een verse analyse
-        én na het openen bijgehouden moet worden."""
+        """Info about an analysis: app version/commit, backend, date, creator and the
+        main settings. Shared by the button on the view page (the open analysis) and the
+        one on the start page (the row selected in the library). The metadata is fetched
+        fresh from the DB here (cheap -- `analysis_meta` doesn't read the npz), so no
+        copy needs to live on MainWindow that both a fresh analysis and opening one
+        would have to keep in sync."""
         if analyse_id is None:
             analyse_id = self.analyse_id
         if analyse_id is None:
@@ -7301,47 +7309,47 @@ class MainWindow(QMainWindow):
         try:
             meta = skate_db.analysis_meta(self.bieb, analyse_id)
         except Exception as e:
-            QMessageBox.warning(self, "Info", f"Kon de analysegegevens niet lezen:\n{e}")
+            QMessageBox.warning(self, "Info", f"Could not read the analysis data:\n{e}")
             return
         show_dialog(AnalysisInfoDialog(
             meta, self._schaatser_naam(meta.get("schaatser_id")), parent=self))
 
     def _vergelijk_met_deze(self):
-        """Vanaf de weergavepagina rechtstreeks vergelijken: de geopende analyse gaat
-        links, en voor rechts wordt (als daar nog niets bruikbaars staat) meteen om een
-        analyse gevraagd. Scheelt de omweg via de bibliotheek."""
+        """Compare directly from the view page: the open analysis goes on the left, and
+        for the right side (if nothing usable is there yet) an analysis is asked for
+        right away. Skips the detour through the library."""
         if self.analyse_id is None:
             return
         self._pauzeer_alles()
         if not self._zet_vergelijk_kant(self.kant_links, self.analyse_id,
                                         self.analyse_schaatser_naam):
-            return          # melding is al getoond
-        # Een andere analyse rechts blijft staan (inclusief sync-punt); dezelfde analyse
-        # twee keer naast elkaar heeft geen zin.
+            return          # message already shown
+        # A different analysis on the right stays put (sync point included); the same
+        # analysis twice side by side makes no sense.
         if (not self.kant_rechts.heeft_analyse()
                 or self.kant_rechts.analyse_id == self.analyse_id):
             self._kies_vergelijk_kant(self.kant_rechts,
                                       voorkeur_id=self.analyse_schaatser_id)
         self.stack.setCurrentWidget(self.pagina_vergelijk)
         self.statusBar().showMessage(
-            "Vergelijken: zet per kant een sync-punt op dezelfde fase van de slag en "
-            "druk op 'Start alles'.")
+            "Comparing: set a sync point per side on the same phase of the stroke and "
+            "press 'Start all'.")
 
     def _kies_vergelijk_kant(self, kant, voorkeur_id=None):
-        """Laat één kant een analyse kiezen en laadt die. True als het gelukt is."""
+        """Lets one side choose an analysis and loads it. True if it succeeded."""
         if voorkeur_id is None:
             voorkeur_id = self._geselecteerde_schaatser_id()
-        dlg = AnalysisPicker(self.bieb, titel=f"{kant.naam}: kies analyse",
+        dlg = AnalysisPicker(self.bieb, titel=f"{kant.naam}: choose analysis",
                              voorkeur_schaatser_id=voorkeur_id, parent=self)
         if show_dialog(dlg) != QDialog.Accepted or dlg.analyse_id is None:
             return False
         return self._zet_vergelijk_kant(kant, dlg.analyse_id, dlg.schaatser_naam)
 
     def _zet_vergelijk_kant(self, kant, analyse_id, schaatser_naam):
-        """Laadt een analyse uit de bibliotheek in één kant. True als het gelukt is.
+        """Loads an analysis from the library into one side. True if it succeeded.
 
-        Bewust opnieuw laden i.p.v. de resultatenlijst van de weergavepagina delen: de
-        skelet-editor muteert die objecten in place, en elke speler heeft z'n eigen
+        Deliberately reloading rather than sharing the view page's results list: the
+        skeleton editor mutates those objects in place, and each player has its own
         VideoCapture."""
         self._stop_alles()
         data = self._laad_analyse_data(analyse_id)
@@ -7351,8 +7359,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _sluit_vergelijk_voor(self, ids):
-        """Laat de video's van deze analyses los op de vergelijkpagina — Windows weigert
-        een nog geopende video te wissen, en rmtree faalt dan stílzwijgend."""
+        """Lets go of the videos for these analyses on the compare page -- Windows
+        refuses to delete a still-open video, and rmtree then fails silently."""
         for kant in (self.kant_links, self.kant_rechts):
             if kant.analyse_id in ids:
                 kant.leeg()
@@ -7367,19 +7375,20 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def _start_alles(self, vanaf_sync=None):
-        """Beide video's tegelijk afspelen, aangestuurd door één `MasterClock`.
-        `vanaf_sync`: None = wat het vinkje zegt (de knop), False = hervatten (spatie)."""
+        """Plays both videos at the same time, driven by one `MasterClock`.
+        `vanaf_sync`: None = whatever the checkbox says (the button), False = resume
+        (space)."""
         kanten = [k for k in (self.kant_links, self.kant_rechts) if k.heeft_analyse()]
         if not kanten:
-            QMessageBox.information(self, "Niets te starten",
-                                    "Kies eerst voor beide kanten een analyse.")
+            QMessageBox.information(self, "Nothing to start",
+                                    "First choose an analysis for both sides.")
             return
         self._pauzeer_alles()
         if vanaf_sync is None:
             vanaf_sync = self.chk_vanaf_sync.isChecked()
         if vanaf_sync:
-            # Terugspoelen heropent de video en spoelt sequentieel; die wachttijd zit zo
-            # eenmalig vooraan in plaats van in de eerste tick.
+            # Rewinding reopens the video and scrubs sequentially; that wait then sits
+            # once up front instead of in the first tick.
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 for kant in kanten:
@@ -7389,36 +7398,36 @@ class MainWindow(QMainWindow):
         self.klok.start([k.speler for k in kanten])
 
     def _stop_alles(self):
-        # De klok pauzeert zelf de spelers die eronder liepen (zie MasterClock.stop); de
-        # andere met rust laten, anders werkt ▶ per kant niet meer.
+        # The clock itself pauses the players that were running under it (see
+        # MasterClock.stop); leave the others alone, otherwise ▶ per side stops working.
         self.klok.stop()
 
     def _zet_alles_snelheid(self, _idx=None):
-        """De gedeelde snelheid van de vergelijkpagina toepassen.
+        """Applies the compare page's shared speed.
 
-        Beide kanten krijgen dezelfde factor — ook voor los afspelen, want twee video's
-        op verschillend tempo naast elkaar zijn niet te vergelijken. Draait de masterklok,
-        dan wordt die opnieuw geijkt vanaf de huidige stand (`MasterClock.recalibrate`)."""
+        Both sides get the same factor -- also for playing separately, since two videos
+        at different speeds side by side can't be compared. If the master clock is
+        running, it's recalibrated from the current position (`MasterClock.recalibrate`)."""
         idx = self.combo_alles_snelheid.currentIndex()
         for kant in (self.kant_links, self.kant_rechts):
-            kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
+            kant.speler.combo_speed.setCurrentIndex(idx)   # restarts a running timer
         self.klok.recalibrate()
 
     def _lees_eerste_frame(self, pad=None):
-        """Leest het eerste frame van de gekozen video, of None bij een fout.
-        Zonder `pad` de huidige `self.input_pad`; met `pad` een willekeurige video
-        (gebruikt door de batch-verzamellus voor elke clip apart)."""
+        """Reads the first frame of the chosen video, or None on failure.
+        Without `pad`, the current `self.input_pad`; with `pad`, an arbitrary video
+        (used by the batch collection loop for each clip separately)."""
         cap = cv2.VideoCapture(pad or self.input_pad)
         ret, frame0 = cap.read()
         cap.release()
         if not ret:
-            QMessageBox.critical(self, "Fout", "Kan het eerste frame niet lezen.")
+            QMessageBox.critical(self, "Error", "Can't read the first frame.")
             return None
         return frame0
 
     def _kies_doelschaatser(self, frame0):
-        """Toont het eerste frame in een kiezer. Retourneert `(doel_punt, doel_kader)` —
-        elk genormaliseerd of None ('volg grootste') — of False (afgebroken)."""
+        """Shows the first frame in a picker. Returns `(doel_punt, doel_kader)` -- each
+        normalized or None ('follow largest') -- or False (cancelled)."""
         dlg = TargetPicker(frame0, self)
         if show_dialog(dlg) != QDialog.Accepted:
             return False
@@ -7426,8 +7435,8 @@ class MainWindow(QMainWindow):
 
     def _kies_horizon(self, frame0):
         """
-        Laat de ijslijn/kanteling instellen. Retourneert (graden, auto_per_frame) of
-        False (afgebroken).
+        Lets the ice line/tilt be set. Returns (degrees, auto_per_frame) or
+        False (cancelled).
         """
         dlg = HorizonPicker(frame0, self)
         if show_dialog(dlg) != QDialog.Accepted:
@@ -7435,48 +7444,49 @@ class MainWindow(QMainWindow):
         return dlg.horizon_deg, dlg.auto_per_frame
 
     def _terug_naar_start(self):
-        # pauzeren gebeurt via de stack.currentChanged-haak (_pauzeer_alles)
-        self._vernieuw_schaatsers()   # nieuwe/gewijzigde analyses direct zichtbaar
+        # Pausing happens via the stack.currentChanged hook (_pauzeer_alles)
+        self._vernieuw_schaatsers()   # new/changed analyses immediately visible
         self.stack.setCurrentWidget(self.pagina_start)
 
     def _warn_backend_fallback(self):
-        """Meldt (één keer) dat de YOLO-backend niet geladen kon worden en er dus met
-        MediaPipe gemeten wordt — een andere detector geeft andere hoeken, dus dat mag
-        niet onopgemerkt blijven. Het warmdraaien start bij het tonen van het venster, dus
-        op het moment dat hier een analyse begint is de uitkomst allang bekend.
+        """Reports (once) that the YOLO backend couldn't be loaded and so measurements
+        are being made with MediaPipe -- a different detector gives different angles, so
+        that can't go unnoticed. Warming up starts when the window is shown, so by the
+        time an analysis starts here the outcome is already known.
 
-        In een gebundelde .exe is er geen MediaPipe om op terug te vallen; daar is het
-        geen waarschuwing maar een blokkade, en zegt de melding dat ook."""
+        In a bundled .exe there's no MediaPipe to fall back to; there it's not a warning
+        but a blockage, and the message says so too."""
         if not BACKEND_ERROR or self._backend_gemeld:
             return
         self._backend_gemeld = True
         if is_frozen():
-            # In het gebundelde pakket is er geen tweede backend om op terug te vallen:
-            # er valt nu niets te meten (bibliotheek en opnames bekijken werken wel).
+            # In the bundled package there's no second backend to fall back to: nothing
+            # can be measured now (the library and viewing recordings still work).
             QMessageBox.critical(
-                self, "Analyse-backend niet beschikbaar",
-                "De meegeleverde analyse-backend liet zich niet laden:\n\n"
+                self, "Analysis backend not available",
+                "The bundled analysis backend failed to load:\n\n"
                 f"{BACKEND_ERROR}\n\n"
-                "Er kan nu niet geanalyseerd worden. De bibliotheek openen en opnames "
-                "bekijken werkt wel. Geef deze melding door aan de beheerder van de app."
-                # Het logboek is alleen iets waard als de gebruiker weet waar het staat.
-                + (f"\n\nHet volledige logboek staat in:\n{LOGPATH}" if LOGPATH else ""))
+                "Analysis isn't possible right now. Opening the library and viewing "
+                "recordings still works. Please pass this message on to whoever manages "
+                "the app."
+                # The log file is only worth mentioning if the user knows where it is.
+                + (f"\n\nThe full log file is at:\n{LOGPATH}" if LOGPATH else ""))
             return
         QMessageBox.warning(
-            self, "YOLO-backend niet beschikbaar",
-            "torch/ultralytics is wel geïnstalleerd, maar liet zich niet laden:\n\n"
+            self, "YOLO backend not available",
+            "torch/ultralytics is installed, but failed to load:\n\n"
             f"{BACKEND_ERROR}\n\n"
-            "De analyse draait daarom met de MediaPipe-backend. Die meet minder "
-            "nauwkeurig, dus vergelijk deze analyse niet zomaar met eerdere.")
+            "The analysis will therefore run on the MediaPipe backend. That measures "
+            "less accurately, so don't casually compare this analysis with earlier ones.")
 
     def _start_analyse(self):
         self._warn_backend_fallback()
         self.speler.set_controls_active(False)
         self.btn_export.setEnabled(False)
-        self._auto_toon_klaar = True          # nog niets anders geopend → resultaat straks tonen
-        self._analyse_waarschuwingen = []     # meldingen uit de analyse zelf (na afloop tonen)
-        self._zet_bezig(True)                 # geen tweede worker/botsende bewerking eroverheen
-        self._toon_voortgangsbalk("Video analyseren...")
+        self._auto_toon_klaar = True          # nothing else open yet -> show the result later
+        self._analyse_waarschuwingen = []     # messages from the analysis itself (shown afterwards)
+        self._zet_bezig(True)                 # no second worker/clashing edit on top of it
+        self._toon_voortgangsbalk("Analyzing video...")
 
         opslag = self._pending_opslag or {}
         self.worker = AnalysisWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
@@ -7505,50 +7515,50 @@ class MainWindow(QMainWindow):
         if totaal > 0:
             self.bar_voortgang.setRange(0, 100)
             self.bar_voortgang.setValue(int(frame_nr / totaal * 100))
-        self.lbl_voortgang.setText(f"Video analyseren... ({frame_nr}/{totaal})")
+        self.lbl_voortgang.setText(f"Analyzing video... ({frame_nr}/{totaal})")
 
     def _analyse_status(self, tekst):
-        # Busy-fase zonder bekende duur (videokopie naar de bibliotheek).
+        # Busy phase with no known duration (video copy to the library).
         self.bar_voortgang.setRange(0, 0)
         self.lbl_voortgang.setText(tekst)
 
     def _analyse_waarschuwing(self, tekst):
-        """Melding uit de analyse zelf (bv. 'je klik raakte niemand, nu volgt de grootste
-        beweger'). Verzamelen i.p.v. meteen tonen: een modale box halverwege zou de
-        gebruiker midden in een lange analyse overvallen. `_analyse_klaar`/`_analyse_fout`
-        legen de lijst weer."""
+        """A message from the analysis itself (e.g. 'your click missed everyone, now
+        following the largest mover'). Collected instead of shown right away: a modal
+        box halfway through would ambush the user in the middle of a long analysis.
+        `_analyse_klaar`/`_analyse_fout` empty the list again."""
         self._analyse_waarschuwingen.append(tekst)
 
     def _toon_analyse_waarschuwingen(self):
         meldingen = getattr(self, "_analyse_waarschuwingen", [])
         self._analyse_waarschuwingen = []
         if meldingen:
-            QMessageBox.warning(self, "Let op bij deze analyse", "\n\n".join(meldingen))
+            QMessageBox.warning(self, "Note about this analysis", "\n\n".join(meldingen))
 
     def _meld_bocht(self, resultaten):
-        """Zeg hoeveel van de clip als bocht is overgeslagen. Is dat álles, dan is een
-        lege tabel geen meting maar een verkeerd gekozen clip (of een te strenge
-        drempel) — dat verdient een echte waarschuwing i.p.v. '0 afzetten'."""
+        """Says how much of the clip was skipped as corner. If that's everything, an
+        empty table isn't a measurement but a wrongly chosen clip (or too strict a
+        threshold) -- that deserves a real warning instead of '0 pushes'."""
         n = len(resultaten)
         if not n:
             return
         bocht = sum(1 for r in resultaten if r.bocht)
         if bocht == n:
             self._analyse_waarschuwingen.append(
-                "In deze video staat de schaatser nergens frontaal in beeld — hij is dus "
-                "volledig als 'bocht' aangemerkt en er zijn geen afzetten gemeten.\n"
-                "Klopt dat niet, analyseer de video dan opnieuw met 'Bocht overslaan' uit.")
+                "In this video the skater is never facing the camera anywhere -- so the "
+                "whole thing has been marked as 'corner' and no pushes were measured.\n"
+                "If that's not right, re-analyze the video with 'Skip corner' turned off.")
         elif bocht:
             self.statusBar().showMessage(
-                f"{bocht} van {n} frames ({bocht / n:.0%}) overgeslagen: bocht.", 10000)
+                f"{bocht} of {n} frames ({bocht / n:.0%}) skipped: corner.", 10000)
 
     def _opslag_fout(self, bericht):
         if self._afsluiten:
             return
         QMessageBox.warning(
-            self, "Niet opgeslagen in bibliotheek",
-            "De analyse is gelukt, maar kon niet in de bibliotheek worden opgeslagen:\n\n"
-            f"{bericht}\n\nDe resultaten zijn nu wel zichtbaar, maar niet bewaard.")
+            self, "Not saved in library",
+            "The analysis succeeded, but couldn't be saved in the library:\n\n"
+            f"{bericht}\n\nThe results are visible now, but not kept.")
 
     def _analyse_fout(self, bericht):
         if self._afsluiten:
@@ -7556,13 +7566,13 @@ class MainWindow(QMainWindow):
         self._verberg_voortgangsbalk()
         self._zet_bezig(False)
         self._pending_opslag = None
-        self._analyse_waarschuwingen = []      # de fout zegt al genoeg
-        QMessageBox.critical(self, "Fout bij analyseren", bericht)
+        self._analyse_waarschuwingen = []      # the error already says enough
+        QMessageBox.critical(self, "Error during analysis", bericht)
         self.speler.set_controls_active(False)
 
     def _analyse_klaar(self, info, resultaten, events, analyse_id):
         if self._afsluiten:
-            return          # signaal van vlak vóór het afsluiten: niets meer opbouwen
+            return          # signal from just before closing: build nothing more
         self._verberg_voortgangsbalk()
         self._zet_bezig(False)
         opslag = self._pending_opslag or {}
@@ -7571,69 +7581,71 @@ class MainWindow(QMainWindow):
         self._toon_analyse_waarschuwingen()
 
         if not self._auto_toon_klaar:
-            # De gebruiker is intussen met een andere analyse bezig → niet uit z'n
-            # weergave rukken; alleen de lijst verversen en het melden.
+            # The user is meanwhile busy with a different analysis -> don't yank them
+            # out of their view; just refresh the list and report it.
             self._vernieuw_schaatsers()
-            titel = opslag.get("titel") or "analyse"
+            titel = opslag.get("titel") or "analysis"
             self.statusBar().showMessage(
-                f"Analyse '{titel}' klaar en opgeslagen in de bibliotheek.", 10000)
+                f"Analysis '{titel}' done and saved in the library.", 10000)
             return
 
         self.analyse_id = analyse_id
         self.analyse_schaatser_id = opslag.get("schaatser_id")
         self.analyse_schaatser_naam = self._schaatser_naam(self.analyse_schaatser_id)
         if analyse_id is not None:
-            # Weergave leest voortaan de bibliotheekkopie; het origineel mag weg.
+            # The view now reads the library copy from here on; the original may go.
             try:
                 self.input_pad = skate_db.analysis_video_path(self.bieb, analyse_id)
             except Exception:
-                pass   # terugvallen op de bronvideo (alleen weergave)
+                pass   # fall back to the source video (view only)
         self.stack.setCurrentWidget(self.pagina_analyse)
         self._toon_resultaten(info, resultaten, events)
 
-    # ---- Batch-analyse (meerdere video's achter elkaar) --------------------------
+    # ---- Batch analysis (several videos one after another) --------------------------
 
-    # ── Fragmenten knippen uit een lange opname (fase 8) ─────────────────────
+    # -- Trimming fragments from a long recording (phase 8) --------------------
     def _knip_opname(self):
-        """Opname → knipvenster → clips wegschrijven → de bestaande batch-flow in.
+        """Recording -> trim window -> clips written out -> into the existing batch flow.
 
-        Ná het knippen gebeurt er niets nieuws: elk fragment is een gewoon videobestandje,
-        dus `BatchAnalysisDialog` (voorgevuld) + `_nieuwe_batch_analyse` doen de rest. Geen
-        tweede analyse-pijplijn en geen tweede opslagroute."""
+        Nothing new happens after trimming: each fragment is a plain video file, so
+        `BatchAnalysisDialog` (prefilled) + `_nieuwe_batch_analyse` do the rest. No
+        second analysis pipeline and no second save route."""
         if self._bezig:
             QMessageBox.information(
-                self, "Even geduld",
-                "Er draait al een analyse. Wacht daarop voordat je nieuwe fragmenten knipt.")
+                self, "Just a moment",
+                "An analysis is already running. Wait for it before trimming new "
+                "fragments.")
             return
         bron = self._geselecteerde_opname()
         if bron is None:
             QMessageBox.information(
-                self, "Fragmenten knippen",
-                "Kies eerst een opname in de lijst.\n\n"
-                "Staat er niets? Zet je opnames in de map 'opnames' in de bibliotheek en "
-                "druk op 'Vernieuwen'.")
+                self, "Trim fragments",
+                "First choose a recording in the list.\n\n"
+                "Nothing there? Put your recordings in the 'opnames' folder in the "
+                "library and press 'Refresh'.")
             return
-        # Cloudsync: melden en niet openen, i.p.v. het knipvenster op een half bestand laten
-        # stuklopen. Een opname van een half uur in 4K is minutenlang onderweg.
+        # Cloud sync: report and don't open, rather than letting the trim window crash
+        # on a half file. A half-hour recording in 4K is on its way for minutes.
         if not self._opname_beschikbaar(bron):
             return
-        # Vóór het markeerwerk, niet erna: zonder profiel valt er straks niets op te slaan.
+        # Before the marking work, not after: without a profile there'll be nothing to
+        # save afterwards.
         schaatsers = skate_db.list_skaters(self.bieb)
         if not schaatsers:
             QMessageBox.information(
-                self, "Fragmenten knippen",
-                "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
+                self, "Trim fragments",
+                "First create a skater -- every analysis belongs to a profile.")
             return
         try:
             info = video_info(bron["pad"])
         except Exception as e:
-            QMessageBox.critical(self, "Opname", f"Kan de opname niet openen:\n{e}")
+            QMessageBox.critical(self, "Recording", f"Can't open the recording:\n{e}")
             return
 
-        # Een losse video staat in de lokale bibliotheek, de analyses komen in de gedeelde:
-        # daar is geen bron-rij om naar te wijzen, dus die fragmenten worden analyses
-        # zonder herkomst (zoals een batch van losse clips) en het knipvenster kan er geen
-        # al-geknipte stukken bij tekenen.
+        # A loose video sits in the local library, the analyses go into the shared one:
+        # there's no source row to point at there, so those fragments become analyses
+        # without provenance (like a batch of loose clips) and the trim window can't
+        # draw any already-trimmed parts for it.
         gedeeld = bron["bieb"] == self.bieb
         gedaan = skate_db.source_fragments(self.bieb, bron["id"]) if gedeeld else []
         dlg = FragmentPicker(bron["pad"], info, gedaan=gedaan,
@@ -7654,15 +7666,15 @@ class MainWindow(QMainWindow):
         self._nieuwe_batch_analyse(voorgevuld=voorgevuld)
 
     def _knip_naar_tijdelijk(self, bron_pad, fragmenten, info, deinterlacen=False):
-        """Schrijft de gemarkeerde stukken naar een tijdelijke map en retourneert de paden
-        (of [] bij afbreken/fout). `sla_analyse_op` kopieert ze daarna zoals altijd naar
-        `media/<uuid>/` — één extra kopie van een kort bestandje, niet de moeite om die
-        opslagroute voor open te breken."""
+        """Writes the marked parts to a temporary folder and returns the paths (or []
+        on cancel/error). `sla_analyse_op` copies them afterwards as always to
+        `media/<uuid>/` -- one extra copy of a short file, not worth breaking open that
+        save route for."""
         self._ruim_knipmap_op()
         self._knip_tmpmap = tempfile.mkdtemp(prefix="schaats_fragmenten_")
 
-        voortgang = QProgressDialog("Fragmenten knippen...", "Stoppen", 0, 100, self)
-        voortgang.setWindowTitle("Knippen")
+        voortgang = QProgressDialog("Trimming fragments...", "Stop", 0, 100, self)
+        voortgang.setWindowTitle("Trimming")
         voortgang.setWindowModality(Qt.WindowModal)
         voortgang.setMinimumDuration(0)
         voortgang.setValue(0)
@@ -7680,17 +7692,18 @@ class MainWindow(QMainWindow):
             return []
         except Exception as e:
             self._ruim_knipmap_op()
-            QMessageBox.critical(self, "Knippen mislukt", str(e))
+            QMessageBox.critical(self, "Trimming failed", str(e))
             return []
         finally:
-            # close() verbergt alleen; zonder deleteLater blijft dit venster (mét zijn
-            # QScreen-verwijzing) achter in precies de flow die crashte — zie show_dialog.
+            # close() only hides it; without deleteLater this window (with its
+            # QScreen reference) stays behind in exactly the flow that used to crash --
+            # see show_dialog.
             voortgang.close()
             voortgang.deleteLater()
         return paden
 
     def _ruim_knipmap_op(self):
-        """Gooit de tijdelijke fragmentmap weg (de clips staan dan in de bibliotheek)."""
+        """Discards the temporary fragment folder (the clips are then in the library)."""
         if self._knip_tmpmap:
             shutil.rmtree(self._knip_tmpmap, ignore_errors=True)
             self._knip_tmpmap = None
@@ -7699,16 +7712,16 @@ class MainWindow(QMainWindow):
         schaatsers = skate_db.list_skaters(self.bieb)
         if not schaatsers:
             QMessageBox.information(
-                self, "Batch-analyse",
-                "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
+                self, "Batch analysis",
+                "First create a skater -- every analysis belongs to a profile.")
             return
         dlg = BatchAnalysisDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
                                   voorgevuld=voorgevuld, parent=self)
         if show_dialog(dlg) != QDialog.Accepted:
-            self._ruim_knipmap_op()      # geknipte clips zonder batch zijn nutteloos
+            self._ruim_knipmap_op()      # trimmed clips without a batch are useless
             return
 
-        # Model resolven — gedeeld voor de hele batch, alleen relevant voor MediaPipe.
+        # Resolve the model -- shared for the whole batch, only relevant for MediaPipe.
         model_pad, heavy = DEFAULT_MODEL, False
         if not IS_YOLO:
             if dlg.heavy_gevraagd:
@@ -7716,13 +7729,13 @@ class MainWindow(QMainWindow):
                     model_pad, heavy = HEAVY_MODEL, True
                 else:
                     QMessageBox.warning(
-                        self, "Heavy-model ontbreekt",
-                        "pose_landmarker_heavy.task staat niet naast het script.\n\n"
-                        "Er wordt nu met het full-model gewerkt.")
+                        self, "Heavy model missing",
+                        "pose_landmarker_heavy.task isn't next to the script.\n\n"
+                        "Using the full model for now.")
                     model_pad = DEFAULT_MODEL
             if not os.path.isfile(model_pad):
                 gekozen, _ = QFileDialog.getOpenFileName(
-                    self, "Kies pose_landmarker .task model", "", "Model (*.task)")
+                    self, "Choose pose_landmarker .task model", "", "Model (*.task)")
                 if not gekozen:
                     return
                 model_pad = gekozen
@@ -7732,10 +7745,11 @@ class MainWindow(QMainWindow):
         bocht = dlg.chk_bocht.isChecked()
         deint_auto = dlg.chk_deint.isChecked()
 
-        # Perspectiefkalibratie: één keer voor de héle batch. Alle clips van een batch
-        # komen in de praktijk uit dezelfde opname (fase 8 knipt ze zo aan), dus dezelfde
-        # camerastand — en alleen op één gedeelde kalibratie zijn hun hoeken onderling
-        # vergelijkbaar. Per clip opnieuw natrekken zou zeven nét andere kalibraties geven.
+        # Perspective calibration: once for the whole batch. In practice all clips in a
+        # batch come from the same recording (that's how phase 8 trims them), so the
+        # same camera position -- and only on one shared calibration are their angles
+        # comparable to each other. Retracing per clip would give seven slightly
+        # different calibrations.
         batch_perspectief = None
         if dlg.chk_perspectief.isChecked():
             eerste_frame = None
@@ -7746,45 +7760,45 @@ class MainWindow(QMainWindow):
             if eerste_frame is None:
                 return
             batch_perspectief = self._kies_perspectief(eerste_frame)
-            if batch_perspectief is None:        # dialoog afgebroken
+            if batch_perspectief is None:        # dialog cancelled
                 self._ruim_knipmap_op()
                 return
 
-        # Verzamel-lus: per video het eerste frame + doelschaatser + horizon uitvragen.
+        # Collection loop: per video ask for the first frame + target skater + horizon.
         taken = []
         for taak in dlg.taken:
             pad, schaatser_id, titel = taak["input_pad"], taak["schaatser_id"], taak["titel"]
             frame0 = self._lees_eerste_frame(pad)
             if frame0 is None:
-                continue                         # _lees_eerste_frame heeft al gemeld
+                continue                         # _lees_eerste_frame already reported it
 
             keuze = self._kies_doelschaatser(frame0)
-            if keuze is False:                   # dialoog afgebroken
+            if keuze is False:                   # dialog cancelled
                 if self._overslaan_of_afbreken(titel):
                     continue
                 return
             doel, kader = keuze
             if batch_perspectief is not None:
-                # De kalibratie levert de kanteling zelf; de horizon-stap vervalt, net
-                # als bij een enkele analyse.
+                # The calibration provides the tilt itself; the horizon step drops out,
+                # same as for a single analysis.
                 horizon_deg, auto_horizon = 0.0, False
                 if not batch_perspectief.invoer.fits(frame0.shape[1], frame0.shape[0]):
                     QMessageBox.warning(
-                        self, "Kalibratie past niet",
-                        f"'{titel}' is {frame0.shape[1]}×{frame0.shape[0]} en de "
-                        f"kalibratie is gemaakt op {batch_perspectief.invoer.image_w}×"
-                        f"{batch_perspectief.invoer.image_h}. Deze clip wordt overgeslagen.")
+                        self, "Calibration doesn't fit",
+                        f"'{titel}' is {frame0.shape[1]}×{frame0.shape[0]} and the "
+                        f"calibration was made on {batch_perspectief.invoer.image_w}×"
+                        f"{batch_perspectief.invoer.image_h}. This clip is skipped.")
                     continue
             else:
                 horizon = self._kies_horizon(frame0)
-                if horizon is False:             # dialoog afgebroken
+                if horizon is False:             # dialog cancelled
                     if self._overslaan_of_afbreken(titel):
                         continue
                     return
                 horizon_deg, auto_horizon = horizon
 
-            # Per clip, want een batch kan clips uit verschillende camera's bevatten.
-            # Uitgezet in de dialoog = nergens filteren (om een A/B te kunnen draaien).
+            # Per clip, since a batch can contain clips from different cameras.
+            # Turned off in the dialog = filter nowhere (to allow an A/B run).
             deint = False
             if deint_auto:
                 try:
@@ -7814,8 +7828,8 @@ class MainWindow(QMainWindow):
                 "smooth_landmarks": not geen_smoothing, "smooth_n": smooth_n,
                 "threshold": threshold, "model_pad": model_pad, "instellingen": instellingen,
                 "bocht": bocht, "perspectief": batch_perspectief, "deinterlacen": deint,
-                # Fase 8: uit welk stuk van welke opname deze clip komt (None bij een
-                # losse video) — levert straks de grijze blokken in het knipvenster.
+                # Phase 8: which part of which recording this clip comes from (None for
+                # a loose video) -- yields the grey blocks in the trim window later.
                 "bron_id": taak.get("bron_id"),
                 "bron_start_frame": taak.get("bron_start_frame"),
                 "bron_eind_frame": taak.get("bron_eind_frame"),
@@ -7824,31 +7838,31 @@ class MainWindow(QMainWindow):
         if not taken:
             self._ruim_knipmap_op()
             return
-        # Op de bibliotheek blijven terwijl de batch draait, zodat er gebrowst kan worden.
+        # Stay on the library while the batch runs, so browsing is possible.
         self._start_batch(taken)
 
     def _overslaan_of_afbreken(self, titel):
-        """Bij een afgebroken doel-/horizon-kiezer: alleen deze video overslaan (True) of
-        de hele batch afbreken (False)."""
+        """When a target/horizon picker is cancelled: only skip this video (True) or
+        abort the whole batch (False)."""
         antwoord = QMessageBox.question(
-            self, "Video overslaan?",
-            f"De instelling voor '{titel}' is afgebroken.\n\n"
-            "Wil je alleen deze video overslaan en met de rest doorgaan?\n"
-            "(Nee = de hele batch afbreken.)",
+            self, "Skip video?",
+            f"The setup for '{titel}' was cancelled.\n\n"
+            "Do you want to skip only this video and continue with the rest?\n"
+            "(No = abort the whole batch.)",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         return antwoord == QMessageBox.Yes
 
     def _start_batch(self, taken):
         self.speler.set_controls_active(False)
         self.btn_export.setEnabled(False)
-        self._auto_toon_klaar = False        # batch toont zelf geen resultaten
+        self._auto_toon_klaar = False        # the batch doesn't show results itself
         self._zet_bezig(True)
 
         self._batch_index, self._batch_totaal, self._batch_huidig = 0, len(taken), ""
 
-        # Voortgangsbalk mét knop 'Stop na deze video' — niet-blokkerend, dus de
-        # bibliotheek blijft ondertussen bruikbaar.
-        self._toon_voortgangsbalk("Batch starten...", met_stop=True)
+        # Progress bar with a 'Stop after this video' button -- non-blocking, so the
+        # library stays usable in the meantime.
+        self._toon_voortgangsbalk("Starting batch...", met_stop=True)
 
         self._warn_backend_fallback()
         self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAME, self.trainer_naam)
@@ -7862,7 +7876,7 @@ class MainWindow(QMainWindow):
     def _batch_stop_gevraagd(self):
         if self.batch_worker is not None:
             self.batch_worker.requestInterruption()
-        self.lbl_voortgang.setText("Stopt na de huidige video...")
+        self.lbl_voortgang.setText("Stopping after the current video...")
         self.btn_voortgang_stop.setEnabled(False)
 
     def _batch_taak_start(self, index, totaal, titel):
@@ -7880,8 +7894,8 @@ class MainWindow(QMainWindow):
             f"({frame_nr}/{totaal})")
 
     def _batch_taak_klaar(self, index, analyse_id):
-        # Elke afgeronde video meteen in de bibliotheek laten opduiken (raakt de
-        # eventueel geopende weergave niet — dat zijn andere widgets).
+        # Let each finished video pop up in the library right away (doesn't touch a
+        # possibly open view -- those are different widgets).
         if self._afsluiten:
             return
         self._vernieuw_schaatsers()
@@ -7891,43 +7905,42 @@ class MainWindow(QMainWindow):
             return
         self._verberg_voortgangsbalk()
         self._zet_bezig(False)
-        self._vernieuw_schaatsers()              # nieuwe analyses direct zichtbaar
-        self._vernieuw_opnames()                 # fragmenttelling per opname bijwerken
-        # De clips staan nu als kopie in media/<uuid>/; de tijdelijke map mag weg.
+        self._vernieuw_schaatsers()              # new analyses immediately visible
+        self._vernieuw_opnames()                 # update the fragment count per recording
+        # The clips now exist as a copy in media/<uuid>/; the temp folder may go.
         self._ruim_knipmap_op()
 
         n_ok = len(geslaagd)
         n_tot = n_ok + len(fouten)
-        # Waarschuwingen (bv. een klik die niemand raakte) horen bij een geslaagde video:
-        # de analyse is er, maar mogelijk van de verkeerde schaatser — dus wél melden.
+        # Warnings (e.g. a click that missed everyone) belong to a successful video:
+        # the analysis exists, but possibly of the wrong skater -- so do report it.
         extra = ""
         if waarschuwingen:
             regels = "\n".join(f"• {t}: {m}" for t, m in waarschuwingen)
-            extra = f"\n\nLet op:\n{regels}"
+            extra = f"\n\nNote:\n{regels}"
         if fouten:
             regels = "\n".join(f"• {t}: {m}" for t, m in fouten)
             QMessageBox.warning(
-                self, "Batch klaar",
-                f"{n_ok} van {n_tot} video's geslaagd en opgeslagen.\n\nMislukt:\n{regels}{extra}")
+                self, "Batch done",
+                f"{n_ok} of {n_tot} videos succeeded and were saved.\n\nFailed:\n{regels}{extra}")
         elif waarschuwingen:
             QMessageBox.warning(
-                self, "Batch klaar",
-                f"Alle {n_ok} video's zijn geanalyseerd en opgeslagen in de bibliotheek.{extra}")
+                self, "Batch done",
+                f"All {n_ok} videos have been analyzed and saved in the library.{extra}")
         else:
             QMessageBox.information(
-                self, "Batch klaar",
-                f"Alle {n_ok} video's zijn geanalyseerd en opgeslagen in de bibliotheek.")
-
+                self, "Batch done",
+                f"All {n_ok} videos have been analyzed and saved in the library.")
     def _toon_resultaten(self, info, resultaten, events, bron=None):
         """
-        Vult de weergavepagina met een resultatenlijst. Gedeeld door een verse analyse
-        en door een uit .npz geladen analyse (`bron` = de bestandsnaam, voor de statusbalk).
+        Fills the view page with a results list. Shared by a fresh analysis and one
+        loaded from .npz (`bron` = the file name, for the status bar).
         """
         self.events = events
 
-        # Editor-status resetten (geen edit-lekkage tussen analyses); niet via de
-        # toggle-handler, want de weergave wordt hieronder toch opnieuw opgebouwd.
-        self._stop_plaatsen()       # nog vóór de reset: hoort bij de vórige resultatenlijst
+        # Reset editor status (no edit leakage between analyses); not via the toggle
+        # handler, since the view is rebuilt below anyway.
+        self._stop_plaatsen()       # still before the reset: belongs to the PREVIOUS results list
         self._editor_actief = False
         self._sleep = None
         self.speler.edit_mode = False
@@ -7941,61 +7954,63 @@ class MainWindow(QMainWindow):
         self.editor_balk.setVisible(False)
         self._sluit_plaats_balk()
 
-        # Capture heropenen, zoom resetten, besturing aan — toont nog géén frame.
+        # Reopen the capture, reset zoom, controls on -- doesn't show a frame yet.
         self.speler.load(info, resultaten, self.input_pad, self.deinterlacen)
 
         self._vul_tabel()
         self._vul_grafiek()
         self._update_dekking()
         self.btn_export.setEnabled(bool(events))
-        # Vergelijken kan alleen met een analyse die in de bibliotheek staat — de
-        # vergelijkkant laadt hem daar opnieuw uit. Hetzelfde voor de info: de meta
-        # (appversie, instellingen) komt uit de DB-rij.
+        # Comparing only works with an analysis that's in the library -- the compare
+        # side reloads it from there. Same for the info: the metadata (app version,
+        # settings) comes from the DB row.
         self.btn_vergelijk_deze.setEnabled(self.analyse_id is not None)
         self.btn_info.setEnabled(self.analyse_id is not None)
-        # Alleen aanbieden waar er iets te winnen valt: een analyse die de bocht al kent
-        # hoeft niets, en zonder bibliotheek-id valt het resultaat nergens te bewaren.
+        # Only offer it where there's something to gain: an analysis that already knows
+        # the corner needs nothing, and without a library id the result can't be saved
+        # anywhere.
         self.btn_bocht_nu.setEnabled(
             self.analyse_id is not None and not any(r.bocht for r in resultaten))
 
-        herkomst = f"  ·  geladen uit {bron}" if bron else ""
+        herkomst = f"  ·  loaded from {bron}" if bron else ""
         self.statusBar().showMessage(
             f"{os.path.basename(self.input_pad)} — {info.w}×{info.h} @ {info.fps:.1f}fps, "
-            f"{len(resultaten)} frames, {len(events)} afzetten gevonden{herkomst}")
+            f"{len(resultaten)} frames, {len(events)} pushes found{herkomst}")
 
-        # Pas nu tekenen: tabel en grafiek staan klaar voor de on_frame_shown-haak.
+        # Only draw now: table and graph are ready for the on_frame_shown hook.
         self.speler.go_to(0)
 
-    # ── Tabel + grafiek vullen ───────────────────────────────────────────
+    # -- Filling the table + graph -----------------------------------------
     def _vul_tabel(self):
-        # Kolommen dynamisch: perspectiefcorrectie en snelheid/slaglengte alleen als
-        # er een kalibratie actief was (de events dragen die velden dan).
+        # Columns are dynamic: perspective correction and speed/stroke length only if a
+        # calibration was active (the events then carry those fields).
         met_corr = any(ev.correctie is not None for ev in self.events)
         met_metrisch = any(ev.snelheid is not None for ev in self.events)
-        koppen = ["#", "Tijd (s)", "Been", "Hoek (°)"]
+        koppen = ["#", "Time (s)", "Leg", "Angle (°)"]
         if met_corr:
             koppen.append("Corr. (°)")
         if met_metrisch:
-            koppen += ["v (m/s)", "Slag (m)"]
+            koppen += ["v (m/s)", "Stroke (m)"]
         self.tabel.setColumnCount(len(koppen))
         self.tabel.setHorizontalHeaderLabels(koppen)
 
         self.tabel.setRowCount(len(self.events))
-        markeer_kleur = QColor(120, 60, 20)     # waarschuwing: onmogelijke L/R-herhaling
-        onbetrouwbaar_kleur = QColor(40, 60, 120)  # hoek gemeten met been ~in kijkrichting
-        onvolledig_kleur = QColor(70, 70, 70)   # afzet niet uit-geobserveerd: geen meting
-        # De reden verschilt voor de gebruiker: bij "afgekapt" helpt een langere opname,
-        # bij "geen volledige push" is de been-toewijzing of de slag zelf de vraag.
+        markeer_kleur = QColor(120, 60, 20)     # warning: impossible L/R repeat
+        onbetrouwbaar_kleur = QColor(40, 60, 120)  # angle measured with leg ~along the sightline
+        onvolledig_kleur = QColor(70, 70, 70)   # push not fully observed: not a measurement
+        # The reason matters to the user differently: with "truncated" a longer
+        # recording helps, with "no full push" the question is the leg assignment or
+        # the stroke itself.
         onvolledig_uitleg = {
             INCOMPLETE_TRUNCATED:
-                "Deze afzet liep nog toen de video (of de detectie) ophield — de push is "
-                "niet afgemaakt, dus de hoek is te steil. Telt niet mee in "
-                "gemiddelde/min/max.",
+                "This push was still ongoing when the video (or the detection) ended -- "
+                "the push wasn't finished, so the angle is too steep. Not counted in "
+                "average/min/max.",
             INCOMPLETE_NO_PUSH:
-                "Het been kwam in deze slag wel rechtop, maar er is geen zijwaartse afzet "
-                "waargenomen: bij volledige strekking stond het onderbeen nog vrijwel "
-                "verticaal. De hoek is dus het rechtop-komen en telt niet mee in "
-                "gemiddelde/min/max. Controleer of hier echt een afzet zat.",
+                "The leg did come upright in this stroke, but no sideways push was "
+                "observed: at full extension the lower leg was still nearly vertical. "
+                "The angle is therefore the coming-upright and isn't counted in "
+                "average/min/max. Check whether there really was a push here.",
         }
         for i, ev in enumerate(self.events):
             waarden = [str(i + 1), f"{ev.start_tijd:.2f}", ev.been.capitalize(), f"{ev.hoek:.1f}"]
@@ -8004,7 +8019,7 @@ class MainWindow(QMainWindow):
             if met_metrisch:
                 waarden.append(f"{ev.snelheid:.1f}" if ev.snelheid is not None else "—")
                 waarden.append(f"{ev.slaglengte:.1f}" if ev.slaglengte is not None else "—")
-            gemarkeerd = ev.opmerking == "gemiste tegenafzet?"
+            gemarkeerd = ev.opmerking == "missed counter-push?"
             onbetrouwbaar = met_corr and not ev.betrouwbaar
             for kolom, waarde in enumerate(waarden):
                 item = QTableWidgetItem(waarde)
@@ -8013,52 +8028,52 @@ class MainWindow(QMainWindow):
                     item.setBackground(onvolledig_kleur)
                     item.setToolTip(onvolledig_uitleg.get(
                         ev.onvolledig,
-                        f"Onvolledige afzet ({ev.onvolledig}) — telt niet mee in "
-                        "gemiddelde/min/max."))
+                        f"Incomplete push ({ev.onvolledig}) -- not counted in "
+                        "average/min/max."))
                 elif gemarkeerd:
                     item.setBackground(markeer_kleur)
-                    item.setToolTip("Zelfde been als de vorige afzet — onmogelijk in het "
-                                    "schaatsritme. Waarschijnlijk een gemiste tegen-afzet.")
+                    item.setToolTip("Same leg as the previous push -- impossible in the "
+                                    "skating rhythm. Probably a missed counter-push.")
                 elif onbetrouwbaar:
                     item.setBackground(onbetrouwbaar_kleur)
-                    item.setToolTip("Been stond bij afzet-voltooiing bijna in de kijkrichting "
-                                    "— de perspectiefcorrectie (en dus de hoek) is hier "
-                                    "onbetrouwbaar.")
+                    item.setToolTip("Leg was nearly along the sightline at push "
+                                    "completion -- the perspective correction (and "
+                                    "hence the angle) is unreliable here.")
                 self.tabel.setItem(i, kolom, item)
 
         if self.events:
-            # Onvolledige afzetten tellen niet mee: hun hoek is het rechtop-komen en trekt
-            # gem/max omhoog. De reden staat erbij, want die vraagt om iets anders van de
-            # gebruiker (langere opname vs. de slag zelf nakijken).
+            # Incomplete pushes don't count: their angle is the coming-upright and
+            # pulls avg/max up. The reason is shown, since it calls for something
+            # different from the user (a longer recording vs. checking the stroke itself).
             meetbaar = [ev for ev in self.events if not ev.onvolledig]
             hoeken = [ev.hoek for ev in meetbaar]
-            n_mark = sum(1 for ev in self.events if ev.opmerking == "gemiste tegenafzet?")
+            n_mark = sum(1 for ev in self.events if ev.opmerking == "missed counter-push?")
             redenen = {}
             for ev in self.events:
                 if ev.onvolledig:
                     redenen[ev.onvolledig] = redenen.get(ev.onvolledig, 0) + 1
             if hoeken:
-                tekst = (f"gem {np.mean(hoeken):.1f}°  |  min {min(hoeken):.1f}°  "
+                tekst = (f"avg {np.mean(hoeken):.1f}°  |  min {min(hoeken):.1f}°  "
                          f"|  max {max(hoeken):.1f}°")
             else:
-                tekst = "geen volledige afzet gemeten"
+                tekst = "no full push measured"
             if redenen:
                 tekst += "   ·  " + ", ".join(f"{n}× {reden}" for reden, n in redenen.items())
-                tekst += " (niet meegeteld)"
+                tekst += " (not counted)"
             if n_mark:
-                tekst += f"   ·  ⚠ {n_mark} mogelijke L/R-fout"
+                tekst += f"   ·  ⚠ {n_mark} possible L/R error"
             if met_corr:
                 n_onb = sum(1 for ev in meetbaar if not ev.betrouwbaar)
                 if n_onb:
-                    tekst += f"   ·  ⚠ {n_onb} onbetrouwbare hoek (kijkrichting)"
+                    tekst += f"   ·  ⚠ {n_onb} unreliable angle (sightline)"
             self.lbl_stats.setText(tekst)
         else:
-            self.lbl_stats.setText("Geen afzetten gedetecteerd")
+            self.lbl_stats.setText("No pushes detected")
 
     def _vul_grafiek(self):
         self.serie_hoek.clear()
-        # Dezelfde grootheid als de tabel (de hoek per frame), zodat een tabelrij
-        # precies op de curve valt.
+        # Same quantity as the table (the angle per frame), so a table row falls
+        # exactly on the curve.
         punten = [(r.tijd, r.hoek) for r in self.resultaten
                   if r.pose_gevonden and r.hoek is not None]
         if not punten:
@@ -8078,11 +8093,12 @@ class MainWindow(QMainWindow):
         self.serie_marker.append(tijd, y_min)
         self.serie_marker.append(tijd, y_max)
 
-    # ── Navigatie / weergave ─────────────────────────────────────────────
+    # -- Navigation / view --------------------------------------------------
     def _speler_frame_getoond(self, idx):
-        """Haak van de VideoPlayer: alles wat de analysepagina aan een frame ophangt."""
-        # Wegnavigeren tijdens een plaats-reeks sluit die eerst netjes af. De idx-toets is
-        # nodig omdat _herbereken() zelf hertekent en dus hier terugkomt op hetzelfde frame.
+        """VideoPlayer hook: everything the analysis page hangs off a frame."""
+        # Navigating away during a placement sequence closes it cleanly first. The idx
+        # check is needed because _herbereken() redraws itself and so comes back here on
+        # the same frame.
         if self._plaats is not None and self._plaats['idx'] != idx:
             self._stop_plaatsen()
         resultaat = self.resultaten[idx]
@@ -8090,22 +8106,22 @@ class MainWindow(QMainWindow):
         self._markeer_actieve_rij(idx)
         self._update_live_status(resultaat)
         if self._editor_actief:
-            self._update_editor_knoppen()   # "Maak skelet" alleen op een frame zonder pose
+            self._update_editor_knoppen()   # "Make skeleton" only on a frame without a pose
 
     def _update_live_status(self, resultaat):
         if not resultaat.pose_gevonden:
-            tekst = "Bocht — niet geanalyseerd" if resultaat.bocht else "Geen pose gedetecteerd"
+            tekst = "Corner — not analyzed" if resultaat.bocht else "No pose detected"
             self.lbl_live.setText(tekst)
             self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px; color: #c33;")
             return
         if resultaat.bocht:
-            # Wel een skelet, maar geen afgeleiden: `process_derivatives` slaat bochtframes
-            # over, dus been/hoek zijn hier None en er valt niets te tonen.
-            self.lbl_live.setText("Bocht — geen meting")
+            # There's a skeleton, but no derivatives: `process_derivatives` skips corner
+            # frames, so leg/angle are None here and there's nothing to show.
+            self.lbl_live.setText("Corner — not measured")
             self.lbl_live.setStyleSheet("font-weight: bold; padding-right: 10px; color: #c80;")
             return
 
-        status = "GEWICHT OP BEEN" if resultaat.gewicht_erop else "AFZET VOLTOOID"
+        status = "WEIGHT ON LEG" if resultaat.gewicht_erop else "PUSH COMPLETE"
         kleur = "#2a2" if resultaat.gewicht_erop else "#c33"
         extra = ""
         if resultaat.hoek_correctie is not None:
@@ -8113,23 +8129,24 @@ class MainWindow(QMainWindow):
             if resultaat.snelheid is not None:
                 extra += f"v: {resultaat.snelheid:.1f} m/s   "
             if not resultaat.hoek_betrouwbaar:
-                extra += "⚠ onbetrouwbaar   "
-        strek = f"Strekking: {resultaat.strek_ratio:.2f}   " if resultaat.strek_ratio is not None else ""
+                extra += "⚠ unreliable   "
+        strek = f"Extension: {resultaat.strek_ratio:.2f}   " if resultaat.strek_ratio is not None else ""
         self.lbl_live.setText(
-            f"Afzetbeen: {resultaat.been.upper()}   "
-            f"Afzethoek: {resultaat.hoek}°   "
-            f"Kniehoek: {resultaat.kniehoek}°   "
+            f"Push leg: {resultaat.been.upper()}   "
+            f"Push angle: {resultaat.hoek}°   "
+            f"Knee angle: {resultaat.kniehoek}°   "
             f"{strek}{extra}{status}"
         )
         self.lbl_live.setStyleSheet(f"font-weight: bold; padding-right: 10px; color: {kleur};")
 
-    # ── Skelet-editor: handles op de VideoPlayer ─────────────────────────────
+    # -- Skeleton editor: handles on the VideoPlayer -----------------------
     def _handle_straal(self):
-        """Handle-/grijpradius in (geschaalde) schermpixels, evenredig met de schaatser:
-        HANDLE_FRAC × torso-lengte-op-het-scherm, geklemd op [HANDLE_MIN_PX, HANDLE_MAX_PX].
-        Via _norm_naar_widget zit de crop/zoom-schaal er al in (de letterbox-offset valt bij
-        een afstand weg), dus dit klopt op elke zoomstand en is exact consistent met het
-        hittesten. Val terug op HANDLE_MAX_PX als er geen bruikbare pose/torso is."""
+        """Handle/grab radius in (scaled) screen pixels, proportional to the skater:
+        HANDLE_FRAC × on-screen torso length, clamped to [HANDLE_MIN_PX, HANDLE_MAX_PX].
+        Via _norm_naar_widget the crop/zoom scale is already included (the letterbox
+        offset drops out over a distance), so this is correct at any zoom level and
+        exactly consistent with the hit test. Falls back to HANDLE_MAX_PX if there's no
+        usable pose/torso."""
         if (not (0 <= self.huidige_idx < len(self.resultaten))
                 or self.speler.display_scaled is None):
             return float(HANDLE_MAX_PX)
@@ -8145,7 +8162,7 @@ class MainWindow(QMainWindow):
                 return None
             return (sum(p.x for p in pts) / len(pts), sum(p.y for p in pts) / len(pts))
 
-        schouder, heup = _mid(11, 12), _mid(23, 24)   # schouder-midden → heup-midden
+        schouder, heup = _mid(11, 12), _mid(23, 24)   # shoulder-mid -> hip-mid
         if schouder is None or heup is None:
             return float(HANDLE_MAX_PX)
         p1 = self.speler.norm_to_widget(*schouder)
@@ -8154,11 +8171,11 @@ class MainWindow(QMainWindow):
         return min(float(HANDLE_MAX_PX), max(float(HANDLE_MIN_PX), HANDLE_FRAC * torso))
 
     def _teken_handles(self, pixmap):
-        """Tekent sleepbare ringen op elke zichtbare landmark van het huidige frame,
-        rechtstreeks op de geschaalde pixmap (dus vaste grootte in schermpixels).
+        """Draws draggable rings on every visible landmark of the current frame,
+        directly on the scaled pixmap (so a fixed size in screen pixels).
 
-        Hangt permanent als overlay_drawer aan de speler; de bewerk-modus-guard zit
-        daarom hier (die vlag wordt op twee plekken uitgezet — één guard is faalveilig)."""
+        Hangs permanently as overlay_drawer on the player; the edit-mode guard is
+        therefore here (that flag is cleared in two places -- one guard is fail-safe)."""
         if not self._editor_actief:
             return
         if not (0 <= self.huidige_idx < len(self.resultaten)):
@@ -8167,8 +8184,8 @@ class MainWindow(QMainWindow):
         if not (r.pose_gevonden and isinstance(r.lm, list)):
             return
         pw, ph = pixmap.width(), pixmap.height()
-        x0n, y0n, wn, hn = self.speler.crop_norm  # bij zoom==1 (0,0,1,1) → lm.x*pw, lm.y*ph
-        straal = self._handle_straal()      # schaalt mee met de schaatser + zoom
+        x0n, y0n, wn, hn = self.speler.crop_norm  # at zoom==1 (0,0,1,1) -> lm.x*pw, lm.y*ph
+        straal = self._handle_straal()      # scales with the skater + zoom
         gemarkeerd = self._handmatig.get(self.huidige_idx, set())
         sleep_j = (self._sleep['j'] if self._sleep and self._sleep['idx'] == self.huidige_idx
                    else None)
@@ -8179,19 +8196,19 @@ class MainWindow(QMainWindow):
             for j, lm in enumerate(r.lm):
                 if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS and j != doel_j:
                     continue
-                # buiten de uitsnede valt de ring buiten [0,pw]; de painter clipt hem
+                # outside the crop the ring falls outside [0,pw]; the painter clips it
                 middel = QPointF((lm.x - x0n) / wn * pw, (lm.y - y0n) / hn * ph)
                 if j == sleep_j:
-                    painter.setPen(QPen(QColor(255, 255, 0), 3))     # actief gesleept
+                    painter.setPen(QPen(QColor(255, 255, 0), 3))     # actively dragged
                 elif j in gemarkeerd:
-                    painter.setPen(QPen(QColor(0, 255, 120), 2))     # handmatig gezet
+                    painter.setPen(QPen(QColor(0, 255, 120), 2))     # manually placed
                 else:
-                    painter.setPen(QPen(QColor(255, 255, 255), 1))   # gewoon
+                    painter.setPen(QPen(QColor(255, 255, 255), 1))   # regular
                 painter.drawEllipse(middel, straal, straal)
                 if j == doel_j:
-                    # Het punt dat nu gevraagd wordt: dikke oranje ring met kruisdraad op de
-                    # voorgevulde plek. De hint-tekst alleen laat de gebruiker zoeken; dit
-                    # zegt "ongeveer hier, corrigeer maar".
+                    # The point currently being asked for: a thick orange ring with
+                    # crosshair on the prefilled spot. The hint text alone lets the user
+                    # hunt; this says "roughly here, correct it".
                     painter.setPen(QPen(QColor(255, 150, 0), 3))
                     buiten = straal * 1.8
                     painter.drawEllipse(middel, buiten, buiten)
@@ -8203,24 +8220,24 @@ class MainWindow(QMainWindow):
             painter.end()
 
     def _plaats_doelpunt(self):
-        """Het landmark dat de lopende plaats-reeks nu vraagt, of None."""
+        """The landmark the running placement sequence is currently asking for, or None."""
         if not self._plaats or self._plaats['idx'] != self.huidige_idx:
             return None
         stap = self._plaats['stap']
         return PLACEMENT_ORDER[stap] if 0 <= stap < len(PLACEMENT_ORDER) else None
 
-    # ── Skelet-editor: bewerk-modus + slepen (fase 3) ────────────────────────
+    # -- Skeleton editor: edit mode + dragging (phase 3) --------------------
     def _toggle_bewerken(self, actief):
         if not actief:
-            self._stop_plaatsen()           # nooit een halve reeks achterlaten
+            self._stop_plaatsen()           # never leave a half sequence behind
         self._editor_actief = actief
-        self.speler.edit_mode = actief   # stuurt de pan-vs-editor-voorrang van de muis
+        self.speler.edit_mode = actief   # drives the pan-vs-editor priority of the mouse
         self.editor_balk.setVisible(actief)
         self._sleep = None
         self.speler.follow_frozen = False
         if actief:
             self.speler.pause()
-            self.lbl_editor_hint.setText("Sleep een punt naar de juiste plek.")
+            self.lbl_editor_hint.setText("Drag a point to the right spot.")
             self._update_editor_knoppen()
         self.speler.show_current_frame()
 
@@ -8230,28 +8247,29 @@ class MainWindow(QMainWindow):
         self.btn_redo.setEnabled(bool(self._redo) and not bezig)
         self.btn_herstel.setEnabled(self.analyse_id is not None and not bezig)
         self.btn_volgend_gat.setEnabled(not bezig)
-        # Alleen aanbieden waar het zin heeft: op een frame dat al een pose heeft is
-        # slepen het gereedschap, niet plaatsen — en in de bocht wordt er toch niet gemeten.
+        # Only offer it where it makes sense: on a frame that already has a pose,
+        # dragging is the tool, not placing -- and in the corner nothing is measured
+        # anyway.
         self.btn_maak_skelet.setEnabled(not bezig and self._is_gat(self.huidige_idx))
 
     def _frame_bewerkbaar(self, idx):
-        """Een frame is bewerkbaar als het een pose heeft die als lijst van (muteerbare)
-        Landmark-tuples in geheugen staat — geldt voor alle uit de bibliotheek geladen
-        analyses. Ruwe MediaPipe-objecten (diagnose-stand 'geen smoothing') niet."""
+        """A frame is editable if it has a pose stored in memory as a list of (mutable)
+        Landmark tuples -- true for every analysis loaded from the library. Raw
+        MediaPipe objects (diagnostic mode 'no smoothing') are not."""
         if not (0 <= idx < len(self.resultaten)):
             return False
         r = self.resultaten[idx]
         return bool(r.pose_gevonden and isinstance(r.lm, list))
 
     def _zet_landmark(self, idx, j, nx, ny, vis=None):
-        """Vervangt landmark j in frame idx (Landmark is immutable)."""
+        """Replaces landmark j in frame idx (Landmark is immutable)."""
         lm = self.resultaten[idx].lm[j]
         self.resultaten[idx].lm[j] = Landmark(nx, ny, lm.z,
                                               lm.visibility if vis is None else vis)
 
     def _uitvloei_frames(self, idx, N):
-        """Frame-indices waarover de correctie uitvloeit: idx plus tot ±N buurframes,
-        stoppend bij een detectiegat (onbewerkbaar frame) in elke richting."""
+        """Frame indices the correction blends over: idx plus up to ±N neighboring
+        frames, stopping at a detection gap (uneditable frame) in each direction."""
         frames = [idx]
         for richting in (-1, 1):
             for k in range(1, N + 1):
@@ -8262,11 +8280,11 @@ class MainWindow(QMainWindow):
         return frames
 
     def _zoek_landmark(self, pos):
-        """Index van de dichtstbijzijnde zichtbare landmark binnen de handle-radius
-        (_handle_straal) van de muispositie (schermruimte), of None."""
+        """Index of the nearest visible landmark within the handle radius
+        (_handle_straal) of the mouse position (screen space), or None."""
         if not self._frame_bewerkbaar(self.huidige_idx) or self.speler.display_scaled is None:
             return None
-        straal = self._handle_straal()      # zelfde radius als de getekende ring
+        straal = self._handle_straal()      # same radius as the drawn ring
         beste, beste_d2 = None, float(straal * straal)
         for j, lm in enumerate(self.resultaten[self.huidige_idx].lm):
             if getattr(lm, 'visibility', 1.0) < HANDLE_MIN_VIS:
@@ -8278,44 +8296,44 @@ class MainWindow(QMainWindow):
         return beste
 
     def _toon_hover_naam(self, event):
-        """Toont in de bewerk-modus een tooltip met het lichaamsdeel van het punt onder de
-        cursor (zelfde trefradius als selecteren). Geen punt in de buurt → tooltip weg."""
+        """In edit mode, shows a tooltip with the body part of the point under the
+        cursor (same hit radius as selecting). No point nearby -> tooltip goes away."""
         j = self._zoek_landmark(event.position())
         if j is None:
             QToolTip.hideText()
             return
-        naam = LANDMARK_NAMES.get(j, f"punt {j}")
-        # iets naast de cursor zodat de tekst het punt zelf niet afdekt
+        naam = LANDMARK_NAMES.get(j, f"point {j}")
+        # slightly offset from the cursor so the text doesn't cover the point itself
         pos = (event.globalPosition() + QPointF(14, 10)).toPoint()
         QToolTip.showText(pos, naam, self.speler.label)
 
-    # De pan-tak (links-slepen bij zoom > 1 buiten bewerk-modus) zit in de VideoPlayer;
-    # deze haken krijgen het event alleen als de speler het niet zelf heeft opgeslokt.
+    # The pan branch (left-drag at zoom > 1 outside edit mode) lives in VideoPlayer;
+    # these hooks only get the event if the player hasn't already swallowed it itself.
     def _editor_muis_druk(self, event):
         if not self._editor_actief:
             return
-        # De plaats-reeks krijgt voorrang en slokt de klik altijd op: het frame ís tijdens
-        # de reeks bewerkbaar, dus zonder deze tak zou een klik een sleep starten op een
-        # voorgevuld punt in plaats van het gevraagde punt neer te zetten.
+        # The placement sequence takes priority and always swallows the click: the
+        # frame IS editable during the sequence, so without this branch a click would
+        # start a drag on a prefilled point instead of placing the requested point.
         if self._plaats is not None:
             self._plaats_klik(event)
             return
         if not self._frame_bewerkbaar(self.huidige_idx):
-            self.lbl_editor_hint.setText("Dit frame heeft geen bewerkbare pose.")
+            self.lbl_editor_hint.setText("This frame has no editable pose.")
             return
         j = self._zoek_landmark(event.position())
         if j is None:
             return
         self._sleep = {'idx': self.huidige_idx, 'j': j,
                        'start_lm': self.resultaten[self.huidige_idx].lm[j]}
-        # auto-volgen bevriezen: anders verspringt de uitsnede onder de cursor
+        # freeze auto-follow: otherwise the crop jumps out from under the cursor
         self.speler.follow_frozen = True
 
     def _editor_muis_beweeg(self, event):
         if not self._editor_actief or self._plaats is not None:
             return
         if not self._sleep:
-            # geen sleep bezig → toon bij hover het lichaamsdeel onder de cursor
+            # no drag in progress -> show the body part under the cursor on hover
             self._toon_hover_naam(event)
             return
         norm = self.speler.widget_to_norm(event.position())
@@ -8324,12 +8342,12 @@ class MainWindow(QMainWindow):
         nx = min(1.0, max(0.0, norm[0]))
         ny = min(1.0, max(0.0, norm[1]))
         idx, j = self._sleep['idx'], self._sleep['j']
-        self._zet_landmark(idx, j, nx, ny, vis=1.0)   # live feedback; nog geen herbereken
+        self._zet_landmark(idx, j, nx, ny, vis=1.0)   # live feedback; no recompute yet
         self.speler.go_to(idx)
 
     def _editor_muis_los(self, event):
         if self._plaats is not None:
-            return                          # de klik is al bij het indrukken afgehandeld
+            return                          # the click was already handled on press
         if not (self._editor_actief and self._sleep):
             self.speler.follow_frozen = False
             return
@@ -8339,9 +8357,9 @@ class MainWindow(QMainWindow):
         eind = self.resultaten[idx].lm[j]
         dx, dy = eind.x - start_lm.x, eind.y - start_lm.y
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:
-            self.speler.go_to(idx)              # geen echte verplaatsing: alleen hertekenen
+            self.speler.go_to(idx)              # no real movement: just redraw
             return
-        # Centrum terug op pre-edit zodat het hele venster gelijk begint.
+        # Reset the center to pre-edit so the whole window starts equal.
         self.resultaten[idx].lm[j] = start_lm
         N = self.spin_uitvloei.value()
         frames = self._uitvloei_frames(idx, N)
@@ -8350,7 +8368,7 @@ class MainWindow(QMainWindow):
             k = abs(f - idx)
             gewicht = 1.0 if k == 0 else 0.5 * (1.0 + math.cos(math.pi * k / N))
             lm = self.resultaten[f].lm[j]
-            vis = 1.0 if f == idx else lm.visibility     # alleen het gesleepte punt is zeker
+            vis = 1.0 if f == idx else lm.visibility     # only the dragged point is certain
             self.resultaten[f].lm[j] = Landmark(lm.x + dx * gewicht, lm.y + dy * gewicht,
                                                 lm.z, vis)
         nieuw = {f: self.resultaten[f].lm[j] for f in frames}
@@ -8359,20 +8377,21 @@ class MainWindow(QMainWindow):
         self._handmatig.setdefault(idx, set()).add(j)
         self._na_edit()
 
-    # ── Skelet plaatsen op een frame zonder pose ─────────────────────────────
+    # -- Placing a skeleton on a frame without a pose ------------------------
     def _is_gat(self, idx):
-        """Een frame dat een skelet mist én waar een skelet iets oplevert. Bochtframes
-        vallen af: die leveren toch geen meting, dus ze met de hand dichten is werk voor
-        niets."""
+        """A frame that's missing a skeleton AND where a skeleton would actually help.
+        Corner frames don't count: those don't produce a measurement anyway, so closing
+        them by hand is work for nothing."""
         if not (0 <= idx < len(self.resultaten)):
             return False
         r = self.resultaten[idx]
         return not r.pose_gevonden and not r.bocht
 
     def _gat_positie(self, idx):
-        """(hoeveelste, totaal) van frame `idx` binnen zijn aaneengesloten reeks frames
-        zónder skelet. Voor de hint: een half gedicht gat verandert de tabel nog niet,
-        want `bepaal_afzet_uit_strek` breekt de stand-run op élk skeletloos frame af."""
+        """(how-manieth, total) of frame `idx` within its contiguous run of frames
+        WITHOUT a skeleton. For the hint: a half-closed gap doesn't change the table
+        yet, since `bepaal_afzet_uit_strek` breaks the stance run off on EVERY
+        skeleton-less frame."""
         if not self._is_gat(idx):
             return (0, 0)
         start = idx
@@ -8384,36 +8403,36 @@ class MainWindow(QMainWindow):
         return (idx - start + 1, eind - start + 1)
 
     def _ga_naar_volgend_gat(self):
-        """Springt naar het eerstvolgende frame zonder skelet; wrapt na het laatste."""
+        """Jumps to the next frame without a skeleton; wraps after the last one."""
         n = len(self.resultaten)
         if not n:
             return
         volgorde = list(range(self.huidige_idx + 1, n)) + list(range(0, self.huidige_idx + 1))
         doel = next((i for i in volgorde if self._is_gat(i)), None)
         if doel is None:
-            self.lbl_editor_hint.setText("Elk frame heeft een skelet — niets meer te doen.")
+            self.lbl_editor_hint.setText("Every frame has a skeleton -- nothing left to do.")
             return
         self.speler.go_to(doel)
         hoeveelste, totaal = self._gat_positie(doel)
         self.lbl_editor_hint.setText(
-            f"Frame {doel} — {hoeveelste} van {totaal} zonder skelet in dit gat.")
+            f"Frame {doel} — {hoeveelste} of {totaal} without a skeleton in this gap.")
 
     def _start_plaatsen(self):
-        """"Maak skelet" op een frame zonder pose.
+        """"Make skeleton" on a frame without a pose.
 
-        Twee wegen, en de eerste is verreweg de gewone: leveren de buurframes een bruikbare
-        voorvulling, dan komt dat skelet er meteen op en corrigeer je het met de normale
-        sleep-editor — dat is intuïtiever dan acht keer een naam lezen en klikken, en het
-        houdt één manier van werken voor álle frames. Alleen als er níets is om over te
-        nemen (nergens in de analyse een pose) valt er niets te verslepen en vraagt het
-        programma de punten één voor één op in een vaste volgorde."""
+        Two routes, and the first is by far the usual one: if the neighboring frames
+        yield a usable prefill, that skeleton goes right on and you correct it with the
+        normal drag editor -- more intuitive than reading and clicking eight names, and
+        it keeps one way of working for ALL frames. Only if there's NOTHING to take over
+        (no pose anywhere in the analysis) is there nothing to drag, and the program asks
+        for the points one at a time in a fixed order."""
         idx = self.huidige_idx
         if self._plaats is not None or not (0 <= idx < len(self.resultaten)):
             return
         r = self.resultaten[idx]
         if r.pose_gevonden:
             self.lbl_editor_hint.setText(
-                "Dit frame heeft al een skelet — sleep de punten die niet kloppen.")
+                "This frame already has a skeleton -- drag the points that are off.")
             return
         info = self.video_info
         oud_lm, oud_pose = r.lm, r.pose_gevonden
@@ -8422,58 +8441,60 @@ class MainWindow(QMainWindow):
 
         r.lm = voorvulling
         r.pose_gevonden = True
-        # Het kader is berekend toen dit nog een gat was — op een gat > KADER_GAT_S staat de
-        # automatische zoom volledig uit, precies wanneer je nauwkeurig moet werken.
+        # The box was computed while this was still a gap -- on a gap > KADER_GAT_S the
+        # automatic zoom goes all the way out, exactly when precision is needed.
         self.speler.recompute_box()
 
         if bruikbaar:
-            # Het skelet staat er; vanaf hier is dit een doodgewoon bewerkbaar frame.
+            # The skeleton is in place; from here it's a perfectly ordinary editable frame.
             self._undo.append({'type': 'skelet', 'idx': idx,
                                'oud_lm': oud_lm, 'oud_pose': oud_pose,
                                'nieuw_lm': list(r.lm), 'nieuw_pose': True,
                                'geklikt': set()})
             self._redo.clear()
-            self._na_edit()      # doorrekenen + opslaan; het frame telt nu mee
+            self._na_edit()      # recompute + save; the frame now counts
             self.lbl_editor_hint.setText(
-                "Skelet overgenomen van de buurframes — sleep de punten naar de juiste plek. "
-                f"(Uitvloeien staat op ±{self.spin_uitvloei.value()} frames.)")
+                "Skeleton taken over from the neighboring frames -- drag the points into "
+                "place. "
+                f"(Blend is set to ±{self.spin_uitvloei.value()} frames.)")
             return
 
-        # Niets om over te nemen: punt voor punt vragen. Doorrekenen moet hier al, want
-        # zonder lm_data/been/hoek loopt de eerstvolgende hertekening (teken_been_overlay,
-        # _update_live_status) stuk op een frame dat zegt een pose te hebben. Opslaan nog
-        # niet — de gebruiker kan de reeks nog afbreken.
+        # Nothing to take over: ask point by point. It has to be recomputed here
+        # already, since without lm_data/leg/angle the next redraw (teken_been_overlay,
+        # _update_live_status) would break on a frame that claims to have a pose. Not
+        # saved yet -- the user can still cancel the sequence.
         self._plaats = {'idx': idx, 'stap': 0, 'geklikt': set(),
                         'oud_lm': oud_lm, 'oud_pose': oud_pose}
         self._herbereken()
-        self.speler.follow_frozen = True   # uitsnede mag niet verspringen tussen klikken
+        self.speler.follow_frozen = True   # the crop mustn't jump between clicks
         self.plaats_balk.setVisible(True)
         self._toon_plaats_stap()
 
     def _toon_plaats_stap(self):
-        """Hint + knopstatus voor de huidige stap; ververst ook het beeld (doelpunt-ring)."""
+        """Hint + button state for the current step; also refreshes the image (target
+        ring)."""
         if self._plaats is None:
             return
         stap, n = self._plaats['stap'], len(PLACEMENT_ORDER)
         if stap < n:
-            naam = LANDMARK_NAMES.get(PLACEMENT_ORDER[stap], f"punt {PLACEMENT_ORDER[stap]}")
-            self.lbl_plaats.setText(f"Klik: {naam}  ({stap + 1} van {n})")
+            naam = LANDMARK_NAMES.get(PLACEMENT_ORDER[stap], f"point {PLACEMENT_ORDER[stap]}")
+            self.lbl_plaats.setText(f"Click: {naam}  ({stap + 1} of {n})")
         else:
-            self.lbl_plaats.setText(f"Alle {n} punten gehad — leg het skelet vast.")
+            self.lbl_plaats.setText(f"All {n} points done -- commit the skeleton.")
         self.btn_plaats_vorige.setEnabled(stap > 0)
         self.btn_plaats_over.setEnabled(stap < n)
         self.btn_plaats_klaar.setEnabled(self._plaats_compleet())
         hoeveelste, totaal = self._gat_positie(self._plaats['idx'])
-        rest = (f"  ·  frame {hoeveelste} van {totaal} in dit gat" if totaal > 1 else "")
+        rest = (f"  ·  frame {hoeveelste} of {totaal} in this gap" if totaal > 1 else "")
         self.lbl_editor_hint.setText(
-            "Rechts slepen = beeld verschuiven, muiswiel = zoomen." + rest)
+            "Right-drag = pan the image, mouse wheel = zoom." + rest)
         self._update_editor_knoppen()
         self.speler.show_current_frame()
 
     def _plaats_compleet(self):
-        """Mag het skelet vastgelegd worden? Alleen als elk meetpunt een zichtbare positie
-        heeft — anders belandt er een frame met heup, knie en enkel op één punt in de
-        tabel, en dat leest als een afzethoek van 0°."""
+        """May the skeleton be committed? Only if every measurement point has a visible
+        position -- otherwise a frame with hip, knee and ankle stacked on one point ends
+        up in the table, and that reads as a push angle of 0°."""
         if self._plaats is None:
             return False
         lm = self.resultaten[self._plaats['idx']].lm
@@ -8484,12 +8505,12 @@ class MainWindow(QMainWindow):
             return
         stap = self._plaats['stap']
         if stap >= len(PLACEMENT_ORDER):
-            self.lbl_plaats.setText("Alle punten gehad — klik op ✔ Klaar.")
+            self.lbl_plaats.setText("All points done -- click ✔ Done.")
             return
         norm = self.speler.widget_to_norm(event.position())
         if norm is None or not (0.0 <= norm[0] <= 1.0 and 0.0 <= norm[1] <= 1.0):
-            # Niet klemmen: dat zou de knie stilzwijgend op de beeldrand leggen.
-            self.lbl_editor_hint.setText("Klik binnen het beeld.")
+            # Don't clamp: that would silently put the knee on the edge of the frame.
+            self.lbl_editor_hint.setText("Click inside the frame.")
             return
         j = PLACEMENT_ORDER[stap]
         self._zet_landmark(self._plaats['idx'], j, norm[0], norm[1], vis=1.0)
@@ -8515,10 +8536,10 @@ class MainWindow(QMainWindow):
             ontbreekt = ", ".join(
                 LANDMARK_NAMES.get(j, str(j)) for j in PLACEMENT_REQUIRED
                 if self.resultaten[self._plaats['idx']].lm[j].visibility < HANDLE_MIN_VIS)
-            self.lbl_editor_hint.setText(f"Nog aan te wijzen: {ontbreekt}.")
+            self.lbl_editor_hint.setText(f"Still to place: {ontbreekt}.")
             return
-        # Eerst de state loslaten: _na_edit hertekent, en dat vuurt _speler_frame_getoond
-        # weer terug hierheen — met een gevulde _plaats zou dat een lus worden.
+        # Let go of the state first: _na_edit redraws, and that fires
+        # _speler_frame_getoond back to here -- with _plaats still set that would loop.
         plaats, self._plaats = self._plaats, None
         idx = plaats['idx']
         self._sluit_plaats_balk()
@@ -8531,7 +8552,7 @@ class MainWindow(QMainWindow):
         self._na_edit()
 
     def _plaats_annuleren(self):
-        """Terug naar de toestand vóór het plaatsen — het frame is weer een gat."""
+        """Back to the state before placing -- the frame is a gap again."""
         if self._plaats is None:
             return
         plaats, self._plaats = self._plaats, None
@@ -8541,8 +8562,8 @@ class MainWindow(QMainWindow):
         self._handmatig.pop(idx, None)
         self._sluit_plaats_balk()
         self.speler.recompute_box()
-        self._herbereken()               # bewust niet opslaan: er is niets veranderd
-        self.lbl_editor_hint.setText("Skelet plaatsen geannuleerd.")
+        self._herbereken()               # deliberately not saving: nothing has changed
+        self.lbl_editor_hint.setText("Skeleton placement cancelled.")
 
     def _sluit_plaats_balk(self):
         self.plaats_balk.setVisible(False)
@@ -8550,14 +8571,14 @@ class MainWindow(QMainWindow):
         self.speler.follow_frozen = False
 
     def _stop_plaatsen(self):
-        """Faalveilige uitgang voor elk pad dat de reeks kan onderbreken (wegnavigeren,
-        bewerk-modus uit, paginawissel, andere analyse, venster sluiten). Nooit een half
-        skelet laten staan.
+        """Fail-safe exit for any path that can interrupt the sequence (navigating away,
+        edit mode off, page switch, another analysis, window closing). Never leave a
+        half skeleton standing.
 
-        Heeft de gebruiker punten aangewezen en is het skelet bruikbaar, dan blijft dat
-        werk behouden. Heeft hij nog niets aangeklikt, dan gaat het weg — anders zou per
-        ongeluk wegscrubben stilzwijgend een voorvulling als meting vastleggen (inclusief
-        `analyse.bewerkt = 1`) terwijl de gebruiker niets heeft besloten."""
+        If the user has placed points and the skeleton is usable, that work is kept. If
+        nothing has been clicked yet, it's discarded -- otherwise scrubbing away by
+        accident would silently commit a prefill as a measurement (including
+        `analyse.bewerkt = 1`) while the user decided nothing."""
         if self._plaats is None:
             return
         if self._plaats['geklikt'] and self._plaats_compleet():
@@ -8566,18 +8587,18 @@ class MainWindow(QMainWindow):
             self._plaats_annuleren()
 
     def _herbereken(self):
-        """Afgeleiden + events opnieuw uit de huidige landmarks halen (géén smoothing) en
-        de hele weergave bijwerken — zónder op te slaan.
+        """Recomputes derivatives + events from the current landmarks (NO smoothing) and
+        refreshes the whole view -- WITHOUT saving.
 
-        Los van `_bewaar` omdat een handmatig skelet dat nog geplaatst wordt al wél
-        doorgerekend moet zijn (anders tekent de overlay op een lege `lm_data` en klapt
-        `teken_been_overlay`/`_update_live_status` eruit), maar nog niét opgeslagen mag
-        worden: `bewaar_bewerkte_landmarks` zet `analyse.bewerkt = 1` en legt de pristine
-        backup aan, en dat is onomkeerbaar als de gebruiker de reeks annuleert."""
+        Separate from `_bewaar` because a manually placed skeleton still being placed
+        already needs to be computed (otherwise the overlay draws on an empty `lm_data`
+        and `teken_been_overlay`/`_update_live_status` breaks), but must NOT be saved
+        yet: `bewaar_bewerkte_landmarks` sets `analyse.bewerkt = 1` and creates the
+        pristine backup, and that's irreversible if the user cancels the sequence."""
         info = self.video_info
-        # `perspectief` moet mee: sinds de kalibratie bewaard wordt, draagt een heropende
-        # analyse er een, en zonder dit argument zouden de hoeken na één sleepbeweging
-        # stilzwijgend terugvallen op het onvertekende beeldvlak.
+        # `perspectief` must go along: since the calibration is saved, a reopened
+        # analysis carries one, and without this argument the angles would silently
+        # fall back to the uncorrected image plane after a single drag.
         process_derivatives(self.resultaten, info.w, info.h, info.fps,
                            self.smooth_n, self.threshold,
                            perspectief=self.perspectief)
@@ -8590,34 +8611,35 @@ class MainWindow(QMainWindow):
         self._update_editor_knoppen()
 
     def _update_dekking(self):
-        """Statusbalk-teller: hoeveel frames hebben een skelet? Frames zonder breken een
-        afzetmeting af, dus dit is de maat voor 'hoeveel werk ligt er nog'.
+        """Status-bar counter: how many frames have a skeleton? Frames without one break
+        off a push measurement, so this is the measure of "how much work is left".
 
-        Bochtframes tellen niet mee — daar valt sowieso niets te meten, dus ze horen niet
-        als openstaand werk in de noemer te staan."""
+        Corner frames don't count -- nothing can be measured there anyway, so they
+        shouldn't sit in the denominator as outstanding work."""
         if not self.resultaten:
             self.lbl_dekking.setText("")
             return
         bocht = sum(1 for r in self.resultaten if r.bocht)
         totaal = len(self.resultaten) - bocht
         met = sum(1 for r in self.resultaten if r.pose_gevonden and not r.bocht)
-        tekst = f"Skelet: {met} van {totaal} frames"
+        tekst = f"Skeleton: {met} of {totaal} frames"
         if bocht:
-            tekst += f" · {bocht} in de bocht"
+            tekst += f" · {bocht} in the corner"
         self.lbl_dekking.setText(tekst)
         kleur = "#888" if met == totaal else "#c80"
         self.lbl_dekking.setStyleSheet(f"padding-right: 14px; color: {kleur};")
 
     def _bepaal_bocht_nu(self):
         """
-        Bepaalt de bocht alsnog op een analyse die er nog geen markering voor heeft, en
-        haalt die frames uit de meting. Voor alles wat vóór de bochtdetectie is gedraaid:
-        er wordt niets opnieuw geanalyseerd, want de landmarks van de héle clip staan al
-        in het .npz — daar valt de heupstand zo uit af te lezen. Op zo'n analyse is het
-        signaal zelfs betrouwbaarder dan op een verse, waar de bocht juist dun bemeten is.
+        Determines the corner after the fact on an analysis that doesn't yet have a
+        marking for it, and removes those frames from the measurement. For anything run
+        before corner detection existed: nothing is re-analyzed, since the landmarks of
+        the whole clip are already in the .npz -- the hip stance can be read straight
+        from that. On such an analysis the signal is even more reliable than on a fresh
+        one, where the corner is measured only thinly.
 
-        Eerst rekenen, dán pas vragen: de gebruiker ziet wat het met zijn tabel doet
-        voordat er iets naar de bibliotheek gaat. Bij "nee" gaat alles exact terug.
+        Compute first, then ask: the user sees what it does to their table before
+        anything goes to the library. On "no" everything goes back exactly as it was.
         """
         if not self.resultaten or self.analyse_id is None:
             return
@@ -8629,23 +8651,23 @@ class MainWindow(QMainWindow):
         n_bocht = sum(1 for r in self.resultaten if r.bocht)
         if n_bocht == 0:
             QMessageBox.information(
-                self, "Geen bocht gevonden",
-                "In deze analyse staat de schaatser overal frontaal in beeld — er is geen "
-                "bocht om uit te sluiten. Er verandert dus niets.")
+                self, "No corner found",
+                "In this analysis the skater faces the camera everywhere -- there's no "
+                "corner to exclude. So nothing changes.")
             self.btn_bocht_nu.setEnabled(False)
             return
 
-        self._herbereken()          # tabel/grafiek tonen al wat het wordt
+        self._herbereken()          # table/graph already show what it'll become
         verdwenen = oude_events - len(self.events)
         antwoord = QMessageBox.question(
-            self, "Bocht bepalen",
-            f"{n_bocht} van de {len(self.resultaten)} frames "
-            f"({n_bocht / len(self.resultaten):.0%}) liggen in de bocht.\n\n"
-            f"Afzetten: {oude_events} → {len(self.events)}"
-            + (f" ({verdwenen} vervallen — die zijn in de bocht gemeten "
-               f"en dus niet bruikbaar)" if verdwenen > 0 else "") + ".\n\n"
-            "Toepassen en opslaan? De landmarks blijven ongewijzigd; alleen de markering "
-            "welke frames buiten de meting vallen wordt bewaard.",
+            self, "Determine corner",
+            f"{n_bocht} of the {len(self.resultaten)} frames "
+            f"({n_bocht / len(self.resultaten):.0%}) are in the corner.\n\n"
+            f"Pushes: {oude_events} → {len(self.events)}"
+            + (f" ({verdwenen} dropped -- those were measured in the corner "
+               f"and so unusable)" if verdwenen > 0 else "") + ".\n\n"
+            "Apply and save? The landmarks stay unchanged; only the marking of which "
+            "frames fall outside the measurement is saved.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if antwoord != QMessageBox.Yes:
             for r, b in zip(self.resultaten, oude_vlaggen):
@@ -8658,17 +8680,17 @@ class MainWindow(QMainWindow):
                 self.bieb, self.analyse_id, self.resultaten, info, self.events)
         except Exception as e:
             QMessageBox.warning(
-                self, "Niet opgeslagen",
-                f"De bochtmarkering kon niet worden opgeslagen:\n\n{e}\n\n"
-                "Je ziet hem nu wel, maar bij het opnieuw openen is hij weg.")
+                self, "Not saved",
+                f"The corner marking couldn't be saved:\n\n{e}\n\n"
+                "You see it now, but it'll be gone the next time you open it.")
             return
         self.btn_bocht_nu.setEnabled(False)
-        self._vernieuw_schaatsers()          # gemiddelde hoek in de bibliotheeklijst
+        self._vernieuw_schaatsers()          # average angle in the library list
         self.statusBar().showMessage(
-            f"Bocht bepaald: {n_bocht} frames uitgesloten, opgeslagen.", 8000)
+            f"Corner determined: {n_bocht} frames excluded, saved.", 8000)
 
     def _na_edit(self):
-        """Na een edit/undo/redo: herberekenen én auto-opslaan naar de bibliotheek."""
+        """After an edit/undo/redo: recompute AND auto-save to the library."""
         self._herbereken()
         self._bewaar()
 
@@ -8678,26 +8700,26 @@ class MainWindow(QMainWindow):
             try:
                 skate_db.save_edited_landmarks(
                     self.bieb, self.analyse_id, self.resultaten, info, self.events)
-                self.lbl_editor_hint.setText("Correctie opgeslagen.")
+                self.lbl_editor_hint.setText("Correction saved.")
             except Exception as e:
-                self.lbl_editor_hint.setText(f"Opslaan mislukt: {e}")
+                self.lbl_editor_hint.setText(f"Saving failed: {e}")
         else:
-            self.lbl_editor_hint.setText("Niet opgeslagen (geen bibliotheek-analyse).")
+            self.lbl_editor_hint.setText("Not saved (no library analysis).")
 
     def _pas_edit_toe(self, edit, kant):
-        """Zet één undo-item terug of opnieuw; `kant` is 'oud' of 'nieuw'."""
+        """Reverts or reapplies one undo item; `kant` is 'oud' (old) or 'nieuw' (new)."""
         if edit.get('type') == 'skelet':
             idx = edit['idx']
             lm, pose = edit[f'{kant}_lm'], edit[f'{kant}_pose']
             r = self.resultaten[idx]
             r.lm = list(lm) if lm is not None else None
             r.pose_gevonden = pose
-            # De groene "handmatig"-markering hoort bij een skelet dat er staat.
+            # The green "manual" marker belongs to a skeleton that's actually there.
             if pose and lm is not None:
                 self._handmatig[idx] = set(edit.get('geklikt', ()))
             else:
                 self._handmatig.pop(idx, None)
-            self.speler.recompute_box()   # de dekking veranderde, dus de auto-zoom ook
+            self.speler.recompute_box()   # coverage changed, so the auto-zoom does too
             return
         j = edit['j']
         for f, lm in edit[kant].items():
@@ -8723,29 +8745,29 @@ class MainWindow(QMainWindow):
         if self.analyse_id is None:
             return
         if QMessageBox.question(
-                self, "Herstel origineel",
-                "Alle handmatige correcties van deze analyse ongedaan maken en terug naar "
-                "de oorspronkelijke detectie?",
+                self, "Restore original",
+                "Undo all manual corrections of this analysis and go back to the "
+                "original detection?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         try:
             hersteld = skate_db.restore_original_landmarks(self.bieb, self.analyse_id)
         except Exception as e:
-            QMessageBox.critical(self, "Herstel origineel", f"Mislukt:\n\n{e}")
+            QMessageBox.critical(self, "Restore original", f"Failed:\n\n{e}")
             return
         if not hersteld:
             QMessageBox.information(
-                self, "Herstel origineel",
-                "Deze analyse is nog niet bewerkt — er is niets te herstellen.")
+                self, "Restore original",
+                "This analysis hasn't been edited yet -- there's nothing to restore.")
             return
         try:
             data = skate_db.load_analysis(self.bieb, self.analyse_id)
         except Exception as e:
-            QMessageBox.critical(self, "Herstel origineel", f"Herladen mislukt:\n\n{e}")
+            QMessageBox.critical(self, "Restore original", f"Reloading failed:\n\n{e}")
             return
         info, resultaten = data["info"], data["resultaten"]
-        # Ook hier de kalibratie meegeven — "origineel herstellen" gaat over de
-        # landmarks, niet over de perspectiefcorrectie.
+        # Pass the calibration along here too -- "restore original" is about the
+        # landmarks, not about the perspective correction.
         process_derivatives(resultaten, info.w, info.h, info.fps, self.smooth_n,
                            self.threshold, perspectief=self.perspectief)
         events = segment_pushes(resultaten)
@@ -8758,7 +8780,7 @@ class MainWindow(QMainWindow):
         self._handmatig.clear()
         self._toon_resultaten(info, resultaten, events, bron=data["meta"]["titel"])
         self._update_editor_knoppen()
-        self.lbl_editor_hint.setText("Origineel hersteld.")
+        self.lbl_editor_hint.setText("Original restored.")
 
     def _markeer_actieve_rij(self, idx):
         for i, ev in enumerate(self.events):
@@ -8773,20 +8795,21 @@ class MainWindow(QMainWindow):
         if 0 <= rij < len(self.events):
             self.speler.go_to(self.events[rij].start_frame)
 
-    # ── Export ───────────────────────────────────────────────────────────
+    # -- Export ---------------------------------------------------------
     def _exporteer_csv(self):
-        pad, _ = QFileDialog.getSaveFileName(self, "Exporteer afzethoeken", "afzethoeken.csv", "CSV (*.csv)")
+        pad, _ = QFileDialog.getSaveFileName(self, "Export push angles", "afzethoeken.csv", "CSV (*.csv)")
         if not pad:
             return
         met_corr = any(ev.correctie is not None for ev in self.events)
         with open(pad, "w", newline="", encoding="utf-8") as f:
             schrijver = csv.writer(f)
-            # `onvolledig` draagt de réden (leeg = volwaardige meting); dat is meer waard in
-            # een sheet dan de oude 0/1-kolom `afgekapt`, die maar één van de twee dekte.
-            kop = ["#", "been", "start_tijd_s", "eind_tijd_s", "hoek_deg", "min_hoek_deg",
-                   "max_hoek_deg", "onvolledig"]
+            # `onvolledig` carries the reason (empty = a full measurement); that's worth
+            # more in a sheet than the old 0/1 `afgekapt` column, which only covered one
+            # of the two.
+            kop = ["#", "leg", "start_time_s", "end_time_s", "angle_deg", "min_angle_deg",
+                   "max_angle_deg", "incomplete"]
             if met_corr:
-                kop += ["correctie_deg", "betrouwbaar", "snelheid_ms", "slaglengte_m"]
+                kop += ["correction_deg", "reliable", "speed_ms", "stroke_length_m"]
             schrijver.writerow(kop)
             for i, ev in enumerate(self.events):
                 rij = [i + 1, ev.been, f"{ev.start_tijd:.3f}", f"{ev.eind_tijd:.3f}",
@@ -8798,22 +8821,23 @@ class MainWindow(QMainWindow):
                             f"{ev.snelheid:.2f}" if ev.snelheid is not None else "",
                             f"{ev.slaglengte:.2f}" if ev.slaglengte is not None else ""]
                 schrijver.writerow(rij)
-        self.statusBar().showMessage(f"Geëxporteerd naar {pad}", 5000)
+        self.statusBar().showMessage(f"Exported to {pad}", 5000)
 
     def _actieve_workers(self):
         return [w for w in (self.worker, self.batch_worker)
                 if w is not None and w.isRunning()]
 
     def _wacht_op_worker(self, worker, seconden=120):
-        """Wacht tot de thread écht gestopt is, met een wachtcursor en een levende UI.
-        De afbreek-check zit op de framegrens (bij YOLO ~2 s/frame) en een al begonnen
-        videokopie wordt bewust afgemaakt — daarom een ruime deadline i.p.v. terminate()."""
+        """Waits until the thread has really stopped, with a wait cursor and a live UI.
+        The abort check sits at the frame boundary (~2 s/frame with YOLO), and a video
+        copy already in progress is deliberately allowed to finish -- hence a generous
+        deadline instead of terminate()."""
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             deadline = time.monotonic() + seconden
             while not worker.wait(100):
-                # Alleen hertekenen; geen muis/toets, anders klikt de gebruiker in een
-                # venster dat al aan het sluiten is.
+                # Only redraw; no mouse/keys, otherwise the user clicks in a window
+                # that's already closing.
                 QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
                 if time.monotonic() > deadline:
                     return False
@@ -8822,47 +8846,47 @@ class MainWindow(QMainWindow):
         return True
 
     def _stop_workers(self):
-        """Breekt een lopende (batch-)analyse netjes af vóór het afsluiten. Retourneert
-        False als er niet afgesloten mag worden (gebruiker ziet ervan af, of de thread
-        is nog niet gestopt) — een QThread vernietigen terwijl hij draait is een crash."""
+        """Cleanly aborts a running (batch) analysis before closing. Returns False if
+        closing shouldn't happen (the user backs out, or the thread hasn't stopped yet)
+        -- destroying a running QThread is a crash."""
         actief = self._actieve_workers()
         if not actief:
             return True
         antwoord = QMessageBox.question(
-            self, "Analyse loopt nog",
-            "Er draait nog een analyse op de achtergrond.\n\n"
-            "Afsluiten breekt die af; de video wordt dan niet in de bibliotheek "
-            "opgeslagen. Al afgeronde video's van een batch blijven wel bewaard.\n\n"
-            "Toch afsluiten?",
+            self, "Analysis still running",
+            "An analysis is still running in the background.\n\n"
+            "Closing aborts it; the video won't be saved in the library. Videos "
+            "already finished in a batch are kept.\n\n"
+            "Close anyway?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if antwoord != QMessageBox.Yes:
             return False
 
-        # Vlag + blockSignals: nieuwe signalen komen niet meer, en een signaal dat al in
-        # de wachtrij stond mag geen dialoog of paginawissel meer opleveren tijdens het
-        # afsluiten (de slots controleren `_afsluiten`).
+        # Flag + blockSignals: no new signals will arrive, and one already queued may
+        # not produce a dialog or page switch anymore while closing (the slots check
+        # `_afsluiten`).
         self._afsluiten = True
         for w in actief:
             w.blockSignals(True)
             w.abort()
-        self.lbl_voortgang.setText("Analyse afbreken...")
+        self.lbl_voortgang.setText("Aborting analysis...")
         for w in actief:
             if not self._wacht_op_worker(w):
                 self._afsluiten = False
                 for x in actief:
                     x.blockSignals(False)
                 QMessageBox.warning(
-                    self, "Analyse stopt nog niet",
-                    "De analyse reageert nog niet op het afbreken — waarschijnlijk wordt "
-                    "de video nog naar de bibliotheek gekopieerd. Die kopie wordt niet "
-                    "halverwege afgekapt.\n\nHet venster blijft open; probeer het zo nog "
-                    "een keer af te sluiten.")
+                    self, "Analysis not stopping yet",
+                    "The analysis isn't responding to the abort yet -- probably the "
+                    "video is still being copied to the library. That copy won't be "
+                    "cut off halfway.\n\nThe window stays open; try closing it again "
+                    "in a moment.")
                 return False
         return True
 
     def changeEvent(self, event):
-        # Niet meer het actieve venster (alt-tab, een modale dialoog ervoor): de key-release
-        # van . of , komt dan nooit binnen en het spoelen zou eindeloos doorlopen.
+        # No longer the active window (alt-tab, a modal dialog in front): the key
+        # release of . or , never arrives then and scrubbing would run forever.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
             for toetsen in self._toetsen:
                 toetsen.stop_scrubbing()
@@ -8873,33 +8897,33 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._stop_lokaal_proef()
-        self._stop_plaatsen()   # een lopende reeks nog vastleggen of terugdraaien
+        self._stop_plaatsen()   # still commit or roll back a running sequence
         self._pauzeer_alles()
         for toetsen in self._toetsen:
             toetsen.detach()
         self.speler.release()
         self.kant_links.leeg()
         self.kant_rechts.leeg()
-        self._ruim_knipmap_op()   # geknipte fragmenten die niet meer geanalyseerd worden
+        self._ruim_knipmap_op()   # trimmed fragments that will no longer be analyzed
         super().closeEvent(event)
 
 
 def main():
-    # De QApplication en het opstartscherm bestaan al sinds de import bovenaan dit bestand
-    # (zie _start_splash_screen); alleen als deze module via een omweg wordt gestart, zijn
-    # ze er niet.
+    # The QApplication and the splash screen already exist since the import at the top
+    # of this file (see _start_splash_screen); only if this module is started via a
+    # detour are they missing.
     app = _APP or QApplication(sys.argv)
     venster = MainWindow(melding=_SPLASH.melding if _SPLASH else None)
     venster.show()
-    venster._melding = lambda tekst: None    # het opstartscherm gaat nu dicht
+    venster._melding = lambda tekst: None    # the splash screen closes now
     if _SPLASH:
         _SPLASH.finish(venster)
-        # finish() verbergt het opstartscherm alleen. Zonder dit blijft het de héle sessie
-        # als top-level venster bestaan — met een QScreen-verwijzing die bij een
-        # schermwijziging verouderd raakt; zie show_dialog.
+        # finish() only hides the splash screen. Without this it stays alive as a
+        # top-level window for the whole session -- with a QScreen reference that goes
+        # stale on a screen change; see show_dialog.
         _SPLASH.deleteLater()
-    # Pas nu torch/ultralytics binnenhalen: het venster staat er, de gebruiker kan al door
-    # de bibliotheek bladeren, en tegen de tijd dat hij een analyse start is de backend er.
+    # Only pull in torch/ultralytics now: the window is up, the user can already browse
+    # the library, and by the time they start an analysis the backend is ready.
     _warm_backend_up()
     sys.exit(app.exec())
 
