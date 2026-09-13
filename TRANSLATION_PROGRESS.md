@@ -359,16 +359,54 @@ document supersedes it for anything about actual progress and lessons learned).
         `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode) -- all 16
         windows pass, including all five renamed dialogs by their new names.
 
-      - **Next up for 8a**: `class VooruitLezer` (~line 2557) onward. Given sessions 1-3
-        covered the ~2,550-line infrastructure/pickers/workers/dialogs prefix, expect
-        the remaining ~6,300 lines to take multiple further sessions. Suggested
-        chunking, smallest/most-isolated first (check each class's own reference count
-        with `grep -c` before touching it, the same way sessions 1-3 did, since some of
-        these constants/helpers are shared across classes):
-        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2557-3737, over 1,100
-          lines) — this is also where the constants deferred in the note above should
-          finally get renamed, since they're its dependencies.
-        - `SpelerToetsen` + `MasterKlok` (~3737-4041).
+      - **Session 4** — `VooruitLezer`→`ForwardReader` only (~2547-2554, 2557-2632, plus
+        its ~13 call sites scattered through the not-yet-translated `VideoSpeler`
+        class). Deliberately scoped smaller than the "VooruitLezer + all of
+        `VideoSpeler`" suggestion below — `VideoSpeler` itself is ~1,100 lines, too big
+        for one sitting per the user's "keep sessions small" request this session opened
+        with, so it's split off as its own future session (see "Next up" below).
+        `VOORUIT_MAX_BYTES`/`VOORUIT_MAX_FRAMES`→`READAHEAD_MAX_BYTES`/
+        `READAHEAD_MAX_FRAMES`, `pak()`→`take()`, `resterend()`→`remaining()`,
+        `einde`→`at_end`, constructor params `aantal`/`voorraad`→`count`/`carryover`.
+        In `VideoSpeler` (otherwise still fully Dutch): renamed only the attributes/
+        methods that are this class's own state (`self._lezer`→`self._reader`,
+        `self._vooruit_rest`→`self._readahead_rest`, `_start_vooruitlezen`/
+        `_stop_vooruitlezen`→`_start_readahead`/`_stop_readahead`) and translated only
+        the comments/docstrings directly about read-ahead at each of those ~13 call
+        sites (`toon_op_klok`'s full docstring, the `_start_readahead`/`_stop_readahead`
+        method bodies+docstrings, and one-line comments elsewhere) — left every
+        surrounding line (method names like `speel`/`pauzeer`/`ga_naar`/`_speel_tick`,
+        their own docstrings, unrelated local variables) untouched in Dutch, since those
+        belong to the general `VideoSpeler` translation pass, not this one. Confirmed via
+        `grep` that every `_lezer`/`lezer`/`.pak(`/`.resterend(` occurrence was one of
+        these call sites (no collision with unrelated names like `meta_lezer`) before
+        editing, and that exactly two remaining Dutch-language *mentions* of the concept
+        (not the identifier) sit inside `MasterKlok`'s still-untranslated docstring/
+        comments (~3983, ~4027) — deliberately left alone, out of scope until
+        `MasterKlok`'s own session.
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs (offscreen
+        Qt); a throwaway script instantiating `ForwardReader` directly against a fake
+        `cv2`-shaped capture (no real video needed) confirming `take()`'s discard-before-
+        wanted and newest-if-behind semantics, `remaining()`'s carry-back, and `at_end`
+        all behave identically to the original `pak()`/`resterend()`/`einde`;
+        `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode) — all 16
+        windows pass.
+
+      - **Next up for 8a**: the rest of `VideoSpeler` (~2633-3736, now minus the
+        read-ahead pieces already done above). Given sessions 1-4 covered the
+        ~2,550-line infrastructure/pickers/workers/dialogs prefix plus the isolated
+        `ForwardReader` class, expect the remaining ~6,250 lines to take multiple
+        further sessions. Suggested chunking, smallest/most-isolated first (check each
+        class's own reference count with `grep -c` before touching it, the same way
+        sessions 1-4 did, since some of these constants/helpers are shared across
+        classes):
+        - The rest of the giant `VideoSpeler` class (~2633-3736, still over 1,000
+          lines even with `ForwardReader` split off — will likely need its own further
+          split, e.g. UI-building/zoom-pan/drawing vs. playback/navigation) — this is
+          also where the constants deferred in the note above should finally get
+          renamed, since they're its dependencies.
+        - `SpelerToetsen` + `MasterKlok` (~3737-4041) — this is also where the two
+          remaining Dutch "vooruitlezer" mentions noted above live.
         - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4041-4595).
         - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4595-5241).
         - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5241-5408).
