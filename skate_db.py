@@ -1349,7 +1349,7 @@ def file_is_local(pad, monsters=3, drempel_ms=LOCAL_THRESHOLD_MS):
 
     Why this matters: on a streaming folder, every jump in the trim window first has to
     fetch tens of MB (measured: 5-20 s per jump, ~40 MB), while the same jump on a local
-    copy costs 30-120 ms. See `schaats_gui._opname_beschikbaar`.
+    copy costs 30-120 ms. See `skate_gui._recording_available`.
 
     The samples sit at **random** spots: a piece that's been read then sits in the
     cloud cache, so probing the same spot every time would say 'lokaal' the second time
