@@ -303,17 +303,69 @@ document supersedes it for anything about actual progress and lessons learned).
         (quick mode) — all 16 windows pass, including the three renamed dialogs by
         their new names.
 
-      - **Next up for 8a**: `class AnalyseAfgebroken` (~line 1801) onward. Given
-        sessions 1-2 covered the ~860-line infrastructure-and-pickers prefix, expect the
-        remaining ~7,040 lines to take multiple further sessions. Suggested chunking,
-        smallest/most-isolated first (check each class's own reference count with
-        `grep -c` before touching it, the same way sessions 1-2 did, since some of these
-        constants/helpers are shared across classes):
-        - `AnalyseAfgebroken`/`AnalyseWorker`/`BatchWorker`/`SchaatserDialog`/
-          `NieuweAnalyseDialog`/`BatchAnalyseDialog`/`AnalyseKiezer` + `_calibration_rows`'s
-          caller `AnalyseInfoDialog` (~1801-2558) — already individually exercised by
-          `schaats_schermtest.py`, good regression coverage while translating them.
-        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2558-3737, over 1,100
+      - **Session 3 (same day as session 2)** — `AnalyseAfgebroken`→`AnalysisAborted`,
+        `AnalyseWorker`→`AnalysisWorker`, `BatchWorker` (name unchanged, already
+        English), `SchaatserDialog`→`SkaterDialog`, `NieuweAnalyseDialog`→
+        `NewAnalysisDialog`, `BatchAnalyseDialog`→`BatchAnalysisDialog`,
+        `AnalyseKiezer`→`AnalysisPicker`, `_ja_nee`→`_yes_no`, `_duur_tekst`→
+        `_duration_text`, `AnalyseInfoDialog`→`AnalysisInfoDialog` (~1801-2558, up to
+        but not including `class VooruitLezer`). Identifiers/docstrings/comments only,
+        same as every 8a session -- row labels inside `AnalysisInfoDialog` and every
+        other UI string stay Dutch (8b/8c).
+
+        `AnalysisWorker`'s and `BatchWorker`'s Signals were renamed too (`voortgang`→
+        `progress`, `klaar`→`done`, `fout`→`error`, `opslag_fout`→`save_error`,
+        `waarschuwing`→`warning`, `taak_start`→`task_start`, `taak_klaar`→`task_done`,
+        `taak_fout`→`task_error`, `alles_klaar`→`all_done`) and `breek_af()`→`abort()`,
+        with the internal `afbreken` flag→`cancelled` (confirmed via grep this flag has
+        no external readers -- safe to rename freely, unlike `bieb`/`analyse_id`/etc
+        below). This meant touching the two `MainWindow` call sites that construct these
+        workers and connect to their signals (~11 lines total, the same bounded-touch
+        pattern as session 2's three picker call sites) -- grepped for every
+        `.connect(...)`/`.emit(...)`/construction site first, confirmed exactly two
+        instantiation points, updated both.
+
+        **Deliberately left Dutch** (checked case-by-case, same judgment call as
+        `doel_punt`/`doel_kader`/`perspectief` in session 2, for a different reason this
+        time): `bieb`, `schaatser_id`, `titel`, `instellingen`, `aangemaakt_door`,
+        `analyse_id`, `naam`, `geboortejaar`, `notities`, `taken`/`taak`,
+        `schaatser_naam`, `heavy_gevraagd`, `geen_smoothing`. These aren't deferred
+        JSON-key concerns -- they're plain Python parameter/attribute names -- but they
+        turned out to be genuinely **shared vocabulary spanning `MainWindow`** (tens to
+        hundreds of call sites each, confirmed with `grep -c` before deciding, e.g.
+        `analyse_id` alone has 30+ hits across `MainWindow`/`VergelijkKant`) rather than
+        contained to the classes in this chunk. Translating them here would rename maybe
+        10% of their occurrences and leave the rest mismatched until whichever session
+        finally does `MainWindow` -- exactly the split-personality risk Pattern F/G warn
+        about, just for ordinary identifiers instead of persisted values this time. Also
+        confirmed `skate_db.py`'s own public functions (`create_skater`, `save_analysis`,
+        ...) still take these exact Dutch parameter names (Phase 5 translated function/
+        table/column *names* but not parameter names -- same "lower bar" as
+        `resultaten`/`_pad`/`naam` elsewhere), so leaving them Dutch here doesn't even
+        introduce a fresh inconsistency; it matches the rest of the already-"finished"
+        codebase.
+
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs (offscreen
+        Qt platform), confirming every renamed class/Signal resolves and every Signal's
+        C++ type signature looks right; a throwaway script exercising `AnalysisWorker`
+        and `BatchWorker` end-to-end with a mocked `analyze_backend`/`skate_db` (not a
+        real video/model) -- confirms `progress`/`warning`/`done` fire correctly on a
+        normal run, `abort()`/`cancelled` correctly stops `run()` silently via
+        `AnalysisAborted` (both before and during a run), and `BatchWorker` correctly
+        emits `task_start`/`task_done`/`task_error`/`all_done` across a two-task batch
+        where one task fails; a second throwaway script confirming `SkaterDialog`/
+        `NewAnalysisDialog`/`BatchAnalysisDialog`'s properties (`naam`, `schaatser_id`,
+        `titel`, `taken`, `smooth_n`, ...) still read correctly after the rename;
+        `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode) -- all 16
+        windows pass, including all five renamed dialogs by their new names.
+
+      - **Next up for 8a**: `class VooruitLezer` (~line 2557) onward. Given sessions 1-3
+        covered the ~2,550-line infrastructure/pickers/workers/dialogs prefix, expect
+        the remaining ~6,300 lines to take multiple further sessions. Suggested
+        chunking, smallest/most-isolated first (check each class's own reference count
+        with `grep -c` before touching it, the same way sessions 1-3 did, since some of
+        these constants/helpers are shared across classes):
+        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2557-3737, over 1,100
           lines) — this is also where the constants deferred in the note above should
           finally get renamed, since they're its dependencies.
         - `SpelerToetsen` + `MasterKlok` (~3737-4041).
@@ -325,9 +377,15 @@ document supersedes it for anything about actual progress and lessons learned).
           `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
           8c work will naturally happen while translating its identifiers/docstrings/
           comments here in 8a — that's fine, just don't call 8c "done" until a
-          dedicated pass confirms every dialog/tooltip string is translated too).
+          dedicated pass confirms every dialog/tooltip string is translated too. This is
+          also where `bieb`/`schaatser_id`/`titel`/`instellingen`/`aangemaakt_door`/
+          `analyse_id`/`naam`/`geboortejaar`/`notities`/`taken`/`schaatser_naam` from
+          session 3's "deliberately left Dutch" list actually live and could finally be
+          renamed in one coordinated pass, if a future session decides that's worth
+          doing -- check first whether `skate_db.py`'s own parameter names would need
+          to move together, since right now they match on purpose).
         - `main()` (~8872-8893).
-        Line numbers are from session 2's end state and will drift as each chunk is
+        Line numbers are from session 3's end state and will drift as each chunk is
         translated — re-`grep -n "^class \|^def "` at the start of each session rather
         than trusting the numbers above verbatim.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do

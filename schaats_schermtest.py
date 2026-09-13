@@ -206,11 +206,11 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
     dialoog("TargetPicker", lambda: G.TargetPicker(frame))
     dialoog("HorizonPicker", lambda: G.HorizonPicker(frame))
     dialoog("CalibrationPicker", lambda: G.CalibrationPicker(frame))
-    dialoog("SchaatserDialog", lambda: G.SchaatserDialog())
-    dialoog("NieuweAnalyseDialog", lambda: G.NieuweAnalyseDialog(schaatsers))
-    dialoog("BatchAnalyseDialog", lambda: G.BatchAnalyseDialog(schaatsers))
-    dialoog("AnalyseKiezer", lambda: G.AnalyseKiezer(bieb))
-    dialoog("AnalyseInfoDialog", lambda: G.AnalyseInfoDialog(
+    dialoog("SkaterDialog", lambda: G.SkaterDialog())
+    dialoog("NewAnalysisDialog", lambda: G.NewAnalysisDialog(schaatsers))
+    dialoog("BatchAnalysisDialog", lambda: G.BatchAnalysisDialog(schaatsers))
+    dialoog("AnalysisPicker", lambda: G.AnalysisPicker(bieb))
+    dialoog("AnalysisInfoDialog", lambda: G.AnalysisInfoDialog(
         schaats_db.analyse_meta(bieb, aid1), "Test Schaatser"))
     dialoog("FragmentKiezer", lambda: G.FragmentKiezer(
         opname, info, gedaan=[{"start_frame": 2, "eind_frame": 10, "titel": "x"}]))

@@ -955,10 +955,10 @@ class ElideLabel(QLabel):
         super().setText(fm.elidedText(self._volledig, self._modus, breedte))
 
 
-# The three target/horizon/calibration picker dialogs below (through `CalibrationPicker`,
-# ending at `class AnalyseAfgebroken`) are Phase 8a session 2: identifiers/comments/
-# docstrings only -- UI text (window titles, labels, tooltips, messages) is still Dutch.
-# See TRANSLATION_PROGRESS.md.
+# Everything below, from the target/horizon/calibration picker dialogs through
+# `AnalysisInfoDialog` (ending at `class VooruitLezer`), is Phase 8a session 2:
+# identifiers/comments/docstrings only -- UI text (window titles, labels, tooltips,
+# messages) is still Dutch. See TRANSLATION_PROGRESS.md.
 BOX_MIN_DRAG_PX  = 5       # shorter drag in TargetPicker = click (point), longer = box
 BOX_ZOOM_MAX     = 8.0     # zoom range of TargetPicker (mouse wheel)
 BOX_MIN_HEIGHT_PX = 70     # = skate_yolo.BOX_MIN_HEIGHT_PX (that module is lazy-loaded here):
@@ -1798,25 +1798,25 @@ class CalibrationPicker(QDialog):
         self.accept()
 
 
-class AnalyseAfgebroken(Exception):
-    """Coöperatief afbreken van een lopende (batch-)analyse: `breek_af()` zet een vlag en
-    de voortgangs-callback — die elke pass per frame aanroept — gooit deze uitzondering.
-    Zo stopt een analyse binnen één frame i.p.v. dat de thread bij het afsluiten van de
-    app vernietigd wordt terwijl hij nog draait (Qt: 'Destroyed while thread is still
-    running'). Het opslaan zelf wordt nooit halverwege afgebroken — een halve videokopie
-    in de mediamap is erger dan even wachten."""
+class AnalysisAborted(Exception):
+    """Cooperative abort of a running (batch) analysis: `abort()` sets a flag and the
+    progress callback -- which every pass calls per frame -- raises this exception. That
+    way an analysis stops within one frame instead of the thread being destroyed while
+    still running when the app closes (Qt: 'Destroyed while thread is still running').
+    Saving itself is never aborted halfway -- a half video copy in the media folder is
+    worse than waiting a moment."""
 
 
-class AnalyseWorker(QThread):
-    """Draait de analyse op de achtergrond, zodat de GUI niet blokkeert, en slaat het
-    resultaat daarna automatisch op in de bibliotheek (fase 1). Het opslaan gebeurt
-    bewust ook in deze thread: de videokopie naar de mediamap kan lang duren."""
-    voortgang = Signal(int, int)
-    status = Signal(str)                     # tekst voor de voortgangsdialoog (busy-fase)
-    klaar = Signal(object, object, object, object)   # info, resultaten, events, analyse_id
-    fout = Signal(str)                       # analyse zelf mislukt
-    opslag_fout = Signal(str)                # alléén het opslaan mislukt (analyse is er wel)
-    waarschuwing = Signal(str)               # stille terugval in de analyse (bv. klik raakte niemand)
+class AnalysisWorker(QThread):
+    """Runs the analysis in the background so the GUI doesn't block, then automatically
+    saves the result to the library (phase 1). Saving deliberately happens in this
+    thread too: the video copy to the media folder can take a while."""
+    progress = Signal(int, int)
+    status = Signal(str)                     # text for the progress dialog (busy phase)
+    done = Signal(object, object, object, object)    # info, resultaten, events, analyse_id
+    error = Signal(str)                      # the analysis itself failed
+    save_error = Signal(str)                 # only the save failed (the analysis exists)
+    warning = Signal(str)                    # silent fallback in the analysis (e.g. a click hit nobody)
 
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
@@ -1843,39 +1843,39 @@ class AnalyseWorker(QThread):
         self.instellingen = instellingen
         self.backend = backend
         self.aangemaakt_door = aangemaakt_door
-        self.afbreken = False
+        self.cancelled = False
 
-    def breek_af(self):
-        """Vraagt de analyse te stoppen (afsluiten van de app). De thread eindigt bij de
-        eerstvolgende frame-callback, zonder signaal en zonder op te slaan."""
-        self.afbreken = True
+    def abort(self):
+        """Asks the analysis to stop (app shutting down). The thread ends at the next
+        frame callback, without a signal and without saving."""
+        self.cancelled = True
 
     def run(self):
         try:
-            def toon_voortgang(frame_nr, totaal):
-                if self.afbreken:
-                    raise AnalyseAfgebroken()
-                self.voortgang.emit(frame_nr, totaal)
+            def show_progress(frame_nr, totaal):
+                if self.cancelled:
+                    raise AnalysisAborted()
+                self.progress.emit(frame_nr, totaal)
 
             info, resultaten = analyze_backend(
                 self.input_pad, self.model_pad, self.smooth_n, self.threshold,
-                self.force_fps, doel_punt=self.doel_punt, progress_callback=toon_voortgang,
+                self.force_fps, doel_punt=self.doel_punt, progress_callback=show_progress,
                 horizon_deg=self.horizon_deg, auto_horizon=self.auto_horizon,
                 smooth_landmarks=self.smooth_landmarks, perspectief=self.perspectief,
-                waarschuwing_callback=self.waarschuwing.emit, bocht=self.bocht,
+                waarschuwing_callback=self.warning.emit, bocht=self.bocht,
                 deinterlacen=self.deinterlacen, doel_kader=self.doel_kader,
             )
             events = segment_pushes(resultaten)
-        except AnalyseAfgebroken:
-            return                    # afsluiten: niets melden, niets opslaan
+        except AnalysisAborted:
+            return                    # shutting down: report nothing, save nothing
         except Exception as e:
-            self.fout.emit(str(e))
+            self.error.emit(str(e))
             return
-        if self.afbreken:
-            return                    # niet meer aan een lange videokopie beginnen
+        if self.cancelled:
+            return                    # don't start a long video copy anymore
 
-        # Opslaan in de bibliotheek; faalt dit, dan gaat de (lange) analyse niet
-        # verloren — de resultaten worden alsnog getoond, alleen niet bewaard.
+        # Save to the library; if this fails, the (long) analysis isn't lost -- the
+        # results are still shown, just not kept.
         analyse_id = None
         if self.bieb is not None and self.schaatser_id is not None:
             self.status.emit("Opslaan in bibliotheek...")
@@ -1886,23 +1886,23 @@ class AnalyseWorker(QThread):
                     backend=self.backend, instellingen=self.instellingen,
                     aangemaakt_door=self.aangemaakt_door)
             except Exception as e:
-                self.opslag_fout.emit(str(e))
-        self.klaar.emit(info, resultaten, events, analyse_id)
+                self.save_error.emit(str(e))
+        self.done.emit(info, resultaten, events, analyse_id)
 
 
 class BatchWorker(QThread):
-    """Draait een reeks analyses achter elkaar op de achtergrond en slaat elke video
-    automatisch op in de bibliotheek. Eén slechte clip stopt de batch niet — die wordt als
-    mislukt gemeld en de rest loopt door. 'Stop na deze video' vraagt via requestInterruption()
-    een nette stop aan die tussen de video's wordt afgehandeld (de lopende video wordt eerst
-    afgemaakt en opgeslagen)."""
-    taak_start  = Signal(int, int, str)          # index (0-based), totaal, titel
-    voortgang   = Signal(int, int)               # frame_nr, totaal van de huidige video
-    status      = Signal(str)                     # busy-tekst (videokopie naar de bibliotheek)
-    taak_klaar  = Signal(int, object)            # index, analyse_id (of None)
-    taak_fout   = Signal(int, str)               # index, foutmelding — batch gaat door
-    alles_klaar = Signal(list, list, list)       # geslaagde titels, [(titel, melding)] mislukt,
-                                                 # [(titel, melding)] waarschuwingen
+    """Runs a series of analyses back-to-back in the background and automatically saves
+    each video to the library. One bad clip doesn't stop the batch -- it's reported as
+    failed and the rest keeps going. 'Stop after this video' requests a clean stop via
+    requestInterruption() that's handled between videos (the video in progress is
+    finished and saved first)."""
+    task_start = Signal(int, int, str)           # index (0-based), total, titel
+    progress   = Signal(int, int)                # frame_nr, total of the current video
+    status     = Signal(str)                     # busy text (video copy to the library)
+    task_done  = Signal(int, object)             # index, analyse_id (or None)
+    task_error = Signal(int, str)                # index, error message -- the batch continues
+    all_done   = Signal(list, list, list)        # succeeded titles, [(titel, message)] failed,
+                                                 # [(titel, message)] warnings
 
     def __init__(self, taken, bieb, backend, aangemaakt_door=""):
         super().__init__()
@@ -1910,52 +1910,52 @@ class BatchWorker(QThread):
         self.bieb = bieb
         self.backend = backend
         self.aangemaakt_door = aangemaakt_door
-        self.afbreken = False
+        self.cancelled = False
 
-    def breek_af(self):
-        """Hard stoppen (afsluiten van de app): ook de lopende video wordt afgebroken.
-        Bewust iets anders dan `requestInterruption()` ('Stop na deze video'), dat de
-        huidige video juist netjes laat afmaken en opslaan."""
-        self.afbreken = True
+    def abort(self):
+        """Hard stop (app shutting down): the video in progress is aborted too.
+        Deliberately different from `requestInterruption()` ('Stop after this video'),
+        which lets the current video finish and save cleanly."""
+        self.cancelled = True
 
-    def _voortgang(self, frame_nr, totaal):
-        if self.afbreken:
-            raise AnalyseAfgebroken()
-        self.voortgang.emit(frame_nr, totaal)
+    def _progress(self, frame_nr, totaal):
+        if self.cancelled:
+            raise AnalysisAborted()
+        self.progress.emit(frame_nr, totaal)
 
     def run(self):
         n = len(self.taken)
         geslaagd, fouten, waarschuwingen = [], [], []
         for i, taak in enumerate(self.taken):
-            if self.afbreken or self.isInterruptionRequested():
-                break                            # 'Stop na deze video' — rest overslaan
-            self.taak_start.emit(i, n, taak["titel"])
+            if self.cancelled or self.isInterruptionRequested():
+                break                            # 'Stop after this video' -- skip the rest
+            self.task_start.emit(i, n, taak["titel"])
             try:
-                # Waarschuwingen (bv. een klik die niemand raakte) niet per video in een
-                # modale box gooien — een batch draait juist onbewaakt; verzamelen en aan
-                # het eind in het overzicht melden, mét de titel erbij.
-                def _waarschuw(tekst, titel=taak["titel"]):
+                # Don't throw a warning (e.g. a click that hit nobody) into a modal box
+                # per video -- a batch runs unattended by design; collect them and report
+                # in the summary at the end, with the titel alongside.
+                def _warn(tekst, titel=taak["titel"]):
                     waarschuwingen.append((titel, tekst))
 
                 info, resultaten = analyze_backend(
                     taak["input_pad"], taak["model_pad"], taak["smooth_n"], taak["threshold"],
                     doel_punt=taak["doel_punt"],
-                    progress_callback=self._voortgang,
+                    progress_callback=self._progress,
                     horizon_deg=taak["horizon_deg"], auto_horizon=taak["auto_horizon"],
                     smooth_landmarks=taak["smooth_landmarks"],
                     perspectief=taak.get("perspectief"),
-                    waarschuwing_callback=_waarschuw, bocht=taak.get("bocht", True),
+                    waarschuwing_callback=_warn, bocht=taak.get("bocht", True),
                     deinterlacen=taak.get("deinterlacen", False),
                     doel_kader=taak.get("doel_kader"),
                 )
                 events = segment_pushes(resultaten)
                 if resultaten and all(r.bocht for r in resultaten):
-                    # Anders staat deze clip straks als "0 afzetten" in de lijst zonder dat
-                    # iemand weet waarom.
-                    _waarschuw("De schaatser staat nergens frontaal in beeld; de hele video "
-                               "is als bocht aangemerkt en er is niets gemeten.")
-                if self.afbreken:
-                    break                        # niet meer aan een lange videokopie beginnen
+                    # Otherwise this clip would show up as "0 pushes" in the list with no
+                    # one knowing why.
+                    _warn("De schaatser staat nergens frontaal in beeld; de hele video "
+                          "is als bocht aangemerkt en er is niets gemeten.")
+                if self.cancelled:
+                    break                        # don't start a long video copy anymore
                 self.status.emit("Opslaan in bibliotheek...")
                 analyse_id = skate_db.save_analysis(
                     self.bieb, taak["schaatser_id"], taak["titel"], taak["input_pad"],
@@ -1966,19 +1966,19 @@ class BatchWorker(QThread):
                     bron_start_frame=taak.get("bron_start_frame"),
                     bron_eind_frame=taak.get("bron_eind_frame"))
                 geslaagd.append(taak["titel"])
-                self.taak_klaar.emit(i, analyse_id)
-            except AnalyseAfgebroken:
-                break                            # afsluiten: rest van de rij vervalt
+                self.task_done.emit(i, analyse_id)
+            except AnalysisAborted:
+                break                            # shutting down: the rest of the row is dropped
             except Exception as e:
-                # sla_analyse_op ruimt zijn eigen halve mediamap op; hier alleen registreren.
+                # save_analysis cleans up its own half media folder; just record it here.
                 fouten.append((taak["titel"], str(e)))
-                self.taak_fout.emit(i, str(e))
-        if not self.afbreken:
-            self.alles_klaar.emit(geslaagd, fouten, waarschuwingen)
+                self.task_error.emit(i, str(e))
+        if not self.cancelled:
+            self.all_done.emit(geslaagd, fouten, waarschuwingen)
 
 
-class SchaatserDialog(QDialog):
-    """Schaatser-profiel aanmaken of bewerken: naam, geboortejaar, notities."""
+class SkaterDialog(QDialog):
+    """Create or edit a skater profile: name, birth year, notes."""
 
     def __init__(self, parent=None, naam="", geboortejaar=None, notities=""):
         super().__init__(parent)
@@ -1990,7 +1990,7 @@ class SchaatserDialog(QDialog):
 
         self.veld_jaar = QSpinBox()
         self.veld_jaar.setRange(0, 2100)
-        self.veld_jaar.setSpecialValueText("—")   # 0 = niet ingevuld
+        self.veld_jaar.setSpecialValueText("—")   # 0 = not filled in
         self.veld_jaar.setValue(geboortejaar or 0)
         form.addRow("Geboortejaar:", self.veld_jaar)
 
@@ -2020,9 +2020,9 @@ class SchaatserDialog(QDialog):
         return self.veld_notities.toPlainText().strip()
 
 
-class NieuweAnalyseDialog(QDialog):
-    """Verzamelt alles voor één nieuwe analyse: schaatser, video, titel en de
-    analyse-instellingen (verhuisd van de oude startpagina, fase 1)."""
+class NewAnalysisDialog(QDialog):
+    """Collects everything for one new analysis: skater, video, titel and the analysis
+    settings (moved here from the old start page, phase 1)."""
 
     def __init__(self, schaatsers, voorkeur_id=None, parent=None):
         super().__init__(parent)
@@ -2043,7 +2043,7 @@ class NieuweAnalyseDialog(QDialog):
 
         rij_video = QHBoxLayout()
         knop_video = QPushButton("Video kiezen...")
-        knop_video.clicked.connect(self._kies_video)
+        knop_video.clicked.connect(self._choose_video)
         self.lbl_video = QLabel("Geen video gekozen")
         rij_video.addWidget(knop_video)
         rij_video.addWidget(self.lbl_video, stretch=1)
@@ -2078,7 +2078,7 @@ class NieuweAnalyseDialog(QDialog):
         fv.addLayout(rij_threshold)
 
         self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
-        self.chk_heavy.setVisible(not IS_YOLO)   # alleen relevant voor de MediaPipe-backend
+        self.chk_heavy.setVisible(not IS_YOLO)   # only relevant for the MediaPipe backend
         fv.addWidget(self.chk_heavy)
 
         self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
@@ -2088,7 +2088,7 @@ class NieuweAnalyseDialog(QDialog):
 
         self.chk_deint = QCheckBox("Interlacing wegfilteren (kamtanden)")
         self.chk_deint.setToolTip(DEINT_TOOLTIP)
-        self.chk_deint.setEnabled(False)         # pas te bedienen als er een video ligt
+        self.chk_deint.setEnabled(False)         # only usable once a video is chosen
         fv.addWidget(self.chk_deint)
 
         self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (experimenteel)")
@@ -2111,9 +2111,9 @@ class NieuweAnalyseDialog(QDialog):
         v.addWidget(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
         self._ok.setText("Start analyse")
-        self._ok.setEnabled(False)               # pas actief mét gekozen video
+        self._ok.setEnabled(False)               # only enabled once a video is chosen
 
-    def _kies_video(self):
+    def _choose_video(self):
         pad, _ = QFileDialog.getOpenFileName(
             self, "Kies video", "", VIDEO_FILTER)
         if not pad:
@@ -2123,17 +2123,17 @@ class NieuweAnalyseDialog(QDialog):
         if not self.veld_titel.text().strip():
             self.veld_titel.setText(os.path.splitext(os.path.basename(pad))[0])
         self._ok.setEnabled(True)
-        self._toets_interlacing(pad)
+        self._check_interlacing(pad)
 
-    def _toets_interlacing(self, pad):
-        """Zet het kamfilter-vinkje op wat deze video nodig heeft. Meteen hier en niet pas
-        tijdens de analyse, zodat de gebruiker ziet wat er gaat gebeuren en het kan
-        overrulen — en zodat de keuze als expliciete waarde in de instellingen belandt."""
+    def _check_interlacing(self, pad):
+        """Sets the comb-filter checkbox to what this video needs. Right here, not only
+        during the analysis, so the user sees what's about to happen and can override it
+        -- and so the choice ends up as an explicit value in the settings."""
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             interlaced = is_interlaced(pad)
         except Exception:
-            interlaced = False                   # niet kunnen meten is geen reden om te filteren
+            interlaced = False                   # unable to measure isn't a reason to filter
         finally:
             QApplication.restoreOverrideCursor()
         self.chk_deint.setEnabled(True)
@@ -2157,10 +2157,10 @@ class NieuweAnalyseDialog(QDialog):
         return os.path.splitext(os.path.basename(self.video_pad or "analyse"))[0]
 
 
-class BatchAnalyseDialog(QDialog):
-    """Verzamelt een hele batch in één dialoog: meerdere video's tegelijk, elk met een
-    eigen schaatser en titel, plus gedeelde analyse-instellingen. De doel- en horizon-keuze
-    gebeurt daarna per video in de verzamellus (MainWindow._nieuwe_batch_analyse)."""
+class BatchAnalysisDialog(QDialog):
+    """Collects a whole batch in one dialog: multiple videos at once, each with its own
+    skater and titel, plus shared analysis settings. The target/horizon choice then
+    happens per video in the collection loop (MainWindow._nieuwe_batch_analyse)."""
 
     def __init__(self, schaatsers, voorkeur_id=None, voorgevuld=None, parent=None):
         super().__init__(parent)
@@ -2169,10 +2169,10 @@ class BatchAnalyseDialog(QDialog):
         self._schaatsers = schaatsers
         v = QVBoxLayout(self)
 
-        # Video's kiezen + standaard-schaatser die je in één keer op alle rijen zet.
+        # Choose videos + the default skater you apply to all rows at once.
         rij_top = QHBoxLayout()
         knop_videos = QPushButton("Video's kiezen...")
-        knop_videos.clicked.connect(self._kies_videos)
+        knop_videos.clicked.connect(self._choose_videos)
         rij_top.addWidget(knop_videos)
         rij_top.addWidget(QLabel("Standaard schaatser:"))
         self.combo_standaard = QComboBox()
@@ -2185,11 +2185,11 @@ class BatchAnalyseDialog(QDialog):
                 self.combo_standaard.setCurrentIndex(idx)
         rij_top.addWidget(self.combo_standaard, stretch=1)
         knop_toepassen = QPushButton("Toepassen op alle rijen")
-        knop_toepassen.clicked.connect(self._pas_standaard_toe)
+        knop_toepassen.clicked.connect(self._apply_default)
         rij_top.addWidget(knop_toepassen)
         v.addLayout(rij_top)
 
-        # Video's + per rij een schaatser (combobox) en een bewerkbare titel.
+        # Videos + a skater (combobox) and an editable titel per row.
         self.tabel = QTableWidget(0, 3)
         self.tabel.setHorizontalHeaderLabels(["Video", "Schaatser", "Titel"])
         self.tabel.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -2199,10 +2199,10 @@ class BatchAnalyseDialog(QDialog):
         v.addWidget(self.tabel, stretch=1)
 
         knop_verwijder = QPushButton("Geselecteerde rij verwijderen")
-        knop_verwijder.clicked.connect(self._verwijder_rij)
+        knop_verwijder.clicked.connect(self._remove_row)
         v.addWidget(knop_verwijder)
 
-        # Gedeelde instellingen (dezelfde widgets/waarden als NieuweAnalyseDialog).
+        # Gedeelde instellingen (dezelfde widgets/waarden als NewAnalysisDialog).
         instellingen = QGroupBox("Instellingen (gelden voor de hele batch)")
         fv = QVBoxLayout(instellingen)
 
@@ -2227,7 +2227,7 @@ class BatchAnalyseDialog(QDialog):
         fv.addLayout(rij_threshold)
 
         self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
-        self.chk_heavy.setVisible(not IS_YOLO)   # alleen relevant voor de MediaPipe-backend
+        self.chk_heavy.setVisible(not IS_YOLO)   # only relevant for the MediaPipe backend
         fv.addWidget(self.chk_heavy)
 
         self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
@@ -2235,8 +2235,8 @@ class BatchAnalyseDialog(QDialog):
         self.chk_bocht.setToolTip(CORNER_TOOLTIP)
         fv.addWidget(self.chk_bocht)
 
-        # Per clip bepalen en niet één keer voor de hele batch: een batch kan clips uit
-        # verschillende camera's bevatten, en het antwoord is per bestand goedkoop.
+        # Determined per clip, not once for the whole batch: a batch can hold clips from
+        # different cameras, and the answer is cheap per file.
         self.chk_deint = QCheckBox("Interlacing automatisch wegfilteren (kamtanden)")
         self.chk_deint.setToolTip(DEINT_TOOLTIP)
         self.chk_deint.setChecked(True)
@@ -2256,35 +2256,35 @@ class BatchAnalyseDialog(QDialog):
         v.addWidget(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
         self._ok.setText("Start batch")
-        self._ok.setEnabled(False)               # pas actief met minstens één video
+        self._ok.setEnabled(False)               # only enabled with at least one video
 
-        # Fase 8: rijen die al vaststaan (zojuist uit een opname geknipte fragmenten).
-        # De trainer hoeft alleen nog schaatser + titel in te vullen — verder is dit
-        # exact de bestaande batch-flow.
+        # Phase 8: rows that are already fixed (fragments just cut from a recording).
+        # The trainer only needs to fill in skater + titel -- the rest is exactly the
+        # existing batch flow.
         for f in (voorgevuld or []):
-            self._voeg_rij(f["input_pad"], f.get("titel"), bron={
+            self._add_row(f["input_pad"], f.get("titel"), bron={
                 "bron_id": f.get("bron_id"),
                 "bron_start_frame": f.get("bron_start_frame"),
                 "bron_eind_frame": f.get("bron_eind_frame")})
 
-    def _voeg_rij(self, pad, titel=None, bron=None):
-        """Eén videorij: pad achter de eerste cel, schaatser-combo, bewerkbare titel.
-        `bron` (fase 8) reist mee zodat de analyse weet uit welk stuk van welke opname
-        deze clip komt."""
+    def _add_row(self, pad, titel=None, bron=None):
+        """One video row: pad behind the first cell, skater combo, editable titel.
+        `bron` (phase 8) rides along so the analysis knows which piece of which
+        recording this clip comes from."""
         r = self.tabel.rowCount()
         self.tabel.insertRow(r)
         item_pad = QTableWidgetItem(os.path.basename(pad))
-        item_pad.setData(Qt.UserRole, pad)                 # volledige pad achter de rij
+        item_pad.setData(Qt.UserRole, pad)                 # full path behind the row
         item_pad.setData(Qt.UserRole + 1, bron)
         item_pad.setFlags(item_pad.flags() & ~Qt.ItemIsEditable)
         self.tabel.setItem(r, 0, item_pad)
-        self.tabel.setCellWidget(r, 1, self._maak_schaatser_combo())
+        self.tabel.setCellWidget(r, 1, self._make_skater_combo())
         self.tabel.setItem(r, 2, QTableWidgetItem(
             titel or os.path.splitext(os.path.basename(pad))[0]))
         self._ok.setEnabled(True)
 
-    def _maak_schaatser_combo(self):
-        """Een per-rij schaatser-keuze, voorgeselecteerd op de huidige standaard."""
+    def _make_skater_combo(self):
+        """A per-row skater choice, preselected on the current default."""
         combo = QComboBox()
         for s in self._schaatsers:
             tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
@@ -2294,14 +2294,14 @@ class BatchAnalyseDialog(QDialog):
             combo.setCurrentIndex(idx)
         return combo
 
-    def _kies_videos(self):
+    def _choose_videos(self):
         paden, _ = QFileDialog.getOpenFileNames(
             self, "Kies video's", "", VIDEO_FILTER)
         for pad in paden:
-            self._voeg_rij(pad)
+            self._add_row(pad)
         self._ok.setEnabled(self.tabel.rowCount() > 0)
 
-    def _pas_standaard_toe(self):
+    def _apply_default(self):
         sid = self.combo_standaard.currentData()
         for r in range(self.tabel.rowCount()):
             combo = self.tabel.cellWidget(r, 1)
@@ -2310,7 +2310,7 @@ class BatchAnalyseDialog(QDialog):
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
 
-    def _verwijder_rij(self):
+    def _remove_row(self):
         r = self.tabel.currentRow()
         if r >= 0:
             self.tabel.removeRow(r)
@@ -2318,7 +2318,7 @@ class BatchAnalyseDialog(QDialog):
 
     @property
     def taken(self):
-        """Lijst van {input_pad, schaatser_id, titel} — één per video-rij."""
+        """List of {input_pad, schaatser_id, titel} -- one per video row."""
         rijen = []
         for r in range(self.tabel.rowCount()):
             item_pad = self.tabel.item(r, 0)
@@ -2330,7 +2330,7 @@ class BatchAnalyseDialog(QDialog):
             if not titel:
                 titel = os.path.splitext(os.path.basename(pad))[0]
             taak = {"input_pad": pad, "schaatser_id": schaatser_id, "titel": titel}
-            taak.update(item_pad.data(Qt.UserRole + 1) or {})   # bron_* (fase 8), of niets
+            taak.update(item_pad.data(Qt.UserRole + 1) or {})   # bron_* (phase 8), or nothing
             rijen.append(taak)
         return rijen
 
@@ -2351,11 +2351,10 @@ class BatchAnalyseDialog(QDialog):
         return self.chk_geen_smoothing.isChecked()
 
 
-class AnalyseKiezer(QDialog):
+class AnalysisPicker(QDialog):
     """
-    Kiest één opgeslagen analyse: eerst de schaatser, dan een van diens analyses.
-    Tweemaal achter elkaar gebruikt om een vergelijking op te zetten, en daarna per kant
-    om van analyse te wisselen.
+    Picks one saved analysis: skater first, then one of their analyses. Used twice in a
+    row to set up a comparison, and after that per side to switch analyses.
     """
 
     def __init__(self, bieb, titel="Kies analyse", voorkeur_schaatser_id=None, parent=None):
@@ -2365,7 +2364,7 @@ class AnalyseKiezer(QDialog):
 
         form = QFormLayout(self)
         self.combo_schaatser = QComboBox()
-        # Schaatsers zonder analyses overslaan — dan kan de analyse-combo nooit leeg zijn.
+        # Skip skaters with no analyses -- that way the analysis combo can never be empty.
         for s in skate_db.list_skaters(bieb):
             if not s["aantal_analyses"]:
                 continue
@@ -2375,7 +2374,7 @@ class AnalyseKiezer(QDialog):
             idx = self.combo_schaatser.findData(voorkeur_schaatser_id)
             if idx >= 0:
                 self.combo_schaatser.setCurrentIndex(idx)
-        self.combo_schaatser.currentIndexChanged.connect(self._vul_analyses)
+        self.combo_schaatser.currentIndexChanged.connect(self._fill_analyses)
         form.addRow("Schaatser:", self.combo_schaatser)
 
         self.combo_analyse = QComboBox()
@@ -2389,9 +2388,9 @@ class AnalyseKiezer(QDialog):
         self._ok = knoppen.button(QDialogButtonBox.Ok)
         self._ok.setText("Kiezen")
 
-        self._vul_analyses()
+        self._fill_analyses()
 
-    def _vul_analyses(self, _idx=None):
+    def _fill_analyses(self, _idx=None):
         self.combo_analyse.clear()
         sid = self.combo_schaatser.currentData()
         if sid is not None:
@@ -2411,23 +2410,23 @@ class AnalyseKiezer(QDialog):
         sid = self.combo_schaatser.currentData()
         if sid is None:
             return ""
-        # de combotekst draagt evt. het geboortejaar; voor de kop willen we alleen de naam
+        # the combo text may carry the birth year too; for the heading we only want the name
         naam = next((s["naam"] for s in skate_db.list_skaters(self.bieb)
                      if s["id"] == sid), "")
         return naam
 
 
-def _ja_nee(waarde):
+def _yes_no(waarde):
     return "ja" if waarde else "nee"
 
 
-def _duur_tekst(a):
-    """Videoduur + aantal afzetten voor de bibliotheeklijst: "5,4s (4 afzetten)".
+def _duration_text(a):
+    """Video duration + number of pushes for the library list: "5.4s (4 pushes)".
 
-    De duur zegt op één oogopslag wat voor clip dit is (losse slag of hele ronde); het
-    aantal afzetten blijft er tussen haakjes bij staan. Boven de minuut wordt het m:ss,
-    want "83,2s" leest niemand als anderhalve minuut. Ontbreekt fps of framecount (een
-    onvolledig weggeschreven analyse), dan alleen een streepje — geen deling door nul."""
+    The duration says at a glance what kind of clip this is (a single stroke or a whole
+    lap); the number of pushes stays alongside it in parentheses. Above one minute it
+    becomes m:ss, since nobody reads "83.2s" as a minute and a half. Missing fps or frame
+    count (an incompletely-written analysis) gives just a dash -- no division by zero."""
     fps = a.get("fps") or 0
     frames = a.get("totaal_frames") or 0
     if fps > 0 and frames > 0:
@@ -2440,15 +2439,15 @@ def _duur_tekst(a):
     return f"{duur} ({n} afzet{'ten' if n != 1 else ''})"
 
 
-class AnalyseInfoDialog(QDialog):
+class AnalysisInfoDialog(QDialog):
     """
-    Read-only overzicht van één opgeslagen analyse: met welke appversie/backend hij
-    gedraaid is, wanneer en door wie, en met welke instellingen.
+    Read-only overview of one saved analysis: which app version/backend it ran with,
+    when and by whom, and with which settings.
 
-    Waarom: de trackinglogica wijzigt tijdens het ontwikkelen regelmatig, dus een vreemde
-    meting moet te verklaren zijn ("dit is nog met de oude L/R-fixer gedaan"). Puur
-    informatief — geen invoerveld. De waarden zijn selecteerbaar zodat een commit-hash
-    te kopiëren is.
+    Why: the tracking logic changes regularly during development, so a strange
+    measurement needs to be explainable ("this was still done with the old L/R fixer").
+    Purely informational -- no input field. The values are selectable so a commit hash
+    can be copied.
     """
 
     APPVERSIE_TIP = ("Git-commit waarmee deze analyse gedraaid is (commitdatum · hash).\n"
@@ -2466,20 +2465,20 @@ class AnalyseInfoDialog(QDialog):
         if gemaakt:
             datum += f"   (opgeslagen {gemaakt})"
 
-        # Smoothing uit = de diagnosestand (ruwe detecties, CLI --no-smooth).
+        # Smoothing off = the diagnostic mode (raw detections, CLI --no-smooth).
         smoothing = (f"{inst.get('smooth_n', '?')} frames"
                      if inst.get("smooth_landmarks", True) else "uit (ruwe detecties)")
         horizon = ("automatisch per frame" if inst.get("auto_horizon")
                    else f"vast {inst.get('horizon_deg', 0.0):.1f}°")
-        # `heavy` kiest tussen pose_landmarker_heavy en _full en bestaat dus alleen in de
-        # MediaPipe-backend; YOLO heeft één model en negeert de vlag — daar zou de rij
-        # ("nee") alleen suggereren dat er een zwaarder model te kiezen viel.
+        # `heavy` chooses between pose_landmarker_heavy and _full and so only exists for
+        # the MediaPipe backend; YOLO has one model and ignores the flag -- there the row
+        # ("no") would only suggest a heavier model could have been chosen.
         heavy_rij = ([] if meta.get("backend") == "yolo" else
-                     [("Heavy-model:", _ja_nee(inst.get("heavy")),
+                     [("Heavy-model:", _yes_no(inst.get("heavy")),
                        "MediaPipe: pose_landmarker_heavy.task i.p.v. _full.task.")])
 
-        # Herkomst (fase 8): alleen bij een uit een opname geknipt fragment. Een losse clip
-        # heeft geen bron, en dan zegt een lege rij niets.
+        # Origin (phase 8): only for a fragment cut from a recording. A loose clip has no
+        # source, and then an empty row says nothing.
         herkomst_rij = []
         if meta.get("bron_id") and meta.get("bron_start_frame") is not None:
             fps = meta.get("fps") or 0
@@ -2490,9 +2489,9 @@ class AnalyseInfoDialog(QDialog):
                              "Dit fragment is met het knipvenster uit een langere "
                              "trainingsopname geknipt.")]
 
-        # Hoe de doelschaatser is aangewezen. Een kader zet in de YOLO-backend het
-        # kijkglas aan (de schaatser wordt vanaf het kader gevolgd waar de detectie hem
-        # niet ziet), dus dat is een meetrelevant verschil met een klik.
+        # How the target skater was pointed out. A box switches on the spyglass in the
+        # YOLO backend (the skater is followed from the box wherever the detection
+        # doesn't see them), so that's a measurement-relevant difference from a click.
         if inst.get("doel_kader"):
             doel = "kader getekend (kijkglas aan)"
         elif "doel_punt" not in inst:
@@ -2515,7 +2514,7 @@ class AnalyseInfoDialog(QDialog):
                        f"{(meta.get('fps') or 0):.1f} fps, "
                        f"{meta.get('totaal_frames')} frames", None),
         ] + herkomst_rij + [
-            ("Handmatig bewerkt:", _ja_nee(meta.get("bewerkt")),
+            ("Handmatig bewerkt:", _yes_no(meta.get("bewerkt")),
              "Zijn er met de skelet-editor punten verplaatst of skeletten geplaatst?"),
             ("Smoothing:", smoothing, None),
             ("Drempel:", f"{inst.get('threshold', '?')}", None),
@@ -2524,14 +2523,14 @@ class AnalyseInfoDialog(QDialog):
              "Klik = de detectiepass zoekt de schaatser op die plek. Kader = daarbovenop\n"
              "volgt het kijkglas hem vanaf het kader waar de detectie hem (nog) niet ziet,\n"
              "bv. omdat hij klein in beeld staat."),
-            ("Bocht overslaan:", _ja_nee(inst.get("bocht_overslaan")), None),
+            ("Bocht overslaan:", _yes_no(inst.get("bocht_overslaan")), None),
             ("Interlacing gefilterd:",
-             _ja_nee(inst.get("deinterlaced")) if "deinterlaced" in inst
+             _yes_no(inst.get("deinterlaced")) if "deinterlaced" in inst
              else "onbekend (van vóór deze functie)",
              "Camcorderbeeld (1080i) weeft twee momenten van 1/50 s uit elkaar in één\n"
              "frame. Stond dit aan, dan zijn die kamtanden vóór de detectie weggefilterd."),
             ("Horizon:", horizon, None),
-            ("Perspectiefcorrectie:", _ja_nee(inst.get("perspectief_gebruikt")), None),
+            ("Perspectiefcorrectie:", _yes_no(inst.get("perspectief_gebruikt")), None),
         ] + _calibration_rows(inst)
         for label, waarde, tip in rijen:
             w = QLabel(str(waarde))
@@ -6880,7 +6879,7 @@ class MainWindow(QMainWindow):
                 tip = "\n".join(r for r in (f"Aangemaakt door {door}" if door else "",
                                             f"Appversie: {versie}" if versie else "") if r)
                 for kolom, tekst in enumerate(
-                        [a["datum"], a["titel"], _duur_tekst(a)]):
+                        [a["datum"], a["titel"], _duration_text(a)]):
                     item = QTableWidgetItem(tekst)
                     if kolom == 0:
                         item.setData(Qt.UserRole, a["id"])
@@ -6895,7 +6894,7 @@ class MainWindow(QMainWindow):
         self.btn_verwijder_schaatser.setEnabled(sid is not None)
 
     def _nieuwe_schaatser(self):
-        dlg = SchaatserDialog(self)
+        dlg = SkaterDialog(self)
         if show_dialog(dlg) != QDialog.Accepted or not dlg.naam:
             return
         sid = skate_db.create_skater(self.bieb, dlg.naam, dlg.geboortejaar, dlg.notities)
@@ -6908,8 +6907,8 @@ class MainWindow(QMainWindow):
         s = next((x for x in skate_db.list_skaters(self.bieb) if x["id"] == sid), None)
         if s is None:
             return
-        dlg = SchaatserDialog(self, naam=s["naam"], geboortejaar=s["geboortejaar"],
-                              notities=s["notities"])
+        dlg = SkaterDialog(self, naam=s["naam"], geboortejaar=s["geboortejaar"],
+                          notities=s["notities"])
         if show_dialog(dlg) != QDialog.Accepted or not dlg.naam:
             return
         skate_db.edit_skater(self.bieb, sid, dlg.naam, dlg.geboortejaar, dlg.notities)
@@ -6991,8 +6990,8 @@ class MainWindow(QMainWindow):
                 self, "Nieuwe analyse",
                 "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
             return
-        dlg = NieuweAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
-                                  parent=self)
+        dlg = NewAnalysisDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
+                                parent=self)
         if show_dialog(dlg) != QDialog.Accepted:
             return
         self.input_pad = dlg.video_pad
@@ -7288,7 +7287,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Info", f"Kon de analysegegevens niet lezen:\n{e}")
             return
-        show_dialog(AnalyseInfoDialog(
+        show_dialog(AnalysisInfoDialog(
             meta, self._schaatser_naam(meta.get("schaatser_id")), parent=self))
 
     def _vergelijk_met_deze(self):
@@ -7316,8 +7315,8 @@ class MainWindow(QMainWindow):
         """Laat één kant een analyse kiezen en laadt die. True als het gelukt is."""
         if voorkeur_id is None:
             voorkeur_id = self._geselecteerde_schaatser_id()
-        dlg = AnalyseKiezer(self.bieb, titel=f"{kant.naam}: kies analyse",
-                            voorkeur_schaatser_id=voorkeur_id, parent=self)
+        dlg = AnalysisPicker(self.bieb, titel=f"{kant.naam}: kies analyse",
+                             voorkeur_schaatser_id=voorkeur_id, parent=self)
         if show_dialog(dlg) != QDialog.Accepted or dlg.analyse_id is None:
             return False
         return self._zet_vergelijk_kant(kant, dlg.analyse_id, dlg.schaatser_naam)
@@ -7464,26 +7463,26 @@ class MainWindow(QMainWindow):
         self._toon_voortgangsbalk("Video analyseren...")
 
         opslag = self._pending_opslag or {}
-        self.worker = AnalyseWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
-                                    doel_punt=self.doel_punt, horizon_deg=self.horizon_deg,
-                                    auto_horizon=self.auto_horizon,
-                                    smooth_landmarks=not self.geen_smoothing,
-                                    perspectief=self.perspectief,
-                                    bieb=self.bieb,
-                                    schaatser_id=opslag.get("schaatser_id"),
-                                    titel=opslag.get("titel"),
-                                    instellingen=opslag.get("instellingen"),
-                                    backend=BACKEND_NAME,
-                                    aangemaakt_door=self.trainer_naam,
-                                    bocht=self.bocht_overslaan,
-                                    deinterlacen=self.deinterlacen,
-                                    doel_kader=self.doel_kader)
-        self.worker.voortgang.connect(self._analyse_voortgang)
+        self.worker = AnalysisWorker(self.input_pad, self.model_pad, self.smooth_n, self.threshold,
+                                     doel_punt=self.doel_punt, horizon_deg=self.horizon_deg,
+                                     auto_horizon=self.auto_horizon,
+                                     smooth_landmarks=not self.geen_smoothing,
+                                     perspectief=self.perspectief,
+                                     bieb=self.bieb,
+                                     schaatser_id=opslag.get("schaatser_id"),
+                                     titel=opslag.get("titel"),
+                                     instellingen=opslag.get("instellingen"),
+                                     backend=BACKEND_NAME,
+                                     aangemaakt_door=self.trainer_naam,
+                                     bocht=self.bocht_overslaan,
+                                     deinterlacen=self.deinterlacen,
+                                     doel_kader=self.doel_kader)
+        self.worker.progress.connect(self._analyse_voortgang)
         self.worker.status.connect(self._analyse_status)
-        self.worker.opslag_fout.connect(self._opslag_fout)
-        self.worker.waarschuwing.connect(self._analyse_waarschuwing)
-        self.worker.klaar.connect(self._analyse_klaar)
-        self.worker.fout.connect(self._analyse_fout)
+        self.worker.save_error.connect(self._opslag_fout)
+        self.worker.warning.connect(self._analyse_waarschuwing)
+        self.worker.done.connect(self._analyse_klaar)
+        self.worker.error.connect(self._analyse_fout)
         self.worker.start()
 
     def _analyse_voortgang(self, frame_nr, totaal):
@@ -7583,7 +7582,7 @@ class MainWindow(QMainWindow):
         """Opname → knipvenster → clips wegschrijven → de bestaande batch-flow in.
 
         Ná het knippen gebeurt er niets nieuws: elk fragment is een gewoon videobestandje,
-        dus `BatchAnalyseDialog` (voorgevuld) + `_nieuwe_batch_analyse` doen de rest. Geen
+        dus `BatchAnalysisDialog` (voorgevuld) + `_nieuwe_batch_analyse` doen de rest. Geen
         tweede analyse-pijplijn en geen tweede opslagroute."""
         if self._bezig:
             QMessageBox.information(
@@ -7687,8 +7686,8 @@ class MainWindow(QMainWindow):
                 self, "Batch-analyse",
                 "Maak eerst een schaatser aan — elke analyse hoort bij een profiel.")
             return
-        dlg = BatchAnalyseDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
-                                 voorgevuld=voorgevuld, parent=self)
+        dlg = BatchAnalysisDialog(schaatsers, voorkeur_id=self._geselecteerde_schaatser_id(),
+                                  voorgevuld=voorgevuld, parent=self)
         if show_dialog(dlg) != QDialog.Accepted:
             self._ruim_knipmap_op()      # geknipte clips zonder batch zijn nutteloos
             return
@@ -7837,11 +7836,11 @@ class MainWindow(QMainWindow):
 
         self._warn_backend_fallback()
         self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAME, self.trainer_naam)
-        self.batch_worker.taak_start.connect(self._batch_taak_start)
-        self.batch_worker.voortgang.connect(self._batch_voortgang)
-        self.batch_worker.status.connect(self._analyse_status)   # busy-fase hergebruiken
-        self.batch_worker.taak_klaar.connect(self._batch_taak_klaar)  # nieuwe analyse live tonen
-        self.batch_worker.alles_klaar.connect(self._batch_klaar)
+        self.batch_worker.task_start.connect(self._batch_taak_start)
+        self.batch_worker.progress.connect(self._batch_voortgang)
+        self.batch_worker.status.connect(self._analyse_status)   # reuse the busy phase
+        self.batch_worker.task_done.connect(self._batch_taak_klaar)  # show the new analysis live
+        self.batch_worker.all_done.connect(self._batch_klaar)
         self.batch_worker.start()
 
     def _batch_stop_gevraagd(self):
@@ -8829,7 +8828,7 @@ class MainWindow(QMainWindow):
         self._afsluiten = True
         for w in actief:
             w.blockSignals(True)
-            w.breek_af()
+            w.abort()
         self.lbl_voortgang.setText("Analyse afbreken...")
         for w in actief:
             if not self._wacht_op_worker(w):
