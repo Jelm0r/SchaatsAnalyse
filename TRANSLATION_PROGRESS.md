@@ -133,11 +133,47 @@ document supersedes it for anything about actual progress and lessons learned).
       six push events at 42.2/42.5/42.9/40.0/45.6/50.0°, perfect R-L-R-L-R-L
       alternation, last one `INCOMPLETE_TRUNCATED` — a 92 s run, byte-for-byte the
       documented measurement.
-- [ ] **Phase 7 — `schaats_eval.py` → `skate_eval.py`** (527 lines). Also rename
-      `goud_schaats_frontaal.json` → `golden_skate_frontal.json` and its internal
-      Dutch keys (`l_knie` etc.) — this file is a dev-only tool, not used by trainers,
-      so lower stakes. Check whether `schaats_eval.py` is imported anywhere else
-      (unlikely; it's a standalone CLI tool) before assuming no shim is needed.
+- [x] **Phase 7 — `schaats_eval.py` → `skate_eval.py`** (commit `4302a08`, 527 → 533
+      lines). Confirmed via `grep -rn "import schaats_eval\|from schaats_eval"` that
+      nothing imports it anywhere else (standalone dev CLI) — **no shim needed**, full
+      rename/translation in one pass. Also renamed `goud_schaats_frontaal.json` →
+      `golden_skate_frontal.json` and translated its internal keys (`l_knie/l_enkel/
+      r_knie/r_enkel` → `l_knee/l_ankle/r_knee/r_ankle`) directly, since nothing else
+      reads this fixture. Reads `skate_analysis.py`'s English names directly
+      (`load_landmarks`, `process_derivatives`, `segment_pushes`,
+      `calculate_angle_to_ice`, `corner_ratio`, `determine_corner_sequence`,
+      `CORNER_IN`/`CORNER_OUT`) and `FrameResult`/`PushEvent` fields directly
+      (`r.leg`, `r.pose_found`, `r.corner`, `r.midline_dev`, `e.leg`, `e.angle`,
+      `e.note`, `e.incomplete`) rather than through the Dutch aliases — safe since
+      there's no other consumer to keep in sync with. CLI subcommands translated too
+      (`vergelijk`/`annoteer`/`bocht` → `compare`/`annotate`/`corner`, flags
+      `--uit`/`--stap` → `--out`/`--step`), since this is a dev-only tool with no
+      trainer-facing surface. Kept the lower-bar conventions (`pad`/`_pad`-suffixed
+      names, `naam`, `resultaten` left untranslated) — with one deliberate exception:
+      `uit_pad` → `out_pad`, since (unlike `bron_pad`/`video_pad`) that name doesn't
+      already exist elsewhere in the codebase to stay consistent with; it's introduced
+      fresh in this file and mirrors the existing `output_pad` convention.
+      **Found and fixed a real latent bug that predates this phase** (Pattern F, but
+      running backwards): `calculate_metrics`'s alternation-error count compared
+      `e.opmerking` against the literal Dutch string `'gemiste tegenafzet?'`, but
+      Phase 4 already changed the *value* `skate_analysis.py` writes for that note to
+      English (`"missed counter-push?"`) — so on every npz produced since Phase 4
+      landed, this comparison silently always evaluated to zero. Fixed by comparing
+      against the current value; confirmed the fix actually catches a case (an
+      `LRRLRLRL` sequence pulled from the library now reports 1 alternation error
+      instead of 0).
+      **Verified**: `py_compile` across the touched + dependency files; real
+      `import skate_eval` under both venvs; `--help` on every subcommand; full
+      end-to-end `metrics`/`compare`/`corner` runs against real npz files from the
+      library (output correctly formatted, no crashes); `metrics --golden` against
+      the translated `golden_skate_frontal.json` reproduced the exact documented
+      reference number from `CLAUDE.md` (GOLDEN stance leg avg 1.34° on "Schaats
+      frontaal.MOV"), confirming the JSON key translation and `_golden_errors` are
+      behaviorally identical to the original; `annotate()` exercised end-to-end with
+      a mocked `cv2` (the 'q'-stop path, and a full click run through both the coarse
+      and precise stages plus a redo) since it needs a real display otherwise,
+      confirming it writes valid English-keyed JSON with no leftover Dutch
+      identifiers; grepped the finished file for common Dutch words — no hits.
 - [ ] **Phase 8 — `schaats_gui.py` → `skate_gui.py`** (8,839 lines — bigger than every
       phase so far *combined*). Do this in the sub-steps from the original plan:
       - 8a. Rename file, translate identifiers/comments/docstrings only (structural
