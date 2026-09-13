@@ -82,15 +82,57 @@ document supersedes it for anything about actual progress and lessons learned).
       **Two new compatibility patterns had to be invented here — read "Patterns
       established" below before touching Phase 6, since it needs both again.**
 
-- [ ] **Phase 6 — `schaats_yolo.py` → `skate_yolo.py`** (2,282 lines). **Confirmed:
-      `schaats_gui.py:605` does a bare `import schaats_yolo` inside `_laad_backend()`
-      (lazy-loaded for startup time) — this needs the exact same shim treatment as
-      `schaats_db.py` (see Pattern B below), not just from-import aliases.**
-      `.venv-yolo\Scripts\python.exe skate_yolo.py`'s self-test is the *only*
-      verification path that actually imports this file under the plain venv never
-      touches it — treat that self-test as mandatory, not optional, and also try to
-      run one real analysis end-to-end under `.venv-yolo` if a test video is
-      available.
+- [x] **Phase 6 — `schaats_yolo.py` → `skate_yolo.py`** (2,282 → 2,325 lines).
+      Pattern B shim confirmed needed and applied exactly like `schaats_db.py`
+      (`schaats_gui.py:605`'s bare `import schaats_yolo` inside `_laad_backend()`
+      reads `schaats_yolo.BACKEND_NAAM` and calls `schaats_yolo.analyseer(...)`;
+      both now exist as Dutch aliases at the bottom of `skate_yolo.py` —
+      `BACKEND_NAAM = BACKEND_NAME`, `analyseer = analyze` — re-exported by the
+      `schaats_yolo.py` shim). `_BochtWacht`→`_CornerGuard`, `_Kijkglas`→`_Spyglass`,
+      `KleurReferentie`→`ColorReference`, `Detectie`→`Detection`, and ~40 more
+      functions/constants translated (kader→box, kleur→color/suit color, keten→chain,
+      klik→click, kijkglas→spyglass, verfijn→refine, doel→target — see the glossary
+      additions below). Followed the precedent already set by `skate_analysis.py`'s
+      own `analyze()`: kept `bocht`, `doel_punt`, `doel_kader`, `perspectief`,
+      `waarschuwing_callback` as the literal parameter names of the public
+      `analyze()` function (and, for `bocht`, of every internal helper it flows
+      through too — simpler and lower-risk than splitting internal/external naming
+      for one identifier) because `schaats_gui.py`'s two call sites
+      (`AnalyseWorker.run`, `BatchWorker.run`) pass them as keyword arguments;
+      confirmed via `inspect.signature(...).bind()` with both call sites' exact
+      kwargs before relying on it. Also kept the pre-existing project-wide
+      conventions of never translating `_pad`-suffixed names, `resultaten`, or
+      `deinterlacen` (all three still appear untranslated throughout the already-
+      "complete" `skate_analysis.py`/`skate_db.py` — checked by grep before assuming
+      Phase 4/5 had done a 100%-pure pass; they hadn't, and matching that bar avoids
+      inventing a stricter standard than the rest of the codebase follows).
+      **Found and fixed a real Pattern-D bug that predates this phase**: RTMPose's
+      midline-quality dict used Dutch keys (`'l_knie'`/`'r_knie'`), but
+      `skate_analysis.py`'s `results_to_arrays`/`arrays_to_results` (Phase 4) already
+      expected English (`'l_knee'`/`'r_knee'`) — so every YOLO-backend analysis with
+      RTMPose refinement was silently writing an all-NaN midline-deviation array to
+      the npz. Fixed by writing the English keys directly (confirmed via a throwaway
+      round-trip script). User-facing warning/message strings (the ones passed to
+      `waarschuwing_callback` or embedded in raised exceptions) were translated to
+      English too, matching the precedent already set in `skate_perspective.py`
+      (Phase 3) of translating these even though they'll show up mixed with
+      still-Dutch GUI text until Phase 8 — confirmed by finding
+      `schaats_gui.py:1696` interpolates a `skate_perspective` exception's English
+      text straight into a Dutch status label today.
+      **Verified**: `py_compile` across the repo; `.venv-yolo\Scripts\python.exe
+      skate_yolo.py` self-test (`_CornerGuard`/`_choose_seed`/`_Spyglass`, all pass);
+      `inspect.signature().bind()` against both real `schaats_gui.py` call sites;
+      a throwaway script confirming the `l_knee`/`r_knee` fix round-trips through
+      `results_to_arrays`/`arrays_to_results`; `import schaats_gui` under
+      `.venv-yolo` (exercises the full shim chain); `.venv-yolo\Scripts\python.exe
+      schaats_schermtest.py` (all windows OK); and — going further than the
+      "mandatory" bar — a full real end-to-end `analyze()` run on
+      `Downloads\Schaats frontaal.MOV` (RTMPose refinement, cached weights, no
+      target click/box), which reproduced *exactly* the reference numbers already
+      documented in `CLAUDE.md` for this clip: 103/103 coverage, 0 corner frames,
+      six push events at 42.2/42.5/42.9/40.0/45.6/50.0°, perfect R-L-R-L-R-L
+      alternation, last one `INCOMPLETE_TRUNCATED` — a 92 s run, byte-for-byte the
+      documented measurement.
 - [ ] **Phase 7 — `schaats_eval.py` → `skate_eval.py`** (527 lines). Also rename
       `goud_schaats_frontaal.json` → `golden_skate_frontal.json` and its internal
       Dutch keys (`l_knie` etc.) — this file is a dev-only tool, not used by trainers,
@@ -173,8 +215,8 @@ document supersedes it for anything about actual progress and lessons learned).
 | schaatser | skater | Product name "SchaatsAnalyse" → **"SkateAnalysis"** (user-chosen). |
 | bronvideo | source_video | |
 | bron_markering | source_marking | |
-| kader (user-drawn box) | box | `doel_kader`→`target_box`, `KADER_MARGE`→`BOX_MARGIN`. Not done yet — lives in `schaats_gui.py`/`schaats_yolo.py`. |
-| kijkglas (small-target tracking) | spyglass | `_Kijkglas`→`_Spyglass`. Claude's own naming call (low-stakes internal class), not user-specified. Not done yet — `schaats_yolo.py`. |
+| kader (user-drawn box) | box | Done in `skate_yolo.py` (Phase 6) for every *internal-only* name: `KADER_MAAT_MAX`→`BOX_SIZE_MAX`, `KADER_MIN_HOOGTE_PX`→`BOX_MIN_HEIGHT_PX`, `_Kijkglas.start_kader`→`start_box`, etc. **`doel_kader` the parameter itself stays Dutch** — superseding the `target_box` this row originally planned — because `schaats_gui.py`'s two `analyze()` call sites pass it as a keyword argument (`doel_kader=...`); see the `bocht`/`doel_punt`/`perspectief`/`waarschuwing_callback` note in the Phase 6 entry above. Still Dutch in `schaats_gui.py` itself (Phase 8). |
+| kijkglas (small-target tracking) | spyglass | `_Kijkglas`→`_Spyglass`. Claude's own naming call (low-stakes internal class), not user-specified. Done in Phase 6 (`skate_yolo.py`) — the local variable holding an instance is also `spyglass` now (was left as `kijkglas` in an early pass of this phase; fixed the same session, see "Patterns established" note on residual locals). |
 | doel / doelpunt / DoelTracker | target / target_point / TargetTracker | Done in Phase 4. |
 | kamtanden / kam_masker | combing / comb_mask | Standard video-engineering term. Done in Phase 4 (`_comb_mask`, `deinterlace`). |
 | opname | recording | `OPNAME.md`→`RECORDING.md` (Phase 11). |
@@ -183,9 +225,13 @@ document supersedes it for anything about actual progress and lessons learned).
 | instellingen | settings | DB column `instellingen_json`→`settings_json` done (Phase 5); the JSON *content*'s keys are not (deferred to Phase 8, see below). |
 | kalibratie / verdwijnpunt | calibration / vanishing_point | Done in Phase 3. |
 | baanlijn / dwarslijn | track_line / cross_line | Done in Phase 3. |
-| pakkleur | suit_color | Not done yet — `schaats_yolo.py`. |
+| pakkleur | suit color | Done in Phase 6 (`KleurReferentie`→`ColorReference`, `KLEUR_MATCH_MIN`→`COLOR_MATCH_MIN`, etc.). |
 | onvolledig / afgekapt / geen volledige push | incomplete / truncated / no full push | Done in Phase 4 (`INCOMPLETE_TRUNCATED`, `INCOMPLETE_NO_PUSH`). |
 | nog doen / bezig / klaar / onbruikbaar (recording status) | todo / in_progress / done / unusable | Done in Phase 5 (`SOURCE_STATUSES`), including the DB value migration. |
+| keten (tracklet chain) | chain | Done in Phase 6. `_stik_keten`→`_stitch_chain`, `keten_gekoppeld`→`chain_linked`, `_Kijkglas.bron` values `'kader'`/`'keten'`→`'box'`/`'chain'`. |
+| klik / klik_gemist | click / click_missed | Done in Phase 6. |
+| verfijnen (top-down re-estimation pass) | refine | Done in Phase 6. `_verfijn_landmarks`→`_refine_landmarks`, etc. The `analyze()` parameter (`verfijn=True`) was safe to rename to `refine=True` — confirmed via grep that no untranslated caller passes it by keyword. |
+| poort (a gate/threshold check) / koppeling (linking two tracks) | gate / link | Done in Phase 6, including the `'veto'`/`'match'` gate-mode strings (already English) and the `_Spyglass` log/outcome text — the `'link'` substring is load-bearing: `analyze()` and the self-test both check for it inside a reason string. |
 
 Already-English, left alone everywhere: `landmarks`, `horizon`, `smooth_n`, `threshold`,
 `heavy`, `interlaced`/`deinterlace`, `recovery`, `tracklet`, `frame_nr` (kept
@@ -298,6 +344,51 @@ of thumb**: if a file you haven't translated yet still *writes* a Dutch value yo
 translated code will *read and compare*, keep accepting/producing the Dutch value until
 that writer's own phase — translate the field/column *name*, not the value, until both
 ends of the pipe are being translated together.
+
+### Pattern G — plain function keyword arguments (Pattern C's trap, without a dataclass)
+
+Pattern C's "known trap" (a rename fixes attribute *access* but not constructor
+*keyword arguments*) applies just as much to an ordinary function with no dataclass in
+sight. `skate_analysis.py`'s `analyze()` and `skate_yolo.py`'s `analyze()` are both
+called from `schaats_gui.py` (untranslated) with several arguments passed by keyword
+(`AnalyseWorker.run`/`BatchWorker.run` in `schaats_gui.py`, both calling through the
+`analyseer_backend()` indirection at `schaats_gui.py:626`). Renaming any of those
+*parameter names* breaks the call immediately with a `TypeError`, not a
+silent-failure-class bug — so this one at least fails loud, but it fails loud only once
+someone runs the actual GUI, since none of `skate_yolo.py`'s own verification (its
+self-test, a bare import) ever calls `analyze()` the way `schaats_gui.py` does.
+
+**Rule of thumb**: before renaming a public function's parameters, grep every call
+site across the whole repo for `functionname(` and check whether any of them pass
+arguments by keyword using the old name — not just whether the function itself is
+imported under an alias (Pattern A/B only fix *that* the name resolves, not what
+keywords its signature accepts). Confirm with
+`inspect.signature(fn).bind(*args, **kwargs)` using the *exact* call sites found, since
+`bind()` raises the same `TypeError` a real call would without needing to actually run
+the function. Both `skate_yolo.analyze()` call sites were checked this way in Phase 6
+before relying on it.
+
+For parameters no untranslated file calls by keyword (confirmed by the same grep
+coming up empty), rename freely — e.g. `skate_yolo.py`'s `verfijn=True` became
+`refine=True` because nothing outside the file passes `verfijn=`.
+
+### Note: earlier "fully translated" phases still leave many local variables Dutch
+
+Before assuming Phase 4/5 achieved a 100%-pure translation and calibrating Phase 6+'s
+effort to match that (nonexistent) bar, grep the *supposedly finished* files for
+plain-language local variable names. `resultaten` (87 hits in `skate_analysis.py`, 17
+in `skate_db.py`), every `_pad`-suffixed name (40 + 25 hits), and `naam` (11 + 29 hits)
+are all still untranslated **inside function bodies** in files whose public API
+(function/class names, parameters that cross no external boundary, docstrings) is
+fully English. This isn't a defect to fix retroactively — it's the actual, lower bar
+those phases were held to, apparently because a 2000+-line file's every single local
+variable isn't worth the added risk/time for a batch/analysis tool nobody but a
+developer reads the source of. Phase 6 followed the same bar: public identifiers,
+docstrings, comments, and most meaningful locals got translated, but `resultaten` and
+`_pad` names were deliberately left alone throughout `skate_yolo.py` too, for
+consistency with the rest of the (still Dutch-parameter-name) codebase rather than as
+an oversight. Do the same grep-first check before Phase 7/8/9 rather than assuming the
+already-committed phases set a stricter precedent than they actually did.
 
 ## Deferred to Phase 8 (do not attempt piecemeal before then)
 
