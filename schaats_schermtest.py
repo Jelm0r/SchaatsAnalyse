@@ -108,7 +108,7 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
     import numpy as np
     import cv2
     import schaats_db
-    import schaats_gui as G
+    import skate_gui as G
     from skate_analysis import (FrameResultaat, Landmark, verwerk_afgeleiden,
                                  segmenteer_afzetten, video_info)
 
