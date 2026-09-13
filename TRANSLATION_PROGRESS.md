@@ -643,25 +643,85 @@ document supersedes it for anything about actual progress and lessons learned).
         mode, since this was the true end of a multi-class chunk) — all 16 windows pass,
         including `FragmentPicker` and both `ViewWindow` variants.
 
-      - **Next up for 8a**, in order (line numbers will have drifted after session 7 —
-        re-`grep -n "^class "` first, don't trust these verbatim):
-        - `MainWindow` (~5413-8877, ~3,460 lines — will very likely need to be split
-          across more than one session by itself; it owns most of the ~150
-          `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
-          8c work will naturally happen while translating its identifiers/docstrings/
-          comments here in 8a — that's fine, just don't call 8c "done" until a
-          dedicated pass confirms every dialog/tooltip string is translated too. This is
-          also where `bieb`/`schaatser_id`/`titel`/`instellingen`/`aangemaakt_door`/
-          `analyse_id`/`naam`/`geboortejaar`/`notities`/`taken`/`schaatser_naam` from
-          session 3's "deliberately left Dutch" list, and `deinterlacen`/`huidige_idx`
-          from session 5's, actually live and could finally be renamed in one
-          coordinated pass, if a future session decides that's worth doing -- check
-          first whether `skate_db.py`'s own parameter names would need to move
-          together for `deinterlacen`/etc., since right now they match on purpose).
-        - `main()` (~8877-8898).
-        Line numbers are from session 7's end state and will drift as each chunk is
-        translated — re-`grep -n "^class \|^def "` at the start of each session rather
-        than trusting the numbers above verbatim.
+      - **Session 8 ("maximum speed" continued -- user explicitly asked to go fast and
+        cheap and skip most checks, "we will find any bugs when testing")** --
+        `MainWindow` (~5423-8887, ~3,460 lines) + `main()`. **Deliberately breaks from
+        the 8a/8b/8c split**: rather than a structural identifier-rename pass now and
+        UI text later, this session translated every comment, docstring, and
+        user-facing string (window/dialog titles, labels, tooltips, `QMessageBox` text,
+        status-bar messages, table headers, the CSV export header) in one pass, while
+        leaving **every method and attribute name in `MainWindow` exactly as it was**
+        (still Dutch: `_bouw_ui`, `_zet_bibliotheek`, `self.btn_*`/`lbl_*`/`chk_*`/
+        `combo_*`, `bieb`, `schaatser_id`, `analyse_id`, etc. -- nothing renamed at
+        all). Reasoning: with nothing renamed or moved, Pattern G (a renamed
+        constructor keyword or callback silently breaking a same-file caller -- the
+        actual source of every real bug earlier 8a sessions found) simply cannot occur
+        here; the risk this pass carries is "translated the wrong nuance of a sentence",
+        not "broke a call". This means **`MainWindow`'s own 8a (identifier rename) is
+        still not done** -- only its 8b/8c (UI text) is -- and the same is true in
+        reverse for every class *before* `MainWindow` in the file (`SplashScreen`
+        through `CopyDialog`, sessions 1-7): those have their identifiers translated
+        already but their UI strings/tooltips/`QMessageBox` text are still Dutch. **8b/
+        8c for the rest of the file (everything before `MainWindow`) has not been
+        touched and is a large remaining chunk of work** -- don't assume "session 8
+        happened" means Phase 8's UI-text work is done everywhere; it's only done for
+        `MainWindow`+`main()`.
+
+        Two small, contained pieces of Phase 8d were done in passing since they were
+        sitting in the text already being translated: `self.setWindowTitle("Schaats
+        Analyse")` -> `"SkateAnalysis"`, and the library-page header label `"Schaatser
+        Analyse — bibliotheek"` -> `"SkateAnalysis — library"`. The splash screen's own
+        painted text and every other brand-string spelling elsewhere in the file are
+        untouched.
+
+        Deliberately still Dutch (unchanged, matches the rest of the file): every
+        `MainWindow` identifier as above, and `instellingen_json`'s/`config.json`'s
+        dict keys (`doel_punt`, `doel_kader`, `aangemaakt_door`, `app_versie`,
+        `backend_naam`, `trainer_naam`, `bibliotheek_pad`, ...) -- per "Deferred to
+        Phase 8" below, that specifically needs a coordinated one-time rewrite of the
+        ~48 analyses already in the library, which is exactly the kind of stateful
+        migration a fast, low-verification pass should not attempt.
+
+        **One real thing checked and confirmed correct, not broken**: `ev.opmerking`
+        comparisons against the flag string were translated to `"missed
+        counter-push?"` to match what `skate_analysis.py` (Phase 4) actually stores --
+        leaving the old Dutch `'gemiste tegenafzet?'` here would have silently never
+        matched again, the same class of bug the Phase 7 session found in
+        `skate_eval.py`.
+
+        **Verified** (lighter than the pre-"maximum speed" bar, per the user's explicit
+        request, but not skipped): `python -m py_compile`; a real `import skate_gui`
+        under `.venv-yolo` with `QT_QPA_PLATFORM=offscreen`; `schaats_schermtest.py`
+        quick mode (16/16 pass) and a full `--alles` run (15 screens × 4 fonts) compared
+        against the exact same full run on the pre-session commit (`HEAD~1` at the
+        time): 22 failing combinations vs. 29 before, and every failure on both sides is
+        the same already-documented "not guaranteed" edge case at extreme small-screen/
+        large-font combinations (see CLAUDE.md's "Passen op elk scherm" section) --
+        i.e. this pass is a net improvement, not a regression, and introduced no new
+        failing scenario; grepped the translated range for leftover Dutch string
+        content (none found). No throwaway behavioral script this time (nothing was
+        renamed, so there was nothing new to drive end-to-end that the screen test
+        doesn't already exercise by constructing a real `MainWindow` in several states).
+        Commit: `37dd270`.
+
+      - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
+        first, don't trust these verbatim):
+        - **8a for `MainWindow`**: rename its own identifiers (`_bouw_ui` etc.,
+          `self.btn_*`/`lbl_*`/..., and the shared-vocabulary set listed above) --
+          check first whether `skate_db.py`'s own parameter names would need to move
+          together for `deinterlacen`/`bieb`/`schaatser_id`/etc., since right now they
+          match on purpose (same check session 3/5/7 already flagged).
+        - **8b/8c for every class *before* `MainWindow`** (`SplashScreen` through
+          `CopyDialog`, i.e. everything sessions 1-7 only did the identifier pass on):
+          all their window titles, labels, tooltips and `QMessageBox` text are still
+          Dutch.
+        - The deferred `instellingen_json`/`config.json` key translation + one-time
+          library rewrite (see "Deferred to Phase 8" below) -- do this once both the
+          reader (`skate_db.py`) and every writer (`MainWindow`'s `_nieuwe_analyse`/
+          `_nieuwe_batch_analyse`) can be changed together in one commit.
+        - `main()` is now fully translated (part of session 8) -- nothing left there.
+        Re-`grep -n "^class \|^def "` at the start of each session rather than trusting
+        line numbers from old entries.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do
       this *last* among the code files — it imports gui+db+analysis and is the best
       regression canary once everything else is renamed.
