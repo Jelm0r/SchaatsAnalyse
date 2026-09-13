@@ -89,8 +89,8 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
                         "Schaatsvereniging IJsster Amersfoort", "Trainers",
                         "Techniekanalyse 2026-2027", "bieb")
     lokaal = os.path.join(tmp, "lokaal")
-    os.environ["SCHAATSANALYSE_BIBLIOTHEEK"] = bieb
-    os.environ["SCHAATSANALYSE_LOKAAL"] = lokaal
+    os.environ["SKATEANALYSIS_LIBRARY"] = bieb
+    os.environ["SKATEANALYSIS_LOCAL"] = lokaal
     os.environ["SCHAATSANALYSE_CPU"] = "1"
     sys.path.insert(0, HIER)
 
