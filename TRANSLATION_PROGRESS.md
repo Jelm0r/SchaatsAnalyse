@@ -177,16 +177,19 @@ document supersedes it for anything about actual progress and lessons learned).
 - [ ] **Phase 8 — `schaats_gui.py` → `skate_gui.py`** (8,839 lines — bigger than every
       phase so far *combined*). Do this in the sub-steps from the original plan:
       - 8a. Rename file, translate identifiers/comments/docstrings only (structural
-        pass; UI text still Dutch after this step).
+        pass; UI text still Dutch after this step). **In progress, spans several
+        sessions on its own — see "8a session log" right below before continuing.**
       - 8b. Translate the main dialogs' window titles/labels/tooltips.
       - 8c. Translate the ~150 `QMessageBox` calls and ~178 tooltips across the rest
         of the file.
       - 8d. Update the three brand-string spellings found ("Schaats Analyse" splash +
         window title, "Schaatser Analyse" docstring headers + library header) to
-        "SkateAnalysis". **This is also the point where `instellingen_json`'s
-        content and `config.json`'s dict keys finally get translated** (deferred
-        from Phases 4/5 specifically to be done together with this file — see
-        "Deferred to Phase 8" below for the exact keys and why).
+        "SkateAnalysis" (the docstring-header instance is already done, see below —
+        the splash screen's painted text and the main window title remain). **This is
+        also the point where `instellingen_json`'s content and `config.json`'s dict
+        keys finally get translated** (deferred from Phases 4/5 specifically to be
+        done together with this file — see "Deferred to Phase 8" below for the exact
+        keys and why).
       - 8e. Re-run `.venv-yolo\Scripts\python.exe skate_screentest.py --alles` once
         8a-8d are committed — English strings are often a different length than the
         Dutch originals, and the window-size minimums documented in `CLAUDE.md` were
@@ -194,6 +197,82 @@ document supersedes it for anything about actual progress and lessons learned).
       Given the size, expect this phase alone to span several sessions. Commit after
       each sub-step, not just at the end of 8e — do not let this become one giant
       uncommitted diff.
+
+      **8a session log — read this before resuming 8a.** 8a itself is too big for one
+      session; it's being done class-by-class/section-by-section, each its own commit.
+      `git log --oneline` on this branch shows the commits; here's what's landed and
+      exactly where the next one picks up.
+
+      - **Session 1 (commit `769f590`)** — file renamed, and lines 1 through ~948
+        (everything *before* `class DoelKiezer`) fully translated: module docstring,
+        the startup/splash-screen sequence, the skeleton-editor and on-screen-drawing
+        constants, corner/perspective tooltip constants + `_calibration_rows`
+        (`_kalibratie_rijen`), and the generic window/dialog infrastructure
+        (`set_window_size`, `show_dialog`, `FlowLayout`, `WrapBar`, `ElideLabel`,
+        `minimum_with_wrapping`). Also did the **global** Pattern A/B import cleanup
+        for the *whole file* regardless of section (this had to be file-wide, not
+        session-scoped, because Python identifiers must stay consistent): switched
+        `import schaats_db`/`import schaats_yolo` to `import skate_db`/`import
+        skate_yolo` and every one of their ~75 and 2 call sites respectively to the
+        real English names (no more Dutch aliases anywhere in this file for those two
+        modules), and switched `from skate_analysis import (...)` from the 14 Dutch
+        aliases to the real English names, renaming every usage throughout the file.
+        One real bug from this (Pattern G): `MainWindow.__init__` (untranslated, far
+        outside the edited range) called `set_window_size(..., maximaliseer=True)` —
+        fixed that one keyword. Also updated `start_gui.bat` and
+        `schaats_schermtest.py`'s `import schaats_gui as G` to point at `skate_gui.py`
+        — required just to keep the app runnable and the verification loop working
+        through the rest of Phase 8, ahead of Phases 9/10's own pointer-file updates.
+        Full detail (exact rename tables, what was deliberately left Dutch and why) is
+        in the commit message — read it with `git show 769f590`.
+
+      - **Left Dutch on purpose, with an inline code comment pointing back to this
+        file, at three spots** (so a future session doesn't have to rediscover this by
+        grepping):
+        1. `_calibration_rows`'s `instellingen_json` dict keys/values (`perspectief`,
+           `invoer`, `rijlijnen`, `methode`, `'onderbeen'`/`'beenvlak'`, ...) — these
+           are *written* by `KalibratieKiezer`, untranslated; per "Deferred to Phase 8"
+           below, wait for 8d's coordinated rewrite rather than translating one side.
+        2. `OPNAME_KOL_*`, `LOKAAL_WEERGAVE`, `SEEK_DREMPEL_FRAMES`,
+           `SNELHEDEN`/`_snelheid_idx`/`SNELHEID_DEFAULT_IDX`, `SPEEL_*`, `SPOEL_*`,
+           `VIDEO_TOETSEN_HULP`/`VIDEO_TOETSEN_TOOLTIP`/`toetsen_hulp`,
+           `wissel_volledig_scherm`, `TRANSPORT_KNOP_BREEDTE`, `ALLES_TICK_MS`,
+           `ALLES_SNELHEID_IDX` (lines ~430-560ish) — comments around them are already
+           translated, but the identifiers themselves belong with whichever future
+           session translates `VideoSpeler`/`SpelerToetsen`/`MasterKlok`/the recordings
+           tab, since that's where they're actually used.
+        3. `KADER_MIN_SLEEP_PX`/`KADER_ZOOM_MAX`/`KADER_MIN_HOOGTE_PX` (right before
+           `class DoelKiezer`) — belongs with whichever session does `DoelKiezer`.
+
+      - **Next up for 8a** (not started): `class DoelKiezer` (~line 950) onward. Given
+        session 1 was already substantial just for the ~950-line infrastructure
+        prefix, expect the remaining ~7,900 lines to take multiple further sessions.
+        Suggested chunking, smallest/most-isolated first (check each class's own
+        reference count with `grep -c` before touching it, the same way session 1 did,
+        since some of these constants/helpers are shared across classes):
+        - `DoelKiezer`, `HorizonKiezer`, `KalibratieKiezer` (the three target/horizon/
+          calibration picker dialogs, ~929-1747) — already individually exercised by
+          `schaats_schermtest.py`, good regression coverage while translating them.
+        - `AnalyseAfgebroken`/`AnalyseWorker`/`BatchWorker`/`SchaatserDialog`/
+          `NieuweAnalyseDialog`/`BatchAnalyseDialog`/`AnalyseKiezer` + `_calibration_rows`'s
+          caller `AnalyseInfoDialog` (~1747-2500).
+        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2500-3683, over 1,100
+          lines) — this is also where the constants deferred in note 2 above should
+          finally get renamed, since they're its dependencies.
+        - `SpelerToetsen` + `MasterKlok` (~3683-3987).
+        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~3987-4541).
+        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4541-5187).
+        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5187-5354).
+        - `MainWindow` (~5354-8818, ~3,460 lines — will very likely need to be split
+          across more than one session by itself; it owns most of the ~150
+          `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
+          8c work will naturally happen while translating its identifiers/docstrings/
+          comments here in 8a — that's fine, just don't call 8c "done" until a
+          dedicated pass confirms every dialog/tooltip string is translated too).
+        - `main()` (~8818-8839).
+        Line numbers are from session 1's end state and will drift as each chunk is
+        translated — re-`grep -n "^class \|^def "` at the start of each session rather
+        than trusting the numbers above verbatim.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do
       this *last* among the code files — it imports gui+db+analysis and is the best
       regression canary once everything else is renamed.
