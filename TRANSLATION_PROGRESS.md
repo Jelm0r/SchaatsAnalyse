@@ -704,22 +704,56 @@ document supersedes it for anything about actual progress and lessons learned).
         doesn't already exercise by constructing a real `MainWindow` in several states).
         Commit: `37dd270`.
 
+      - **Session 9** -- `MainWindow`'s own 8a (identifier rename only; its 8b/8c text
+        was already done in session 8): ~140 private methods + ~90 self.-attributes/
+        widget handles renamed to English (`_bouw_ui` -> `_build_ui`, `speler` ->
+        `player`, `klok` -> `clock`, `kant_links`/`kant_rechts` -> `side_left`/
+        `side_right`, `pagina_*` -> `page_*`, etc.), scoped to the `class MainWindow`
+        byte range only (same same-file Pattern G variant as sessions 5/6). Left
+        untouched exactly the shared-vocabulary/real-keyword-argument set already
+        established (`bieb`, `schaatser_id`, `schaatser_naam`, `analyse_id`, `naam`,
+        `titel`, `resultaten`, `events`, `perspectief`, `doel_punt`, `doel_kader`,
+        `auto_horizon`, `horizon_deg`, `input_pad`, `model_pad`, `smooth_n`,
+        `threshold`, `deinterlacen`, `lokaal`, `geen_smoothing`, `bocht_overslaan`,
+        `trainer_naam`, `huidige_idx`, `video_info`, `melding`), confirmed against
+        skate_analysis.py/skate_yolo.py/skate_db.py by grep before deciding, not
+        reopened. **Found and fixed a real bug**: the scoped regex still renamed 6
+        bare `speler` occurrences that were reads of a *different* object's
+        attribute (`kant.speler`/`self.side_left.speler`, a `CompareSide` instance --
+        CompareSide's own `speler` stays Dutch until its own future session), not
+        `self.speler` -- caught by the screen test's compare-page scenario
+        (`AttributeError: 'CompareSide' object has no attribute 'player'`), reverted
+        by hand. Also fixed the resulting stale cross-references in
+        `schaats_schermtest.py` (6 direct `mw.<attr>` pokes), 4 prose mentions in
+        already-translated docstrings elsewhere in the file, and one in
+        `skate_db.py`'s own docstring (which also still said `schaats_gui`).
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs; a
+        repo-wide grep for every old name (zero unexpected hits -- the only survivors
+        are CompareSide/ViewWindow's own still-Dutch independent copies); full
+        `schaats_schermtest.py` quick run -- 16/16, including all five MainWindow
+        states, which exercises the exact path the bug was in. Commit: `3a9bdc3`.
+
       - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
         first, don't trust these verbatim):
-        - **8a for `MainWindow`**: rename its own identifiers (`_bouw_ui` etc.,
-          `self.btn_*`/`lbl_*`/..., and the shared-vocabulary set listed above) --
-          check first whether `skate_db.py`'s own parameter names would need to move
-          together for `deinterlacen`/`bieb`/`schaatser_id`/etc., since right now they
-          match on purpose (same check session 3/5/7 already flagged).
         - **8b/8c for every class *before* `MainWindow`** (`SplashScreen` through
           `CopyDialog`, i.e. everything sessions 1-7 only did the identifier pass on):
           all their window titles, labels, tooltips and `QMessageBox` text are still
           Dutch.
+        - **8a for `CompareSide`/`ViewWindow`/`ViewSide`/`FragmentPicker`'s own
+          remaining Dutch names** that session 9 deliberately left alone because they
+          belong to those classes, not `MainWindow`: `speler`, `klok`, `toetsen`,
+          `_pauzeer_alles`, `_start_alles`, `_stop_alles`, `_zet_alles_snelheid`,
+          `_beide_naar_sync`, `btn_pauzeer_alles`, `btn_start_alles`, `btn_naar_sync`,
+          `chk_vanaf_sync`, `combo_alles_snelheid`, `lbl_spoel`, plus the session 7
+          list (`toon`, `analyse_id`, `heeft_analyse`, `leeg`, `naar_sync`, `events`,
+          `sync_frame`, `naam`, `gedaan`, `fragmenten`, `bron_pad`, `_spring`,
+          `_ga_naar_tijd`, `_verwijder`, `punten`, `bron`, `bieb`).
         - The deferred `instellingen_json`/`config.json` key translation + one-time
           library rewrite (see "Deferred to Phase 8" below) -- do this once both the
-          reader (`skate_db.py`) and every writer (`MainWindow`'s `_nieuwe_analyse`/
-          `_nieuwe_batch_analyse`) can be changed together in one commit.
-        - `main()` is now fully translated (part of session 8) -- nothing left there.
+          reader (`skate_db.py`) and every writer (`MainWindow`'s `_new_analysis`/
+          `_new_batch_analysis`) can be changed together in one commit.
+        - `main()` is fully translated (part of session 8, and session 9 confirmed
+          nothing in it needed a rename) -- nothing left there.
         Re-`grep -n "^class \|^def "` at the start of each session rather than trusting
         line numbers from old entries.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do
