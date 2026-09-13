@@ -227,13 +227,9 @@ document supersedes it for anything about actual progress and lessons learned).
         in the commit message — read it with `git show 769f590`.
 
       - **Left Dutch on purpose, with an inline code comment pointing back to this
-        file, at three spots** (so a future session doesn't have to rediscover this by
-        grepping):
-        1. `_calibration_rows`'s `instellingen_json` dict keys/values (`perspectief`,
-           `invoer`, `rijlijnen`, `methode`, `'onderbeen'`/`'beenvlak'`, ...) — these
-           are *written* by `KalibratieKiezer`, untranslated; per "Deferred to Phase 8"
-           below, wait for 8d's coordinated rewrite rather than translating one side.
-        2. `OPNAME_KOL_*`, `LOKAAL_WEERGAVE`, `SEEK_DREMPEL_FRAMES`,
+        file, at one remaining spot** (so a future session doesn't have to rediscover
+        this by grepping):
+        1. `OPNAME_KOL_*`, `LOKAAL_WEERGAVE`, `SEEK_DREMPEL_FRAMES`,
            `SNELHEDEN`/`_snelheid_idx`/`SNELHEID_DEFAULT_IDX`, `SPEEL_*`, `SPOEL_*`,
            `VIDEO_TOETSEN_HULP`/`VIDEO_TOETSEN_TOOLTIP`/`toetsen_hulp`,
            `wissel_volledig_scherm`, `TRANSPORT_KNOP_BREEDTE`, `ALLES_TICK_MS`,
@@ -241,36 +237,97 @@ document supersedes it for anything about actual progress and lessons learned).
            translated, but the identifiers themselves belong with whichever future
            session translates `VideoSpeler`/`SpelerToetsen`/`MasterKlok`/the recordings
            tab, since that's where they're actually used.
-        3. `KADER_MIN_SLEEP_PX`/`KADER_ZOOM_MAX`/`KADER_MIN_HOOGTE_PX` (right before
-           `class DoelKiezer`) — belongs with whichever session does `DoelKiezer`.
 
-      - **Next up for 8a** (not started): `class DoelKiezer` (~line 950) onward. Given
-        session 1 was already substantial just for the ~950-line infrastructure
-        prefix, expect the remaining ~7,900 lines to take multiple further sessions.
-        Suggested chunking, smallest/most-isolated first (check each class's own
-        reference count with `grep -c` before touching it, the same way session 1 did,
-        since some of these constants/helpers are shared across classes):
-        - `DoelKiezer`, `HorizonKiezer`, `KalibratieKiezer` (the three target/horizon/
-          calibration picker dialogs, ~929-1747) — already individually exercised by
-          `schaats_schermtest.py`, good regression coverage while translating them.
+        (Session 1's other two items are now done — see session 2 below: `KADER_*` →
+        `BOX_*`, and `DoelKiezer`/`HorizonKiezer`/`KalibratieKiezer` themselves.)
+
+      - **Session 2 (this session)** — `DoelKiezer`→`TargetPicker`,
+        `HorizonKiezer`→`HorizonPicker`, `KalibratieKiezer`→`CalibrationPicker`
+        (~942-1772: the module-level `KADER_*`→`BOX_*` constants through the end of
+        `CalibrationPicker`, right up to `class AnalyseAfgebroken`). Identifiers,
+        docstrings, and comments only — window titles/labels/tooltips/messages are
+        still Dutch (8b/8c). `doel_punt`/`doel_kader` (on `TargetPicker`) and
+        `perspectief` (on `CalibrationPicker`) were deliberately kept as-is — per
+        "Deferred to Phase 8" below, they flow straight into still-Dutch
+        `instellingen_json` keys built elsewhere in this file (not yet reached by this
+        session); renaming just the attribute would split one logical key into two
+        spellings. `horizon_deg`/`auto_per_frame` needed no change (already English).
+        Confirmed via `grep` that all three classes are referenced from exactly one
+        `MainWindow` call site each plus `schaats_schermtest.py` (updated too), and
+        fixed those.
+
+        **Found and fixed two real, pre-existing bugs while translating
+        `KalibratieKiezer`/`CalibrationPicker`** (both Pattern C/D, both predate this
+        session — introduced when Phase 3/4 translated `skate_perspective.py`/
+        `skate_analysis.py`'s `CalibrationInput`/`PerspectiveConfig` out from under this
+        still-Dutch file, and never caught since because nothing in the verification
+        chain up to now ever exercised the calibration flow end-to-end):
+        1. **`_bevestig` (now `_confirm`) constructed `PerspectiveConfig` with the old
+           Dutch keyword names** (`kalibratie=`, `methode=`, `onderbeen_l=`, `invoer=`).
+           Since Phase 4, `PerspectiveConfig`'s real dataclass fields are
+           `calibration`/`method`/`lower_leg_l`/`calibration_input` — the Dutch names
+           only exist as attribute-access aliases (Pattern C), which do **not** cover
+           constructor keyword arguments (this is Pattern C's documented "known trap").
+           Confirmed with a throwaway script that the old call raises `TypeError`
+           immediately: **every attempt to confirm a perspective calibration through
+           this dialog on this branch has been crashing** since Phase 4 landed
+           (`498a4c7`), not just producing a subtly wrong result — it simply never got
+           far enough to reach `self.accept()`. Fixed by using the real field names.
+        2. **`_calibration_rows` indexed the saved calibration dict by its old Dutch
+           keys** (`invoer.get("rijlijnen")`, `.get("dwarslijnen")`, `.get("beeld_w")`,
+           etc.), but `CalibrationInput.to_dict()` has written English keys
+           (`track_lines`, `image_w`, ...) since Phase 3 — so for any
+           perspective-corrected analysis, the Info dialog's calibration section
+           silently rendered as empty (`p.get("invoer")` found nothing, since the real
+           top-level key is `calibration_input`). Fixed by reading through
+           `CalibrationInput.from_dict()` (which already dual-reads old/new spellings,
+           Pattern E) instead of indexing the raw dict, while leaving the *displayed*
+           row text in Dutch (still deferred). Also added the same
+           `'onderbeen'/'beenvlak'` → `'lower_leg'/'leg_plane'` value normalization
+           (matching the existing shim in `skate_perspective.reconstruct_angle()`) to
+           `_prefill`'s (formerly `_vul_voor`'s) method-combo lookup, since the combo's
+           item data is now the English spelling and a real on-disk analysis from before
+           Phase 3 still has the old value in its `method`/`methode` field.
+
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs
+        (offscreen Qt platform); a throwaway script (with a real `QApplication` and a
+        synthetic camera from `skate_perspective`'s own self-test helpers,
+        `_SynthCamera`/`_scene_lines`) that drives `CalibrationPicker` end-to-end —
+        draws lines, recalibrates, calls `_confirm()`, confirms a `PerspectiveConfig`
+        comes out (previously: `TypeError`) — then feeds its real `to_dict()` output
+        into `_calibration_rows()` and confirms non-empty rows (previously: `[]`), then
+        feeds a hand-built *old-format* Dutch-keyed dict through the same function and
+        confirms it *still* reads correctly (dual-read preserved), and finally confirms
+        `_prefill()` correctly maps an old `method="onderbeen"` value onto the new
+        `"lower_leg"` combo entry; `.venv-yolo\Scripts\python.exe schaats_schermtest.py`
+        (quick mode) — all 16 windows pass, including the three renamed dialogs by
+        their new names.
+
+      - **Next up for 8a**: `class AnalyseAfgebroken` (~line 1801) onward. Given
+        sessions 1-2 covered the ~860-line infrastructure-and-pickers prefix, expect the
+        remaining ~7,040 lines to take multiple further sessions. Suggested chunking,
+        smallest/most-isolated first (check each class's own reference count with
+        `grep -c` before touching it, the same way sessions 1-2 did, since some of these
+        constants/helpers are shared across classes):
         - `AnalyseAfgebroken`/`AnalyseWorker`/`BatchWorker`/`SchaatserDialog`/
           `NieuweAnalyseDialog`/`BatchAnalyseDialog`/`AnalyseKiezer` + `_calibration_rows`'s
-          caller `AnalyseInfoDialog` (~1747-2500).
-        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2500-3683, over 1,100
-          lines) — this is also where the constants deferred in note 2 above should
+          caller `AnalyseInfoDialog` (~1801-2558) — already individually exercised by
+          `schaats_schermtest.py`, good regression coverage while translating them.
+        - `VooruitLezer` + the giant `VideoSpeler` class alone (~2558-3737, over 1,100
+          lines) — this is also where the constants deferred in the note above should
           finally get renamed, since they're its dependencies.
-        - `SpelerToetsen` + `MasterKlok` (~3683-3987).
-        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~3987-4541).
-        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4541-5187).
-        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5187-5354).
-        - `MainWindow` (~5354-8818, ~3,460 lines — will very likely need to be split
+        - `SpelerToetsen` + `MasterKlok` (~3737-4041).
+        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4041-4595).
+        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4595-5241).
+        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5241-5408).
+        - `MainWindow` (~5408-8872, ~3,460 lines — will very likely need to be split
           across more than one session by itself; it owns most of the ~150
           `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
           8c work will naturally happen while translating its identifiers/docstrings/
           comments here in 8a — that's fine, just don't call 8c "done" until a
           dedicated pass confirms every dialog/tooltip string is translated too).
-        - `main()` (~8818-8839).
-        Line numbers are from session 1's end state and will drift as each chunk is
+        - `main()` (~8872-8893).
+        Line numbers are from session 2's end state and will drift as each chunk is
         translated — re-`grep -n "^class \|^def "` at the start of each session rather
         than trusting the numbers above verbatim.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do

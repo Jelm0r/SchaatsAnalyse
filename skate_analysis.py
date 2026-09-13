@@ -1782,7 +1782,7 @@ def trim_fragments(bron_pad, fragmenten, doelmap, progress_callback=None,
     exactly on the marked frames**: no margin added or subtracted. The trainer watches
     the footage while marking and decides the bounds themselves; the program shouldn't
     silently add seconds. (Padding at the front would even make target selection
-    harder: `DoelKiezer` gets frame 0 of the clip, and that's now precisely the frame
+    harder: `TargetPicker` gets frame 0 of the clip, and that's now precisely the frame
     "start" was pressed on.)
 
     **One sequential pass**: every frame goes to the writer of every fragment it falls

@@ -387,32 +387,48 @@ def _calibration_rows(inst):
     storage but is worked out again here -- exactly like when the analysis is opened --
     so the Info dialog shows what the analysis would actually use *now*.
 
-    Note: the dict keys read here (`perspectief`, `invoer`, `rijlijnen`, `dwarslijnen`,
-    `lijnafstand`, `beeld_w`/`beeld_h`, `notitie`, `methode`, `onderbeen_l`) and the
-    `'onderbeen'`/`'beenvlak'` method-name values are `instellingen_json` content and
-    stay Dutch here on purpose -- the code elsewhere in this file that *writes* them
-    (`KalibratieKiezer`) isn't translated yet. See TRANSLATION_PROGRESS.md, "Deferred to
-    Phase 8"."""
+    The top-level `perspectief` key (and the row labels/text below) are
+    `instellingen_json` content and stay Dutch here on purpose, deferred to Phase 8d
+    together with `doel_punt`/`doel_kader`/etc (see TRANSLATION_PROGRESS.md). The
+    *nested* calibration-input dict, though, is read through
+    `CalibrationInput.from_dict()` rather than by indexing raw keys directly: that
+    dict's keys have been English since Phase 3 (`track_lines`, `image_w`, ... -- see
+    `CalibrationInput.to_dict()`), and `from_dict()` already dual-reads the old Dutch
+    spellings for calibrations saved before that. **Found and fixed a real bug here**:
+    the previous version of this function indexed the old Dutch keys directly
+    (`invoer.get("rijlijnen")` etc.), which no longer matched anything `to_dict()`
+    actually writes -- so the Info dialog silently showed zero calibration rows for
+    every perspective-corrected analysis saved since Phase 3 landed (confirmed with a
+    throwaway round-trip: the old code returned `[]` for a `PerspectiveConfig.to_dict()`
+    dict, this version returns the expected rows)."""
     p = inst.get("perspectief")
-    if not p or not p.get("invoer"):
+    if not p:
         return []
-    inv = p["invoer"]
-    n_track, n_cross = len(inv.get("rijlijnen") or []), len(inv.get("dwarslijnen") or [])
-    method = {"onderbeen": "onderbeenlengte (bol-snijding)",
-              "beenvlak": "beenvlak (rijrichting)"}.get(p.get("methode"), p.get("methode"))
+    inv_dict = p.get("calibration_input") or p.get("invoer")
+    if not inv_dict:
+        return []
+    inv = skate_perspective.CalibrationInput.from_dict(inv_dict)
+    # `method`/`methode` may still hold an old on-disk value ('onderbeen'/'beenvlak',
+    # from an analysis saved before Phase 3) -- same normalization as the shim in
+    # `skate_perspective.reconstruct_angle()`.
+    methode_raw = p.get("method", p.get("methode"))
+    methode = {"lower_leg": "onderbeenlengte (bol-snijding)", "onderbeen": "onderbeenlengte (bol-snijding)",
+              "leg_plane": "beenvlak (rijrichting)", "beenvlak": "beenvlak (rijrichting)"
+              }.get(methode_raw, methode_raw)
+    onderbeen_l = p.get("lower_leg_l", p.get("onderbeen_l"))
     rows = [
-        ("Kalibratie:", f"{n_track} baanlijnen + {n_cross} dwarslijnen, "
-                        f"{inv.get('lijnafstand', '?')} m uit elkaar, "
-                        f"op beeld {inv.get('beeld_w')}×{inv.get('beeld_h')}",
+        ("Kalibratie:", f"{len(inv.track_lines)} baanlijnen + {len(inv.cross_lines)} dwarslijnen, "
+                        f"{inv.line_distance} m uit elkaar, "
+                        f"op beeld {inv.image_w}×{inv.image_h}",
          "De nagetrokken lijnen worden bewaard; de camerastand wordt eruit herberekend."),
-        ("Reconstructie:", method
-         + (f", onderbeen {p['onderbeen_l'] * 100:.1f} cm" if p.get("onderbeen_l") else ""),
+        ("Reconstructie:", methode
+         + (f", onderbeen {onderbeen_l * 100:.1f} cm" if onderbeen_l else ""),
          None),
     ]
-    if inv.get("notitie"):
-        rows.append(("Kalibratie-notitie:", inv["notitie"], None))
+    if inv.note:
+        rows.append(("Kalibratie-notitie:", inv.note, None))
     try:
-        kal = skate_perspective.CalibrationInput.from_dict(inv).calibrate()
+        kal = inv.calibrate()
         rows.append(("Camerastand:",
                       f"f = {kal.f:.0f} px{' (geschat)' if kal.f_estimated else ''}, "
                       f"hoogte {kal.camera_height:.1f} m, horizon {kal.horizon_deg:+.2f}°, "
@@ -704,7 +720,7 @@ def set_window_size(window, wanted_width, wanted_height, maximize=False):
     # to be accounted for here too. If only the content were centered, the title bar
     # would push the window down ~30 px and, with a clamped height, the bottom 5 px
     # would fall behind the taskbar — measured on 12-9-2026 on the trim window (+5 px)
-    # and `KalibratieKiezer` (+3 px, not yet renamed -- see TRANSLATION_PROGRESS.md).
+    # and `CalibrationPicker` (+3 px).
     x = available.x() + max(0, available.width() - width - WINDOW_MARGIN.left()
                             - WINDOW_MARGIN.right()) // 2
     y = available.y() + max(0, available.height() - height - WINDOW_MARGIN.top()
@@ -939,36 +955,42 @@ class ElideLabel(QLabel):
         super().setText(fm.elidedText(self._volledig, self._modus, breedte))
 
 
-# NOTE: kept Dutch (`KADER_` = box) for now, along with `DoelKiezer` right below and the
-# rest of the dialog classes down to `MainWindow` — they belong with future Phase 8
-# sessions, not this module-infrastructure one. See TRANSLATION_PROGRESS.md.
-KADER_MIN_SLEEP_PX = 5     # kortere sleep in de DoelKiezer = klik (punt), langere = kader
-KADER_ZOOM_MAX     = 8.0   # zoombereik van de DoelKiezer (muiswiel)
-KADER_MIN_HOOGTE_PX = 70   # = skate_yolo.BOX_MIN_HEIGHT_PX (that module is lazy-loaded here):
+# The three target/horizon/calibration picker dialogs below (through `CalibrationPicker`,
+# ending at `class AnalyseAfgebroken`) are Phase 8a session 2: identifiers/comments/
+# docstrings only -- UI text (window titles, labels, tooltips, messages) is still Dutch.
+# See TRANSLATION_PROGRESS.md.
+BOX_MIN_DRAG_PX  = 5       # shorter drag in TargetPicker = click (point), longer = box
+BOX_ZOOM_MAX     = 8.0     # zoom range of TargetPicker (mouse wheel)
+BOX_MIN_HEIGHT_PX = 70     # = skate_yolo.BOX_MIN_HEIGHT_PX (that module is lazy-loaded here):
                            # below this height in video pixels there's nothing to measure,
                            # not even with the spyglass -- measured on `00000 16-14`, see
                            # CLAUDE.md. The picker says so before the analysis, the backend
                            # once more afterwards.
 
 
-class DoelKiezer(QDialog):
+class TargetPicker(QDialog):
     """
-    Toont het eerste frame en laat de gebruiker de te volgen schaatser aanwijzen: met
-    een **klik** (een punt, zoals altijd) of door er met de linkerknop een **kader**
-    omheen te slepen. Het kader is er voor de schaatser die klein in beeld staat: de
-    YOLO-backend zet er het kijkglas mee aan (`schaats_yolo._Kijkglas`), dat hem vanaf
-    het kader volgt waar de detectiepass hem nog niet ziet (gemeten: pas vanaf ~80–130 px
-    hoogte). Daarvoor moet het kader redelijk strak zijn, en op een dialoog van 900 px is
-    zo'n schaatser ~45 px hoog — vandaar het **muiswiel om in te zoomen** rond de cursor
-    en **rechts-slepen om te pannen**. Crop-and-magnify, hetzelfde recept als
-    `VideoSpeler._toon_pixmap`: `_crop_norm` is de enige waarheidsbron van de
-    omrekening, en alles wat bewaard wordt is genormaliseerd op het frame, dus de
-    zoomstand doet er voor de uitkomst niet toe.
+    Shows the first frame and lets the user point out the skater to follow: with a
+    **click** (a point, as always) or by dragging a **box** around them with the left
+    button. The box is for a skater who's small in frame: the YOLO backend uses it to
+    switch on the spyglass (`skate_yolo._Spyglass`), which follows them from the box
+    wherever the detection pass doesn't see them yet (measured: only from about
+    80-130 px tall). For that the box needs to be reasonably tight, and on a 900 px
+    dialog such a skater is only about 45 px tall -- hence the **mouse wheel to zoom**
+    around the cursor and **right-drag to pan**. Crop-and-magnify, the same recipe as
+    `VideoSpeler._toon_pixmap`: `_crop_norm` is the single source of truth for the
+    conversion, and everything that gets saved is normalized to the frame, so the zoom
+    level doesn't matter for the outcome.
 
-    Uitkomst na `exec()`: `doel_punt` (genormaliseerd (x, y), of None = 'volg grootste')
-    en `doel_kader` (genormaliseerd (x0, y0, x1, y1), of None). Bij een kader is
-    `doel_punt` het middelpunt ervan. Een klik accepteert meteen (bestaand gedrag); een
-    kader wacht op "Volg dit kader", zodat het eerst overgetekend kan worden.
+    Outcome after `exec()`: `doel_punt` (normalized (x, y), or None = 'follow largest')
+    and `doel_kader` (normalized (x0, y0, x1, y1), or None). With a box, `doel_punt` is
+    its center point. A click accepts immediately (existing behavior); a box waits for
+    "Follow this box" so it can be redrawn first.
+
+    `doel_punt`/`doel_kader` keep their Dutch names deliberately -- they flow straight
+    into `instellingen_json`'s still-Dutch `doel_punt`/`doel_kader` keys elsewhere in
+    this file (deferred to Phase 8d, see TRANSLATION_PROGRESS.md); renaming just the
+    attribute here would split one logical key into two spellings.
     """
     def __init__(self, frame_bgr, parent=None):
         super().__init__(parent)
@@ -978,12 +1000,12 @@ class DoelKiezer(QDialog):
         self._frame = frame_bgr
         self._scaled_size = None
         self._zoom = 1.0
-        self._pan = (0.5, 0.5)                    # middelpunt van de uitsnede (genormaliseerd)
-        self._crop_norm = (0.0, 0.0, 1.0, 1.0)    # (x0n, y0n, breedten, hoogten) van de uitsnede
-        self._sleep_start = None                  # linkerknop: QPointF van de druk
-        self._sleep_norm = None                   # ... en dat punt genormaliseerd
-        self._kader = None                        # getekend kader (genormaliseerd xyxy)
-        self._pan_start = None                    # rechts-slepen: (QPointF, pan bij de druk)
+        self._pan = (0.5, 0.5)                    # center of the crop (normalized)
+        self._crop_norm = (0.0, 0.0, 1.0, 1.0)    # (x0n, y0n, widthn, heightn) of the crop
+        self._drag_start = None                   # left button: QPointF of the press
+        self._drag_norm = None                    # ... and that point normalized
+        self._box = None                          # drawn box (normalized xyxy)
+        self._pan_start = None                    # right-drag: (QPointF, pan at the press)
 
         v = QVBoxLayout(self)
         uitleg = QLabel("Klik op de schaatser die je wilt volgen. Staat hij klein in "
@@ -991,18 +1013,18 @@ class DoelKiezer(QDialog):
                         "gevolgd waar de detectie hem nog niet ziet.\n"
                         "Muiswiel = inzoomen rond de cursor, rechts-slepen = beeld "
                         "verschuiven.")
-        # Afbreken, anders eist de langste regel de dialoogbreedte op (855 px, en 1240 px
-        # bij een grotere systeemletter — breder dan een beamer of een 1366-laptop op 125%).
+        # Wrap it, otherwise the longest line claims the dialog width (855 px, and 1240 px
+        # at a larger system font size — wider than a projector or a 1366 laptop at 125%).
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumSize(640, 360)
-        self.label.mousePressEvent = self._druk
-        self.label.mouseMoveEvent = self._beweeg
-        self.label.mouseReleaseEvent = self._los
-        self.label.wheelEvent = self._wiel
-        # Rechts-slepen pant; zonder dit klapt bij elke pan een contextmenu open.
+        self.label.mousePressEvent = self._press
+        self.label.mouseMoveEvent = self._move
+        self.label.mouseReleaseEvent = self._release
+        self.label.wheelEvent = self._wheel
+        # Right-drag pans; without this a context menu pops up on every pan.
         self.label.setContextMenuPolicy(Qt.PreventContextMenu)
         v.addWidget(self.label, 1)
 
@@ -1010,12 +1032,12 @@ class DoelKiezer(QDialog):
         self.lbl_zoom = QLabel("Zoom 1,0×")
         knoppen.addWidget(self.lbl_zoom)
         knoppen.addStretch(1)
-        self.btn_kader = QPushButton("Volg dit kader")
-        self.btn_kader.setEnabled(False)
-        self.btn_kader.clicked.connect(self._bevestig_kader)
-        knoppen.addWidget(self.btn_kader)
+        self.btn_box = QPushButton("Volg dit kader")
+        self.btn_box.setEnabled(False)
+        self.btn_box.clicked.connect(self._confirm_box)
+        knoppen.addWidget(self.btn_box)
         btn_skip = QPushButton("Volg grootste schaatser")
-        btn_skip.clicked.connect(self.accept)     # doel_punt en doel_kader blijven None
+        btn_skip.clicked.connect(self.accept)     # doel_punt and doel_kader stay None
         knoppen.addWidget(btn_skip)
         v.addLayout(knoppen)
 
@@ -1026,15 +1048,15 @@ class DoelKiezer(QDialog):
         self._pix = QPixmap.fromImage(qimg)
         self._render()
 
-    # ── weergave ──────────────────────────────────────────────────────────────
+    # ── display ──────────────────────────────────────────────────────────────
     def _render(self):
         if not hasattr(self, "_pix"):
-            return                    # resizeEvent vóór het einde van __init__
+            return                    # resizeEvent before __init__ finishes
         pw, ph = self._pix.width(), self._pix.height()
         z = max(1.0, self._zoom)
         if z > 1.0:
             cw, ch = pw / z, ph / z
-            x0 = min(max(self._pan[0] * pw - cw / 2, 0.0), pw - cw)   # uitsnede binnen het frame
+            x0 = min(max(self._pan[0] * pw - cw / 2, 0.0), pw - cw)   # crop within the frame
             y0 = min(max(self._pan[1] * ph - ch / 2, 0.0), ph - ch)
             ix0, iy0 = int(round(x0)), int(round(y0))
             icw, ich = min(int(round(cw)), pw - ix0), min(int(round(ch)), ph - iy0)
@@ -1045,9 +1067,9 @@ class DoelKiezer(QDialog):
             self._crop_norm = (0.0, 0.0, 1.0, 1.0)
         scaled = bron.scaled(self.label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._scaled_size = scaled.size()
-        if self._kader is not None:
-            x0, y0 = self._norm_naar_pixmap(self._kader[0], self._kader[1])
-            x1, y1 = self._norm_naar_pixmap(self._kader[2], self._kader[3])
+        if self._box is not None:
+            x0, y0 = self._norm_to_pixmap(self._box[0], self._box[1])
+            x1, y1 = self._norm_to_pixmap(self._box[2], self._box[3])
             painter = QPainter(scaled)
             painter.setPen(QPen(QColor(255, 220, 0), 2))
             painter.drawRect(QRect(QPoint(int(x0), int(y0)), QPoint(int(x1), int(y1))))
@@ -1059,9 +1081,9 @@ class DoelKiezer(QDialog):
         self._render()
         super().resizeEvent(event)
 
-    def _widget_naar_norm(self, pos):
-        """Muispositie op het label → genormaliseerd (x, y) in het frame; kan buiten
-        [0, 1] liggen (caller klemt of weigert)."""
+    def _widget_to_norm(self, pos):
+        """Mouse position on the label → normalized (x, y) in the frame; can lie outside
+        [0, 1] (caller clamps or rejects)."""
         if self._scaled_size is None:
             return None
         sw, sh = self._scaled_size.width(), self._scaled_size.height()
@@ -1073,28 +1095,28 @@ class DoelKiezer(QDialog):
         x0n, y0n, wn, hn = self._crop_norm
         return (x0n + fx * wn, y0n + fy * hn)
 
-    def _norm_naar_pixmap(self, nx, ny):
-        """Genormaliseerd (x, y) → positie op de geschaalde pixmap (zonder label-offset)."""
+    def _norm_to_pixmap(self, nx, ny):
+        """Normalized (x, y) → position on the scaled pixmap (without the label offset)."""
         sw, sh = self._scaled_size.width(), self._scaled_size.height()
         x0n, y0n, wn, hn = self._crop_norm
         return ((nx - x0n) / wn * sw, (ny - y0n) / hn * sh)
 
-    # ── zoomen en pannen ──────────────────────────────────────────────────────
-    def _wiel(self, event):
+    # ── zoom and pan ─────────────────────────────────────────────────────────
+    def _wheel(self, event):
         delta = event.angleDelta().y()
         if delta == 0:
             return
         factor = ZOOM_STEP if delta > 0 else 1.0 / ZOOM_STEP
-        nieuw = min(KADER_ZOOM_MAX, max(1.0, self._zoom * factor))
+        nieuw = min(BOX_ZOOM_MAX, max(1.0, self._zoom * factor))
         if nieuw == self._zoom:
             return
-        onder = self._widget_naar_norm(event.position())
+        onder = self._widget_to_norm(event.position())
         if nieuw <= 1.0 or onder is None:
             self._pan = (0.5, 0.5)
         else:
-            # Zoomen rond de cursor: het punt onder de cursor blijft op dezelfde plek
-            # in het venster, dus de fractie van de cursor binnen de uitsnede blijft
-            # gelijk en daaruit volgt het nieuwe middelpunt.
+            # Zoom around the cursor: the point under the cursor stays in the same spot
+            # in the window, so the cursor's fraction within the crop stays the same and
+            # the new center point follows from that.
             sw, sh = self._scaled_size.width(), self._scaled_size.height()
             fx = (event.position().x() - (self.label.width() - sw) / 2) / sw
             fy = (event.position().y() - (self.label.height() - sh) / 2) / sh
@@ -1104,24 +1126,24 @@ class DoelKiezer(QDialog):
         self._render()
         event.accept()
 
-    # ── muis ──────────────────────────────────────────────────────────────────
-    def _druk(self, event):
+    # ── mouse ────────────────────────────────────────────────────────────────
+    def _press(self, event):
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             self._pan_start = (event.position(), self._pan)
             return
         if event.button() != Qt.LeftButton:
             return
-        norm = self._widget_naar_norm(event.position())
+        norm = self._widget_to_norm(event.position())
         if norm is None:
             return
-        self._sleep_start = event.position()
-        self._sleep_norm = norm
-        if self._kader is not None:               # nieuwe sleep wist het oude kader
-            self._kader = None
-            self.btn_kader.setEnabled(False)
+        self._drag_start = event.position()
+        self._drag_norm = norm
+        if self._box is not None:                  # a new drag clears the old box
+            self._box = None
+            self.btn_box.setEnabled(False)
             self._render()
 
-    def _beweeg(self, event):
+    def _move(self, event):
         if self._pan_start is not None and self._scaled_size is not None:
             start, pan0 = self._pan_start
             sw, sh = self._scaled_size.width(), self._scaled_size.height()
@@ -1132,55 +1154,55 @@ class DoelKiezer(QDialog):
                          min(max(pan0[1] - dy, hn / 2), 1 - hn / 2))
             self._render()
             return
-        if self._sleep_start is None:
+        if self._drag_start is None:
             return
-        if (event.position() - self._sleep_start).manhattanLength() < KADER_MIN_SLEEP_PX:
+        if (event.position() - self._drag_start).manhattanLength() < BOX_MIN_DRAG_PX:
             return
-        norm = self._widget_naar_norm(event.position())
+        norm = self._widget_to_norm(event.position())
         if norm is None:
             return
-        # Slepen tot in de letterbox klemt op de beeldrand (net als het tekenen in het
-        # kijkvenster): een kader dat net buiten het beeld eindigt is nog steeds bedoeld.
-        x0, y0 = self._sleep_norm
+        # Dragging into the letterbox clamps to the frame edge (like drawing in the
+        # viewing window): a box that ends just outside the frame is still intentional.
+        x0, y0 = self._drag_norm
         x1, y1 = min(max(norm[0], 0.0), 1.0), min(max(norm[1], 0.0), 1.0)
-        self._kader = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        self._box = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         self._render()
 
-    def _los(self, event):
+    def _release(self, event):
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             self._pan_start = None
             return
-        if event.button() != Qt.LeftButton or self._sleep_start is None:
+        if event.button() != Qt.LeftButton or self._drag_start is None:
             return
-        start, self._sleep_start = self._sleep_start, None
-        if (event.position() - start).manhattanLength() < KADER_MIN_SLEEP_PX:
-            # Een klik: het punt, zoals vanouds — meteen door.
-            x, y = self._sleep_norm
+        start, self._drag_start = self._drag_start, None
+        if (event.position() - start).manhattanLength() < BOX_MIN_DRAG_PX:
+            # A click: the point, as always — accept right away.
+            x, y = self._drag_norm
             if 0 <= x <= 1 and 0 <= y <= 1:
                 self.doel_punt = (float(x), float(y))
                 self.doel_kader = None
                 self.accept()
             return
-        if self._kader is not None and (self._kader[2] - self._kader[0] > 0.005
-                                        and self._kader[3] - self._kader[1] > 0.005):
-            self.btn_kader.setEnabled(True)
-            self.btn_kader.setFocus()
+        if self._box is not None and (self._box[2] - self._box[0] > 0.005
+                                      and self._box[3] - self._box[1] > 0.005):
+            self.btn_box.setEnabled(True)
+            self.btn_box.setFocus()
         else:
-            self._kader = None
+            self._box = None
             self._render()
 
-    def _bevestig_kader(self):
-        if self._kader is None:
+    def _confirm_box(self):
+        if self._box is None:
             return
-        x0, y0, x1, y1 = (float(v) for v in self._kader)
+        x0, y0, x1, y1 = (float(v) for v in self._box)
         hoogte_px = (y1 - y0) * self._pix.height()
-        if hoogte_px < KADER_MIN_HOOGTE_PX:
-            # Nu zeggen, niet pas na drie minuten rekenen: het fragment later laten
-            # beginnen is de enige remedie, en daarvoor moet je terug naar het knipvenster.
+        if hoogte_px < BOX_MIN_HEIGHT_PX:
+            # Say so now, not after three minutes of computing: starting the fragment
+            # later is the only remedy, and that means going back to the trim window.
             antwoord = QMessageBox.question(
                 self, "Kader erg klein",
                 f"Het kader is maar {hoogte_px:.0f} pixels hoog. Onder ongeveer "
-                f"{KADER_MIN_HOOGTE_PX} pixels zijn er geen benen meer om te meten — ook "
+                f"{BOX_MIN_HEIGHT_PX} pixels zijn er geen benen meer om te meten — ook "
                 f"niet met het kijkglas — en levert de analyse vrijwel zeker niets op.\n\n"
                 f"Tip: begin het fragment later, op het moment dat de schaatser groter in "
                 f"beeld staat.\n\nToch doorgaan met dit kader?",
@@ -1192,12 +1214,12 @@ class DoelKiezer(QDialog):
         self.accept()
 
 
-class HorizonKiezer(QDialog):
+class HorizonPicker(QDialog):
     """
-    Toont het eerste frame en laat de gebruiker twee punten langs de ijslijn (of een
-    andere horizontale referentie: boarding, reclameband, baanlijn) klikken. Daaruit
-    volgt de kanteling van de camera t.o.v. de horizon. Retourneert `horizon_deg`
-    (float, graden) — 0.0 als er geen kanteling wordt ingesteld.
+    Shows the first frame and lets the user click two points along the ice line (or
+    another horizontal reference: boarding, ad board, track line). That gives the
+    camera's tilt relative to the horizon. Returns `horizon_deg` (float, degrees) — 0.0
+    if no tilt is set.
     """
     def __init__(self, frame_bgr, parent=None):
         super().__init__(parent)
@@ -1205,7 +1227,7 @@ class HorizonKiezer(QDialog):
         self.horizon_deg = 0.0
         self.auto_per_frame = False
         self._frame = frame_bgr
-        self._punten = []            # originele-pixel (x, y) van de referentielijn
+        self._points = []            # original-pixel (x, y) of the reference line
         self._scaled_size = None
         self._scale = 1.0
 
@@ -1214,12 +1236,12 @@ class HorizonKiezer(QDialog):
             "Klik twee punten langs het ijs (of de boarding/reclameband) om de\n"
             "camerakanteling te bepalen, of laat hem automatisch detecteren.\n"
             "Klik opnieuw om de lijn te hertekenen.")
-        uitleg.setWordWrap(True)      # zie DoelKiezer: geen dialoogbreedte uit een tekstregel
+        uitleg.setWordWrap(True)      # see TargetPicker: no dialog width from one text line
         v.addWidget(uitleg)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumSize(640, 360)
-        self.label.mousePressEvent = self._klik
+        self.label.mousePressEvent = self._click
         v.addWidget(self.label, 1)
 
         self.lbl_hoek = QLabel("Kanteling: 0.00°  (nog geen lijn getekend)")
@@ -1232,19 +1254,19 @@ class HorizonKiezer(QDialog):
             "WERKT NIET / niet in gebruik: sinds juli 2026 staat de camera altijd\n"
             "precies horizontaal, dus er is geen kanteling om per frame te volgen.\n"
             "Laat deze optie uit.")
-        self.chk_per_frame.stateChanged.connect(self._wissel_per_frame)
+        self.chk_per_frame.stateChanged.connect(self._toggle_per_frame)
         v.addWidget(self.chk_per_frame)
 
         knoppen = QHBoxLayout()
         self.btn_auto = QPushButton("Detecteer (dit frame)")
-        self.btn_auto.clicked.connect(self._detecteer)
+        self.btn_auto.clicked.connect(self._detect)
         knoppen.addWidget(self.btn_auto)
         btn_geen = QPushButton("Geen kanteling (0°)")
-        btn_geen.clicked.connect(self._geen_kanteling)
+        btn_geen.clicked.connect(self._no_tilt)
         knoppen.addWidget(btn_geen)
         knoppen.addStretch(1)
         self.btn_ok = QPushButton("Bevestig")
-        self.btn_ok.clicked.connect(self._bevestig)
+        self.btn_ok.clicked.connect(self._confirm)
         knoppen.addWidget(self.btn_ok)
         v.addLayout(knoppen)
 
@@ -1261,11 +1283,11 @@ class HorizonKiezer(QDialog):
         self._scaled_size = scaled.size()
         self._scale = scaled.width() / self._orig_w if self._orig_w else 1.0
 
-        if self._punten:
+        if self._points:
             painter = QPainter(scaled)
             pen = QPen(QColor(60, 200, 255), 3)
             painter.setPen(pen)
-            pts = [(int(x * self._scale), int(y * self._scale)) for x, y in self._punten]
+            pts = [(int(x * self._scale), int(y * self._scale)) for x, y in self._points]
             for px, py in pts:
                 painter.drawEllipse(px - 4, py - 4, 8, 8)
             if len(pts) == 2:
@@ -1278,7 +1300,7 @@ class HorizonKiezer(QDialog):
         self._render()
         super().resizeEvent(event)
 
-    def _klik(self, event):
+    def _click(self, event):
         if self._scaled_size is None or self.chk_per_frame.isChecked():
             return
         sw, sh = self._scaled_size.width(), self._scaled_size.height()
@@ -1288,86 +1310,86 @@ class HorizonKiezer(QDialog):
         oy = (event.position().y() - offy) / self._scale
         if not (0 <= ox <= self._orig_w and 0 <= oy <= self._orig_h):
             return
-        if len(self._punten) >= 2:           # derde klik → nieuwe lijn beginnen
-            self._punten = []
-        self._punten.append((ox, oy))
-        if len(self._punten) == 2:
-            self.horizon_deg = horizon_angle_from_line(self._punten[0], self._punten[1])
+        if len(self._points) >= 2:           # third click → start a new line
+            self._points = []
+        self._points.append((ox, oy))
+        if len(self._points) == 2:
+            self.horizon_deg = horizon_angle_from_line(self._points[0], self._points[1])
             self.lbl_hoek.setText(f"Kanteling: {self.horizon_deg:+.2f}°")
         else:
             self.lbl_hoek.setText("Kanteling: klik het tweede punt …")
         self._render()
 
-    def _detecteer(self):
-        graden = detect_ice_line(self._frame)
-        if graden is None:
+    def _detect(self):
+        degrees = detect_ice_line(self._frame)
+        if degrees is None:
             QMessageBox.information(
                 self, "Geen ijslijn gevonden",
                 "Kon geen betrouwbare horizontale lijn detecteren. Teken de lijn "
                 "handmatig, of kies 'Geen kanteling'.")
             return
-        # Synthetiseer een weergavelijn dwars door het beeld op de gevonden hoek.
+        # Synthesize a display line straight across the frame at the found angle.
         w, h = self._orig_w, self._orig_h
         cx, cy = w / 2.0, h / 2.0
-        helling = np.tan(np.radians(graden))          # y daalt naar rechts bij positieve hoek
-        self._punten = [(0.0, cy + helling * cx), (float(w), cy - helling * (w - cx))]
-        self.horizon_deg = graden
-        self.lbl_hoek.setText(f"Kanteling: {graden:+.2f}°  (automatisch — controleer de lijn)")
+        slope = np.tan(np.radians(degrees))            # y drops to the right at a positive angle
+        self._points = [(0.0, cy + slope * cx), (float(w), cy - slope * (w - cx))]
+        self.horizon_deg = degrees
+        self.lbl_hoek.setText(f"Kanteling: {degrees:+.2f}°  (automatisch — controleer de lijn)")
         self._render()
 
-    def _wissel_per_frame(self, _state):
-        """Bij per-frame auto is de handmatige/constante lijn niet van toepassing."""
-        aan = self.chk_per_frame.isChecked()
-        self.label.setEnabled(not aan)
-        self.btn_auto.setEnabled(not aan)
-        if aan:
+    def _toggle_per_frame(self, _state):
+        """With per-frame auto, the manual/constant line doesn't apply."""
+        on = self.chk_per_frame.isChecked()
+        self.label.setEnabled(not on)
+        self.btn_auto.setEnabled(not on)
+        if on:
             self.lbl_hoek.setText("Kanteling: automatisch per frame — "
                                   "wordt tijdens de analyse bepaald.")
-        elif len(self._punten) == 2:
+        elif len(self._points) == 2:
             self.lbl_hoek.setText(f"Kanteling: {self.horizon_deg:+.2f}°")
         else:
             self.lbl_hoek.setText("Kanteling: 0.00°  (nog geen lijn getekend)")
 
-    def _bevestig(self):
+    def _confirm(self):
         self.auto_per_frame = self.chk_per_frame.isChecked()
         self.accept()
 
-    def _geen_kanteling(self):
+    def _no_tilt(self):
         self.horizon_deg = 0.0
         self.auto_per_frame = False
         self.accept()
 
 
-class KalibratieKiezer(QDialog):
+class CalibrationPicker(QDialog):
     """
-    Perspectiefkalibratie via baanlijnen (fase 7, vaste camera). De gebruiker trekt
-    op het eerste frame lijnen na (elke lijn = twee klikken): baanlijnen die in
-    werkelijkheid evenwijdig in de rijrichting lopen, en dwarslijnen die er haaks op
-    staan. De dialoog kalibreert live mee en tekent de gevonden ware horizon; de
-    Bevestig-knop kan pas als de kalibratie slaagt. Resultaat in `self.perspectief`
-    (PerspectiveConfig).
+    Perspective calibration via track lines (phase 7, fixed camera). The user traces
+    lines on the first frame (each line = two clicks): track lines that in reality run
+    parallel in the direction of travel, and cross lines perpendicular to them. The
+    dialog calibrates live as you go and draws the found true horizon; the Confirm
+    button only becomes available once the calibration succeeds. Result in
+    `self.perspectief` (PerspectiveConfig).
 
-    Minimaal nodig: 2 baanlijnen + 2 dwarslijnen, óf 3 baanlijnen + 1 dwarslijn, óf
-    2 baanlijnen + 1 dwarslijn + een opgegeven brandpuntsafstand (frontale camera's
-    kúnnen alleen met opgegeven brandpuntsafstand).
+    Minimum needed: 2 track lines + 2 cross lines, or 3 track lines + 1 cross line, or
+    2 track lines + 1 cross line + a given focal length (a frontal camera can only work
+    with a given focal length).
     """
-    KLEUR_RIJ = QColor(60, 200, 255)     # cyaan
-    KLEUR_DWARS = QColor(255, 170, 40)   # oranje
-    KLEUR_HORIZON = QColor(240, 240, 240)
+    COLOR_TRACK = QColor(60, 200, 255)     # cyan
+    COLOR_CROSS = QColor(255, 170, 40)     # orange
+    COLOR_HORIZON = QColor(240, 240, 240)
 
-    def __init__(self, frame_bgr, parent=None, invoer=None, config=None):
-        """`invoer`/`config`: een eerder gemaakte kalibratie om mee te beginnen (zelfde
-        camerastand hergebruiken). De lijnen staan dan al getekend en zijn nog te
-        corrigeren — hergebruiken en aanpassen is één en dezelfde handeling."""
+    def __init__(self, frame_bgr, parent=None, calibration_input=None, config=None):
+        """`calibration_input`/`config`: a previously made calibration to start from
+        (reusing the same camera pose). The lines are then already drawn and can still
+        be corrected — reusing and adjusting is one and the same action."""
         super().__init__(parent)
         self.setWindowTitle("Perspectiefkalibratie: trek de baanlijnen na")
         self.perspectief = None
         self._frame = frame_bgr
-        self._rijlijnen = []             # [((x,y),(x,y))] in originele pixels
-        self._dwarslijnen = []
-        self._klik_punt = None           # eerste punt van een lijn-in-wording
-        self._kalibratie = None
-        self._invoer = None              # CalibrationInput van de huidige lijnen
+        self._track_lines = []           # [((x,y),(x,y))] in original pixels
+        self._cross_lines = []
+        self._click_point = None         # first point of a line being drawn
+        self._calibration = None
+        self._calibration_input = None   # CalibrationInput of the current lines
         self._scaled_size = None
         self._scale = 1.0
 
@@ -1378,12 +1400,12 @@ class KalibratieKiezer(QDialog):
             "Trek elke lijn met twee klikken. Baanlijnen: evenwijdig in de rijrichting "
             "(volgorde maakt niet uit).\nDwarslijnen: haaks erop (start-/finishlijn, "
             "bochtmarkering). Trek zo lang mogelijke lijnen — dat is nauwkeuriger.")
-        uitleg.setWordWrap(True)      # zie DoelKiezer: geen dialoogbreedte uit een tekstregel
+        uitleg.setWordWrap(True)      # see TargetPicker: no dialog width from one text line
         links.addWidget(uitleg)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumSize(640, 400)
-        self.label.mousePressEvent = self._klik
+        self.label.mousePressEvent = self._click
         links.addWidget(self.label, 1)
         hoofd.addLayout(links, 1)
 
@@ -1400,19 +1422,19 @@ class KalibratieKiezer(QDialog):
 
         knoppen_lijn = QHBoxLayout()
         btn_wis_laatste = QPushButton("Laatste lijn wissen")
-        btn_wis_laatste.clicked.connect(self._wis_laatste)
+        btn_wis_laatste.clicked.connect(self._undo_last)
         btn_wis_alles = QPushButton("Alles wissen")
-        btn_wis_alles.clicked.connect(self._wis_alles)
+        btn_wis_alles.clicked.connect(self._clear_all)
         knoppen_lijn.addWidget(btn_wis_laatste)
         knoppen_lijn.addWidget(btn_wis_alles)
         rechts.addLayout(knoppen_lijn)
 
-        # Alleen-hoeken is de standaard: de afzethoek is schaalvrij, dus zonder bekende
-        # lijnafstand is hij exact (nagemeten: 0,00° fout, of je nu 0,5 of 50 m invult).
-        # Meters heb je alleen nodig voor snelheid/slaglengte — en de méthode 'onderbeen'
-        # rekent met een onderbeenlengte in échte meters, dus die kan hier niet mee (een
-        # verzonnen afstand gaf daar 49° fout, stilzwijgend). Vandaar de koppeling
-        # hieronder: alleen-hoeken ⇒ 'beenvlak', dat geen enkele lengte gebruikt.
+        # Angles-only is the default: the push angle is scale-free, so without a known
+        # line distance it's exact (measured: 0.00° off, whether you enter 0.5 m or 50 m).
+        # Meters are only needed for speed/stroke length — and the 'lower_leg' method
+        # computes with a lower-leg length in real meters, so it can't work here (a made-up
+        # distance gave 49° off there, silently). Hence the coupling below: angles-only ⇒
+        # 'leg_plane', which uses no length at all.
         self.chk_alleen_hoeken = QCheckBox("Alleen hoeken (geen snelheid/slaglengte)")
         self.chk_alleen_hoeken.setChecked(True)
         self.chk_alleen_hoeken.setToolTip(
@@ -1422,7 +1444,7 @@ class KalibratieKiezer(QDialog):
             "Uitzetten alleen als je snelheid (m/s) en slaglengte (m) in de tabel wilt, óf\n"
             "als je met de reconstructiemethode 'onderbeenlengte' wilt werken — die rekent\n"
             "met een lengte in echte meters en heeft dus een echte lijnafstand nodig.")
-        self.chk_alleen_hoeken.toggled.connect(self._schaal_gewijzigd)
+        self.chk_alleen_hoeken.toggled.connect(self._scale_changed)
         rechts.addWidget(self.chk_alleen_hoeken)
 
         vorm = QFormLayout()
@@ -1431,7 +1453,7 @@ class KalibratieKiezer(QDialog):
         self.spin_lijnafstand.setSingleStep(0.5)
         self.spin_lijnafstand.setValue(skate_perspective.DEFAULT_LINE_DISTANCE)
         self.spin_lijnafstand.setSuffix(" m")
-        self.spin_lijnafstand.valueChanged.connect(self._herkalibreer)
+        self.spin_lijnafstand.valueChanged.connect(self._recalibrate)
         self.lbl_lijnafstand = QLabel("Afstand tussen baanlijnen:")
         vorm.addRow(self.lbl_lijnafstand, self.spin_lijnafstand)
 
@@ -1443,17 +1465,17 @@ class KalibratieKiezer(QDialog):
             "Brandpuntsafstand in pixels. Normaal schat de kalibratie hem zelf uit de\n"
             "lijnen; bij een (bijna) frontale camera kan dat principieel niet en moet\n"
             "hij hier ingevuld worden (typisch 1–2× de beeldbreedte voor een telefoon).")
-        self.spin_f.valueChanged.connect(self._herkalibreer)
+        self.spin_f.valueChanged.connect(self._recalibrate)
         vorm.addRow("Brandpuntsafstand (px):", self.spin_f)
 
         self.combo_methode = QComboBox()
-        self.combo_methode.addItem("Onderbeenlengte (bol-snijding)", "onderbeen")
-        self.combo_methode.addItem("Beenvlak (rijrichting)", "beenvlak")
+        self.combo_methode.addItem("Onderbeenlengte (bol-snijding)", "lower_leg")
+        self.combo_methode.addItem("Beenvlak (rijrichting)", "leg_plane")
         self.combo_methode.setToolTip(
             "Hoe de knie-diepte wordt gereconstrueerd. Beide zijn experimenteel te\n"
             "vergelijken; 'onderbeenlengte' heeft de lengte hieronder nodig.")
         self.combo_methode.currentIndexChanged.connect(
-            lambda _: self._schaal_gewijzigd(self.chk_alleen_hoeken.isChecked()))
+            lambda _: self._scale_changed(self.chk_alleen_hoeken.isChecked()))
         vorm.addRow("Reconstructie:", self.combo_methode)
 
         self.spin_lengte = QDoubleSpinBox()
@@ -1490,7 +1512,7 @@ class KalibratieKiezer(QDialog):
         knoppen.addStretch(1)
         self.btn_ok = QPushButton("Bevestig")
         self.btn_ok.setEnabled(False)
-        self.btn_ok.clicked.connect(self._bevestig)
+        self.btn_ok.clicked.connect(self._confirm)
         knoppen.addWidget(self.btn_ok)
         rechts.addLayout(knoppen)
 
@@ -1506,45 +1528,51 @@ class KalibratieKiezer(QDialog):
         qimg = QImage(frame_bgr.data, w, h, frame_bgr.strides[0], QImage.Format_BGR888).copy()
         self._pix = QPixmap.fromImage(qimg)
 
-        # Bewust helemaal aan het eind: `_schaal_gewijzigd` verzet de methode-combo, en
-        # dat signaal loopt door naar `_herkalibreer`, die `lbl_status`, `btn_ok` én
-        # `_orig_w` nodig heeft. Alles moet dus al bestaan.
-        self._schaal_gewijzigd(self.chk_alleen_hoeken.isChecked())
+        # Deliberately right at the end: `_scale_changed` moves the method combo, and
+        # that signal flows through to `_recalibrate`, which needs `lbl_status`, `btn_ok`
+        # and `_orig_w`. So everything must already exist.
+        self._scale_changed(self.chk_alleen_hoeken.isChecked())
 
-        if config is not None and invoer is None:
-            invoer = config.invoer
-        if invoer is not None:
-            self._vul_voor(invoer, config)
+        if config is not None and calibration_input is None:
+            calibration_input = config.invoer
+        if calibration_input is not None:
+            self._prefill(calibration_input, config)
         self._render()
 
-    def _vul_voor(self, invoer, config=None):
-        """Zet een bestaande kalibratie in de dialoog. De beeldmaat moet kloppen: de
-        lijnen staan in pixels, dus op een andersgrote video zouden ze er stilzwijgend
-        naast liggen en een plausibele maar foute kalibratie opleveren."""
-        if not invoer.fits(self._orig_w, self._orig_h):
+    def _prefill(self, calibration_input, config=None):
+        """Puts an existing calibration into the dialog. The image size must match: the
+        lines are in pixels, so on a differently-sized video they'd silently land in the
+        wrong place and produce a plausible but wrong calibration."""
+        if not calibration_input.fits(self._orig_w, self._orig_h):
             QMessageBox.warning(
                 self, "Kalibratie past niet",
-                f"Die kalibratie is gemaakt op beeld van {invoer.image_w}×{invoer.image_h} "
-                f"en deze video is {self._orig_w}×{self._orig_h}. De lijnen staan in "
-                f"pixels, dus overnemen zou ze verkeerd neerleggen. Trek ze opnieuw na.")
+                f"Die kalibratie is gemaakt op beeld van {calibration_input.image_w}×"
+                f"{calibration_input.image_h} en deze video is {self._orig_w}×"
+                f"{self._orig_h}. De lijnen staan in pixels, dus overnemen zou ze "
+                f"verkeerd neerleggen. Trek ze opnieuw na.")
             return
-        self._rijlijnen = list(invoer.track_lines)
-        self._dwarslijnen = list(invoer.cross_lines)
-        self.spin_lijnafstand.setValue(invoer.line_distance)
-        self.spin_f.setValue(int(invoer.f_px or 0))
-        # Eerst de schaalvlag, dan pas methode/lengte: `_schaal_gewijzigd` zet de methode
-        # vast op 'beenvlak' zodra alleen-hoeken aan staat, en zou een daarvóór gezette
-        # keuze weer overschrijven.
-        self.chk_alleen_hoeken.setChecked(not invoer.scale_known)
+        self._track_lines = list(calibration_input.track_lines)
+        self._cross_lines = list(calibration_input.cross_lines)
+        self.spin_lijnafstand.setValue(calibration_input.line_distance)
+        self.spin_f.setValue(int(calibration_input.f_px or 0))
+        # Scale flag first, method/length after: `_scale_changed` pins the method to
+        # 'leg_plane' as soon as angles-only is on, and would overwrite a choice set
+        # before it.
+        self.chk_alleen_hoeken.setChecked(not calibration_input.scale_known)
         if config is not None:
-            idx = self.combo_methode.findData(config.methode)
+            # `config.methode` may still hold an old on-disk value ('onderbeen'/
+            # 'beenvlak', from an analysis saved before Phase 3) -- same normalization
+            # as the shim in `skate_perspective.reconstruct_angle()`.
+            methode = {"onderbeen": "lower_leg", "beenvlak": "leg_plane"}.get(
+                config.methode, config.methode)
+            idx = self.combo_methode.findData(methode)
             if idx >= 0:
                 self.combo_methode.setCurrentIndex(idx)
             if config.onderbeen_l:
                 self.spin_onderbeen.setValue(config.onderbeen_l * 100.0)
-        self._herkalibreer()
+        self._recalibrate()
 
-    # ── tekenen ──────────────────────────────────────────────────────────
+    # ── drawing ──────────────────────────────────────────────────────────
     def _render(self):
         scaled = self._pix.scaled(self.label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._scaled_size = scaled.size()
@@ -1552,8 +1580,8 @@ class KalibratieKiezer(QDialog):
 
         painter = QPainter(scaled)
         s = self._scale
-        for lijnen, kleur, prefix in ((self._rijlijnen, self.KLEUR_RIJ, "R"),
-                                      (self._dwarslijnen, self.KLEUR_DWARS, "D")):
+        for lijnen, kleur, prefix in ((self._track_lines, self.COLOR_TRACK, "R"),
+                                      (self._cross_lines, self.COLOR_CROSS, "D")):
             painter.setPen(QPen(kleur, 3))
             for i, (p1, p2) in enumerate(lijnen, start=1):
                 x1, y1 = p1[0] * s, p1[1] * s
@@ -1561,18 +1589,18 @@ class KalibratieKiezer(QDialog):
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
                 painter.drawText(int((x1 + x2) / 2) + 6, int((y1 + y2) / 2) - 6,
                                  f"{prefix}{i}")
-        if self._klik_punt is not None:
-            kleur = self.KLEUR_RIJ if self.radio_rij.isChecked() else self.KLEUR_DWARS
+        if self._click_point is not None:
+            kleur = self.COLOR_TRACK if self.radio_rij.isChecked() else self.COLOR_CROSS
             painter.setPen(QPen(kleur, 3))
-            px, py = self._klik_punt[0] * s, self._klik_punt[1] * s
+            px, py = self._click_point[0] * s, self._click_point[1] * s
             painter.drawEllipse(int(px) - 4, int(py) - 4, 8, 8)
-        if self._kalibratie is not None:
-            # ware horizon (verdwijnlijn van het ijsvlak) als visuele controle
-            a, b, c = self._kalibratie.horizon_line
+        if self._calibration is not None:
+            # true horizon (vanishing line of the ice plane) as a visual check
+            a, b, c = self._calibration.horizon_line
             if abs(b) > 1e-9:
                 y0 = -(c + a * 0.0) / b * s
                 y1 = -(c + a * self._orig_w) / b * s
-                painter.setPen(QPen(self.KLEUR_HORIZON, 1, Qt.DashLine))
+                painter.setPen(QPen(self.COLOR_HORIZON, 1, Qt.DashLine))
                 painter.drawLine(0, int(y0), int(self._orig_w * s), int(y1))
         painter.end()
 
@@ -1582,8 +1610,8 @@ class KalibratieKiezer(QDialog):
         self._render()
         super().resizeEvent(event)
 
-    # ── interactie ───────────────────────────────────────────────────────
-    def _klik(self, event):
+    # ── interaction ──────────────────────────────────────────────────────
+    def _click(self, event):
         if self._scaled_size is None:
             return
         sw, sh = self._scaled_size.width(), self._scaled_size.height()
@@ -1593,67 +1621,68 @@ class KalibratieKiezer(QDialog):
         oy = (event.position().y() - offy) / self._scale
         if not (0 <= ox <= self._orig_w and 0 <= oy <= self._orig_h):
             return
-        if self._klik_punt is None:
-            self._klik_punt = (ox, oy)
+        if self._click_point is None:
+            self._click_point = (ox, oy)
         else:
-            lijn = (self._klik_punt, (ox, oy))
-            self._klik_punt = None
+            lijn = (self._click_point, (ox, oy))
+            self._click_point = None
             if np.hypot(lijn[1][0] - lijn[0][0], lijn[1][1] - lijn[0][1]) < 10:
                 self.lbl_status.setText("Lijn te kort — klik twee punten verder uit elkaar.")
             elif self.radio_rij.isChecked():
-                self._rijlijnen.append(lijn)
+                self._track_lines.append(lijn)
             else:
-                self._dwarslijnen.append(lijn)
-            self._herkalibreer()
+                self._cross_lines.append(lijn)
+            self._recalibrate()
         self._render()
 
-    def _wis_laatste(self):
-        if self._klik_punt is not None:
-            self._klik_punt = None
-        elif self._dwarslijnen and (self.radio_dwars.isChecked() or not self._rijlijnen):
-            self._dwarslijnen.pop()
-        elif self._rijlijnen:
-            self._rijlijnen.pop()
-        self._herkalibreer()
+    def _undo_last(self):
+        if self._click_point is not None:
+            self._click_point = None
+        elif self._cross_lines and (self.radio_dwars.isChecked() or not self._track_lines):
+            self._cross_lines.pop()
+        elif self._track_lines:
+            self._track_lines.pop()
+        self._recalibrate()
         self._render()
 
-    def _wis_alles(self):
-        self._rijlijnen = []
-        self._dwarslijnen = []
-        self._klik_punt = None
-        self._herkalibreer()
+    def _clear_all(self):
+        self._track_lines = []
+        self._cross_lines = []
+        self._click_point = None
+        self._recalibrate()
         self._render()
 
     @staticmethod
-    def _lijn_hint(n_rij):
-        """Extra uitleg bij een mislukte kalibratie met 3+ baanlijnen.
+    def _line_hint(n_track):
+        """Extra explanation for a failed calibration with 3+ track lines.
 
-        Met drie of meer baanlijnen bouwt de kalibratie de verdwijnlijn met de
-        kruisverhouding, en die gebruikt hun onderlinge afstanden — de dialoog neemt aan
-        dat ze **gelijkmatig** verdeeld zijn. Zijn ze dat niet (blauwe baanlijn, ijsrand
-        en boardingvoet liggen zelden op gelijke afstand), dan is het stelsel niet met
-        één camera te rijmen en volgt een 'f² ≤ 0'-melding die die oorzaak niet noemt.
-        Nagemeten: ongelijk verdeeld + verteld als gelijk = geweigerd; met de juiste
-        onderlinge afstanden = 0,00° fout. Het gaat dus nooit stilzwijgend mis."""
-        if n_rij < 3:
+        With three or more track lines the calibration builds the vanishing line using
+        the cross-ratio, and that uses their mutual distances — the dialog assumes
+        they're **evenly** spaced. If they're not (a blue track line, ice edge, and
+        boarding foot rarely sit at equal distances), the system can't be reconciled
+        with a single camera and an 'f² ≤ 0' message follows that doesn't name that
+        cause. Measured: unevenly spaced + told it's even = refused; with the correct
+        mutual distances = 0.00° off. So it never fails silently."""
+        if n_track < 3:
             return ""
         return ("\n\nTip: met 3+ baanlijnen wordt aangenomen dat ze GELIJKMATIG verdeeld "
                 "zijn. Zijn ze dat niet, gebruik dan precies 2 baanlijnen + 2 "
                 "dwarslijnen — dan doet hun onderlinge afstand niet meer mee.")
 
-    # ── schaal aan/uit ───────────────────────────────────────────────────
-    def _schaal_gewijzigd(self, alleen_hoeken):
-        """Koppelt 'alleen hoeken' aan de velden die een echte schaal veronderstellen.
+    # ── scale on/off ───────────────────────────────────────────────────────
+    def _scale_changed(self, alleen_hoeken):
+        """Couples 'angles only' to the fields that assume a real scale.
 
-        Zonder bekende lijnafstand zijn de wereldcoördinaten op een willekeurige factor
-        na bepaald. Voor `beenvlak` maakt dat niets uit (de hoek volgt uit richtingen),
-        maar `onderbeen` snijdt met een bol van een lengte in échte meters — die factor
-        werkt daar direct door in de hoek. Daarom wordt de methode dan vastgezet op
-        `beenvlak` in plaats van de gebruiker een stille foutbron te laten kiezen."""
+        Without a known line distance, the world coordinates are determined up to an
+        arbitrary factor. For `leg_plane` that doesn't matter (the angle follows from
+        directions), but `lower_leg` intersects with a sphere of a length in real
+        meters — that factor feeds straight into the angle there. That's why the method
+        gets pinned to `leg_plane` then, instead of letting the user pick a silent
+        source of error."""
         for w in (self.spin_lijnafstand, self.lbl_lijnafstand):
             w.setEnabled(not alleen_hoeken)
         if alleen_hoeken:
-            idx = self.combo_methode.findData("beenvlak")
+            idx = self.combo_methode.findData("leg_plane")
             if idx >= 0:
                 self.combo_methode.setCurrentIndex(idx)
         self.combo_methode.setEnabled(not alleen_hoeken)
@@ -1664,21 +1693,21 @@ class KalibratieKiezer(QDialog):
             if alleen_hoeken else
             "Hoe de knie-diepte wordt gereconstrueerd. Beide zijn experimenteel te\n"
             "vergelijken; 'onderbeenlengte' heeft de lengte hieronder nodig.")
-        # De lengtevelden horen alleen bij 'onderbeen'.
+        # The length fields only belong with 'lower_leg'.
         lengte_nodig = (not alleen_hoeken
-                        and self.combo_methode.currentData() == "onderbeen")
+                        and self.combo_methode.currentData() == "lower_leg")
         for w in (self.spin_lengte, self.spin_onderbeen, self.lbl_onderbeen):
             w.setEnabled(lengte_nodig)
         if self.lbl_lengte is not None:
             self.lbl_lengte.setEnabled(lengte_nodig)
-        self._herkalibreer()
+        self._recalibrate()
 
-    # ── kalibratie ───────────────────────────────────────────────────────
+    # ── calibration ──────────────────────────────────────────────────────
     @staticmethod
-    def _sorteer_rijlijnen(lijnen):
-        """Sorteer de baanlijnen ruimtelijk (aangrenzend), zodat de gelijkmatige
-        offsets kloppen ongeacht de tekenvolgorde: projecteer de lijnmiddens op de
-        richting loodrecht op de gemiddelde lijnrichting."""
+    def _sort_track_lines(lijnen):
+        """Sort the track lines spatially (adjacent), so the even offsets are correct
+        regardless of drawing order: project the line midpoints onto the direction
+        perpendicular to the average line direction."""
         richtingen = []
         for p1, p2 in lijnen:
             d = np.array([p2[0] - p1[0], p2[1] - p1[1]], dtype=float)
@@ -1692,10 +1721,10 @@ class KalibratieKiezer(QDialog):
         return sorted(lijnen, key=lambda seg: float(
             (seg[0][0] + seg[1][0]) / 2 * n[0] + (seg[0][1] + seg[1][1]) / 2 * n[1]))
 
-    def _herkalibreer(self):
-        self._kalibratie = None
-        self._invoer = None
-        n_rij, n_dwars = len(self._rijlijnen), len(self._dwarslijnen)
+    def _recalibrate(self):
+        self._calibration = None
+        self._calibration_input = None
+        n_rij, n_dwars = len(self._track_lines), len(self._cross_lines)
         if n_rij < 2 or n_dwars < 1:
             self.lbl_status.setText(
                 f"Getekend: {n_rij} baanlijn(en), {n_dwars} dwarslijn(en).\n"
@@ -1704,34 +1733,34 @@ class KalibratieKiezer(QDialog):
             self.btn_ok.setEnabled(False)
             self._render()
             return
-        # Via de invoer kalibreren (niet rechtstreeks): dan loopt wat hier live te zien
-        # is langs exact dezelfde weg als een later heropende analyse.
+        # Calibrate via the input (not directly): that way what's shown live here
+        # travels exactly the same path as a later reopened analysis.
         alleen_hoeken = self.chk_alleen_hoeken.isChecked()
-        invoer = skate_perspective.CalibrationInput(
-            track_lines=self._sorteer_rijlijnen(self._rijlijnen),
-            cross_lines=list(self._dwarslijnen),
+        calibration_input = skate_perspective.CalibrationInput(
+            track_lines=self._sort_track_lines(self._track_lines),
+            cross_lines=list(self._cross_lines),
             image_w=self._orig_w, image_h=self._orig_h,
             line_distance=self.spin_lijnafstand.value(),
             scale_known=not alleen_hoeken,
             f_px=self.spin_f.value() or None)
         try:
-            self._kalibratie = invoer.calibrate()
-            self._invoer = invoer
+            self._calibration = calibration_input.calibrate()
+            self._calibration_input = calibration_input
         except ValueError as e:
-            self.lbl_status.setText(f"Kalibratie lukt nog niet: {e}{self._lijn_hint(n_rij)}")
+            self.lbl_status.setText(f"Kalibratie lukt nog niet: {e}{self._line_hint(n_rij)}")
             self.btn_ok.setEnabled(False)
             self._render()
             return
-        kal = self._kalibratie
-        # Zonder bekende schaal is de camerahoogte in willekeurige eenheden; die dan
-        # in meters tonen zou een precisie suggereren die er niet is.
+        kal = self._calibration
+        # Without a known scale, the camera height is in arbitrary units; showing that
+        # in meters would suggest a precision that isn't there.
         hoogte = (f"camerahoogte {kal.camera_height:.1f} m, " if kal.scale_known
                   else "")
-        # Met precies 2 baanlijnen + 2 dwarslijnen is het stelsel exact bepaald: het
-        # residu is dan per constructie 0,00 px en zegt niets over de kwaliteit —
-        # tonen zou als "perfect gekalibreerd" gelezen worden. Een derde dwarslijn
-        # maakt V2 een kleinste-kwadraten-fit en het residu wél informatief.
-        overbepaald = len(self._dwarslijnen) >= 3 or len(self._rijlijnen) >= 3
+        # With exactly 2 track lines + 2 cross lines the system is exactly determined:
+        # the residual is then 0.00 px by construction and says nothing about quality —
+        # showing it would read as "perfectly calibrated". A third cross line turns V2
+        # into a least-squares fit and makes the residual actually informative.
+        overbepaald = len(self._cross_lines) >= 3 or len(self._track_lines) >= 3
         residu = (f", residu {kal.residual_px:.1f} px" if overbepaald else "")
         tekst = (f"Kalibratie OK — f = {kal.f:.0f} px"
                  f"{' (geschat)' if kal.f_estimated else ''}, {hoogte}"
@@ -1748,24 +1777,24 @@ class KalibratieKiezer(QDialog):
         self.btn_ok.setEnabled(True)
         self._render()
 
-    def _bevestig(self):
-        if self._kalibratie is None:
+    def _confirm(self):
+        if self._calibration is None:
             return
-        methode = self.combo_methode.currentData()
-        # 'beenvlak' gebruikt geen lengte; er dan tóch een meegeven zou in de opslag en
-        # de Info-dialoog suggereren dat hij de meting beïnvloedt.
-        if methode == "onderbeen":
-            onderbeen_l = (self.spin_onderbeen.value() / 100.0
+        method = self.combo_methode.currentData()
+        # 'leg_plane' uses no length; passing one anyway would suggest in storage and
+        # the Info dialog that it affects the measurement.
+        if method == "lower_leg":
+            lower_leg_l = (self.spin_onderbeen.value() / 100.0
                            if self.spin_onderbeen.value() > 0
                            else skate_perspective.lower_leg_from_body_height(
                                self.spin_lengte.value()))
         else:
-            onderbeen_l = None
+            lower_leg_l = None
         self.perspectief = PerspectiveConfig(
-            kalibratie=self._kalibratie,
-            methode=methode,
-            onderbeen_l=onderbeen_l,
-            invoer=self._invoer)
+            calibration=self._calibration,
+            method=method,
+            lower_leg_l=lower_leg_l,
+            calibration_input=self._calibration_input)
         self.accept()
 
 
@@ -7053,7 +7082,7 @@ class MainWindow(QMainWindow):
 
     def _kies_perspectief(self, frame0):
         """Perspectiefkalibratie voor één video: eerst aanbieden om er een uit een
-        eerdere analyse over te nemen (zelfde camerastand), dan de `KalibratieKiezer`
+        eerdere analyse over te nemen (zelfde camerastand), dan de `CalibrationPicker`
         — voorgevuld als er iets overgenomen is, zodat controleren en corrigeren
         dezelfde handeling blijft. Retourneert een PerspectiveConfig, of None bij
         afbreken.
@@ -7097,7 +7126,7 @@ class MainWindow(QMainWindow):
                         "Trek de lijnen opnieuw na.")
                     config = invoer = None
 
-        kdlg = KalibratieKiezer(frame0, self, invoer=invoer, config=config)
+        kdlg = CalibrationPicker(frame0, self, calibration_input=invoer, config=config)
         if show_dialog(kdlg) != QDialog.Accepted:
             return None
         return kdlg.perspectief
@@ -7375,7 +7404,7 @@ class MainWindow(QMainWindow):
     def _kies_doelschaatser(self, frame0):
         """Toont het eerste frame in een kiezer. Retourneert `(doel_punt, doel_kader)` —
         elk genormaliseerd of None ('volg grootste') — of False (afgebroken)."""
-        dlg = DoelKiezer(frame0, self)
+        dlg = TargetPicker(frame0, self)
         if show_dialog(dlg) != QDialog.Accepted:
             return False
         return dlg.doel_punt, dlg.doel_kader
@@ -7385,7 +7414,7 @@ class MainWindow(QMainWindow):
         Laat de ijslijn/kanteling instellen. Retourneert (graden, auto_per_frame) of
         False (afgebroken).
         """
-        dlg = HorizonKiezer(frame0, self)
+        dlg = HorizonPicker(frame0, self)
         if show_dialog(dlg) != QDialog.Accepted:
             return False
         return dlg.horizon_deg, dlg.auto_per_frame

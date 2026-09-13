@@ -203,9 +203,9 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
 
     frame = np.full((1080, 1920, 3), 120, np.uint8)
     schaatsers = schaats_db.lijst_schaatsers(bieb)
-    dialoog("DoelKiezer", lambda: G.DoelKiezer(frame))
-    dialoog("HorizonKiezer", lambda: G.HorizonKiezer(frame))
-    dialoog("KalibratieKiezer", lambda: G.KalibratieKiezer(frame))
+    dialoog("TargetPicker", lambda: G.TargetPicker(frame))
+    dialoog("HorizonPicker", lambda: G.HorizonPicker(frame))
+    dialoog("CalibrationPicker", lambda: G.CalibrationPicker(frame))
     dialoog("SchaatserDialog", lambda: G.SchaatserDialog())
     dialoog("NieuweAnalyseDialog", lambda: G.NieuweAnalyseDialog(schaatsers))
     dialoog("BatchAnalyseDialog", lambda: G.BatchAnalyseDialog(schaatsers))
