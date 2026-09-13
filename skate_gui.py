@@ -521,13 +521,13 @@ PLAY_OVERSAMPLE = 3
 # ticks per second.
 PLAY_TICK_MIN_MS = 4
 
-# Scrubbing with . and , — everywhere in the app, see `SpelerToetsen`. 6x the recording
+# Scrubbing with . and , — everywhere in the app, see `PlayerKeys`. 6x the recording
 # speed: fast enough to get through half an hour, slow enough to see when you've shot
 # past something. The tick is an upper bound on smoothness — the target frame follows
 # from the wall clock, so it stays 6x even if the decoder can't keep up (see
-# SpelerToetsen._spoel_tick).
-SPOEL_FACTOR = 6.0
-SPOEL_TICK_MS = 40
+# PlayerKeys._scrub_tick).
+SCRUB_FACTOR = 6.0
+SCRUB_TICK_MS = 40
 
 # One single list of the default keys, so every video window can show the same line and
 # no window grows its own (and thus, over time, diverging) list. A window's extras get
@@ -566,9 +566,9 @@ TRANSPORT_BUTTON_WIDTH = 46
 # and no drift builds up — but it can never show more frames than it ticks, and a fixed
 # 30 ms is less than two frames on high-fps material. Measured on two Kjeld analyses
 # (59.22 fps) side by side at 1x: 55% of the frames, 32 fps on screen, every second frame
-# dropped. `MasterKlok._interval_ms` therefore computes the real interval from the
+# dropped. `MasterClock._interval_ms` therefore computes the real interval from the
 # fastest side; this value is now only the ceiling for slow clips and slow motion.
-ALLES_TICK_MS = 30
+ALL_TICK_MS = 30
 # Decoding two videos at once can't hit 1x anyway, and a trainer is watching technique:
 # default ¼×.
 ALL_SPEED_IDX = _speed_idx(0.25)
@@ -3707,7 +3707,7 @@ class VideoPlayer(QWidget):
         of in delay; a skipped frame only costs a `grab()` (~3 ms) since
         `_read_frame_exact` already spools past it sequentially anyway. Same motive (and
         same shape) as the compare page's master clock and the scrubbing in
-        `SpelerToetsen`.
+        `PlayerKeys`.
         """
         if self.huidige_idx != self._play_last:
             self._calibrate_play_clock()     # scrubbed or jumped in the meantime: recalibrate
@@ -3739,308 +3739,313 @@ class VideoPlayer(QWidget):
         self._play_last = self.huidige_idx
 
 
-class SpelerToetsen(QObject):
+class PlayerKeys(QObject):
     """
-    De toetsen waarmee je een video bekijkt — op elke plek in de app dezelfde.
+    The keys used to view a video — the same everywhere in the app.
 
-    Er wordt op vier plekken beeld afgespeeld (de weergavepagina, de vergelijkpagina, het
-    knipvenster en het kijkvenster) en die deelden alleen de muis: het kijkvenster had
-    spatie/`.`/`,`/pijltjes, het knipvenster alleen `S` en `E`, en de twee pagina's in het
-    hoofdvenster niets — daar moest álles met de knoppen. Deze klasse ís die afhandeling,
-    één keer geschreven; per plek blijven alleen de eigen extra's over (`extra`).
+    Video plays back in four places (the viewing page, the compare page, the trim window,
+    and the viewing window), and they only shared the mouse: the viewing window had
+    space/`.`/`,`/arrow keys, the trim window only `S` and `E`, and the two pages in the
+    main window had nothing — there, everything had to go through the buttons. This class
+    *is* that handling, written once; each place keeps only its own extras (`extra`).
 
-    Waarom een filter op de **applicatie** en geen `keyPressEvent` of `QShortcut`: na één
-    muisklik staat de focus op een knop of op de tijdlijn, en die slikken respectievelijk
-    spatie en de pijltjestoetsen voordat het venster ze ziet. Een filter op QApplication
-    krijgt ze als eerste. Drie dingen horen daarbij:
-      * de niet-toets-tak moet **kort** zijn — hier komt élk event van de hele app langs;
-      * een gefocust **tekstveld** houdt zijn toetsen, anders is er geen naam meer in te
-        typen en belandt een punt niet in de tekst;
-      * toetsen **mét modifier** gaan er ongemoeid doorheen, zodat Ctrl+Z (undo) en Alt+F4
-        blijven werken en Ctrl+← niet stilzwijgend een frame terugspoelt.
+    Why a filter on the **application** and not `keyPressEvent` or `QShortcut`: after one
+    mouse click, focus sits on a button or on the timeline, and those swallow space and
+    the arrow keys respectively before the window ever sees them. A filter on
+    QApplication gets them first. Three things go with that:
+      * the non-key branch must be **short** — every event of the whole app passes
+        through here;
+      * a focused **text field** keeps its own keys, otherwise there's no way to type a
+        name anymore and a period never makes it into the text;
+      * keys **with a modifier** pass through untouched, so Ctrl+Z (undo) and Alt+F4 keep
+        working and Ctrl+Left doesn't silently rewind a frame.
 
-    `spelers` is een callable, want welke spelers er te bedienen zijn hangt van de stand van
-    het venster af (op de vergelijkpagina: welke kanten er gevuld zijn); `actief` is de
-    voorwaarde daarboven — staat de juiste pagina wel open. Is `op_afspelen` gezet, dan gaat
-    afspelen/pauzeren dáárheen in plaats van naar de spelers los: de vergelijkpagina loopt op
-    één masterklok en die mag niet met twee losse timers omzeild worden. Wie `op_afspelen`
-    meegeeft moet ook `is_playing` meegeven, want dan zegt de play_timer van een speler niets
-    meer: onder de masterklok staat die stil terwijl het beeld gewoon loopt, en zonder dat
-    antwoord zou spatie het afspelen opnieuw starten in plaats van het te pauzeren.
+    `players` is a callable, because which players there are to control depends on the
+    state of the window (on the compare page: which sides are filled); `active` is the
+    condition on top of that — is the right page even open. If `on_play` is set,
+    play/pause goes there instead of straight to the players: the compare page runs on
+    one master clock, and that must not be bypassed by two separate timers. Whoever
+    passes `on_play` must also pass `is_playing`, because then a player's own play_timer
+    no longer means anything: under the master clock it stands still while the picture
+    keeps playing, and without that answer, space would restart playback instead of
+    pausing it.
     """
 
-    def __init__(self, venster, spelers, extra=None, actief=None,
-                 op_afspelen=None, is_playing=None, op_spoel=None):
-        super().__init__(venster)
-        self._venster = venster
-        self._spelers = spelers
+    def __init__(self, window, players, extra=None, active=None,
+                 on_play=None, is_playing=None, on_scrub=None):
+        super().__init__(window)
+        self._window = window
+        self._players = players
         self._extra = dict(extra or {})
-        self._actief = actief
-        self._op_afspelen = op_afspelen
-        self._speelt = is_playing
-        self._op_spoel = op_spoel
+        self._active = active
+        self._on_play = on_play
+        self._is_playing = is_playing
+        self._on_scrub = on_scrub
 
-        self._richting = 0      # −1 terug, 0 stil, +1 vooruit
-        self._lopend = []       # [(speler, startframe)] tijdens het spoelen
+        self._direction = 0     # -1 back, 0 idle, +1 forward
+        self._running = []      # [(player, start_frame)] while scrubbing
         self._t0 = 0.0
         self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoPlayer.play_timer
-        self._timer.timeout.connect(self._spoel_tick)
+        self._timer.setTimerType(Qt.PreciseTimer)   # see VideoPlayer.play_timer
+        self._timer.timeout.connect(self._scrub_tick)
         QApplication.instance().installEventFilter(self)
 
-    def losmaken(self):
-        """Bij het sluiten van het venster: spoelen stoppen en het app-filter loslaten."""
-        self.stop_spoelen()
+    def detach(self):
+        """When the window closes: stop scrubbing and release the app-wide filter."""
+        self.stop_scrubbing()
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
 
-    # ── Welke spelers ────────────────────────────────────────────────────
-    def _actieve_spelers(self):
-        spelers = self._spelers() if callable(self._spelers) else self._spelers
-        if isinstance(spelers, VideoPlayer):
-            spelers = [spelers]
-        return [sp for sp in spelers if sp is not None and sp.resultaten]
+    # ── Which players ────────────────────────────────────────────────────
+    def _active_players(self):
+        players = self._players() if callable(self._players) else self._players
+        if isinstance(players, VideoPlayer):
+            players = [players]
+        return [p for p in players if p is not None and p.resultaten]
 
-    def _loopt(self, spelers):
-        """Loopt er beeld? Met een eigen afspeelroute is de play_timer geen antwoord meer —
-        onder de masterklok van de vergelijkpagina staat die stil terwijl het beeld loopt."""
-        if self._speelt is not None:
-            return self._speelt()
-        return any(sp.is_playing() for sp in spelers)
+    def _is_running(self, players):
+        """Is anything playing? With its own playback route, play_timer is no longer the
+        answer — under the compare page's master clock it stands still while the picture
+        keeps playing."""
+        if self._is_playing is not None:
+            return self._is_playing()
+        return any(p.is_playing() for p in players)
 
-    def _pauzeer(self, spelers):
-        if self._op_afspelen is not None:
-            self._op_afspelen(False)
-        for sp in spelers:
-            sp.pause()
+    def _pause(self, players):
+        if self._on_play is not None:
+            self._on_play(False)
+        for p in players:
+            p.pause()
 
-    # ── Doorspoelen met . en , ───────────────────────────────────────────
-    def start_spoelen(self, richting):
-        """Begint te spoelen zolang de toets ingedrukt blijft. Het eerste frame gaat er
-        meteen af, zodat een tíkje op de toets één frame opschuift en vasthouden 6× spoelt —
-        allebei manieren waarop zo'n toets gebruikt wordt."""
-        if self._richting == richting:
+    # ── Scrubbing with . and , ───────────────────────────────────────────
+    def start_scrubbing(self, direction):
+        """Starts scrubbing for as long as the key stays down. The first frame is taken
+        right away, so a quick tap on the key advances exactly one frame and holding it
+        down scrubs at 6x — both are ways this key gets used."""
+        if self._direction == direction:
             return
-        spelers = self._actieve_spelers()
-        if not spelers:
+        players = self._active_players()
+        if not players:
             return
-        # Eerst stoppen en pauzeren, dán pas de eigen state zetten: `_pauzeer` komt via
-        # `op_afspelen` bij de eigenaar uit, en die roept van daaruit `stop_spoelen()` aan
-        # (`_pauzeer_alles` doet dat). Andersom zou dat de zojuist gezette richting meteen
-        # weer op 0 zetten en zou er niets gaan spoelen.
-        self.stop_spoelen()
-        self._pauzeer(spelers)
-        self._richting = richting
-        self._lopend = [(sp, sp.huidige_idx) for sp in spelers]
+        # Stop and pause first, THEN set our own state: `_pause` goes through `on_play`
+        # to the owner, and the owner calls `stop_scrubbing()` from there in turn
+        # (`_pause_all` does that). The other way around would immediately reset the
+        # direction we just set back to 0, and nothing would scrub.
+        self.stop_scrubbing()
+        self._pause(players)
+        self._direction = direction
+        self._running = [(p, p.huidige_idx) for p in players]
         self._t0 = time.monotonic()
-        for sp, vanaf in self._lopend:
-            sp.go_to(vanaf + richting)
-        self._timer.start(SPOEL_TICK_MS)
-        self._meld(f"{'▶▶' if richting > 0 else '◀◀'} {SPOEL_FACTOR:g}×")
+        for p, start in self._running:
+            p.go_to(start + direction)
+        self._timer.start(SCRUB_TICK_MS)
+        self._report(f"{'▶▶' if direction > 0 else '◀◀'} {SCRUB_FACTOR:g}×")
 
-    def stop_spoelen(self, richting=None):
-        if self._richting == 0 or (richting is not None and richting != self._richting):
+    def stop_scrubbing(self, direction=None):
+        if self._direction == 0 or (direction is not None and direction != self._direction):
             return
         self._timer.stop()
-        self._richting = 0
-        self._lopend = []
-        self._meld("")
+        self._direction = 0
+        self._running = []
+        self._report("")
 
-    def _spoel_tick(self):
-        """Het doelframe volgt uit de **wandkloktijd** sinds de toetsdruk, niet uit een vaste
-        stap per tik — hetzelfde motief als de masterklok van de vergelijkpagina. Zo is het
-        echt 6× de opnamesnelheid: haalt de decoder dat niet (achteruit kost elke stap een
-        seek), dan worden er meer frames overgeslagen in plaats van dat het spoelen
-        vertraagt, en er stapelt zich niets op."""
-        verstreken = time.monotonic() - self._t0
-        klaar = True
-        for sp, vanaf in self._lopend:
-            info = sp.video_info
+    def _scrub_tick(self):
+        """The target frame follows from the **wall-clock time** since the key was
+        pressed, not from a fixed step per tick — same motive as the compare page's
+        master clock. That way it's genuinely 6x the recording speed: if the decoder
+        can't keep up (going backward costs a seek per step), more frames get skipped
+        instead of the scrubbing slowing down, and nothing piles up."""
+        elapsed = time.monotonic() - self._t0
+        done = True
+        for p, start in self._running:
+            info = p.video_info
             fps = (info.fps if info is not None else 0) or 30.0
-            stap = max(1, int(round(verstreken * fps * SPOEL_FACTOR)))
-            laatste = len(sp.resultaten) - 1
-            doel = vanaf + self._richting * stap
-            sp.go_to(max(0, min(doel, laatste)))
-            if 0 < doel < laatste:
-                klaar = False
-        if klaar:
-            self.stop_spoelen()     # begin/eind bereikt: er valt niets meer te spoelen
+            step = max(1, int(round(elapsed * fps * SCRUB_FACTOR)))
+            last = len(p.resultaten) - 1
+            target = start + self._direction * step
+            p.go_to(max(0, min(target, last)))
+            if 0 < target < last:
+                done = False
+        if done:
+            self.stop_scrubbing()   # start/end reached: nothing left to scrub
 
-    def _meld(self, tekst):
-        if self._op_spoel is not None:
-            self._op_spoel(tekst)
+    def _report(self, text):
+        if self._on_scrub is not None:
+            self._on_scrub(text)
 
-    # ── Het filter zelf ──────────────────────────────────────────────────
+    # ── The filter itself ──────────────────────────────────────────────────
     def eventFilter(self, obj, event):
-        # Deze eerste tak moet kort zijn: hier komt élk event van de hele applicatie langs.
-        # False = "niet afgehandeld", precies wat QObject.eventFilter ook zou doen.
-        soort = event.type()
-        if soort not in (QEvent.KeyPress, QEvent.KeyRelease):
+        # This first branch must be short: every event of the whole application passes
+        # through here. False = "not handled", exactly what QObject.eventFilter would do
+        # too.
+        kind = event.type()
+        if kind not in (QEvent.KeyPress, QEvent.KeyRelease):
             return False
-        if not self._venster.isActiveWindow():
+        if not self._window.isActiveWindow():
             return False
-        if self._actief is not None and not self._actief():
+        if self._active is not None and not self._active():
             return False
         if isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit)):
             return False
         if event.modifiers() & ~Qt.KeypadModifier:
             return False
 
-        toets = event.key()
-        richting = {Qt.Key_Period: 1, Qt.Key_Comma: -1}.get(toets)
-        if richting is not None:
-            # Autorepeat overslaan: tijdens het vasthouden stuurt Windows een stroom
-            # press/release-paren, en die zouden het spoelen elke ~30 ms opnieuw starten —
-            # waarmee de wandklok telkens op nul valt en er niets meer opschiet.
+        key = event.key()
+        direction = {Qt.Key_Period: 1, Qt.Key_Comma: -1}.get(key)
+        if direction is not None:
+            # Skip autorepeat: while a key is held down, Windows sends a stream of
+            # press/release pairs, and those would restart scrubbing roughly every
+            # 30 ms — resetting the wall clock to zero each time so nothing advances.
             if not event.isAutoRepeat():
-                if soort == QEvent.KeyPress:
-                    self.start_spoelen(richting)
+                if kind == QEvent.KeyPress:
+                    self.start_scrubbing(direction)
                 else:
-                    self.stop_spoelen(richting)
+                    self.stop_scrubbing(direction)
             return True
-        if soort != QEvent.KeyPress:
+        if kind != QEvent.KeyPress:
             return False
 
-        # Venster-eigen toetsen gaan vóór: een plek mag een standaardtoets overnemen.
-        handler = self._extra.get(toets)
+        # A window's own keys go first: a place is allowed to take over a default key.
+        handler = self._extra.get(key)
         if handler is not None:
             handler()
             return True
 
-        if toets == Qt.Key_F11:
-            toggle_fullscreen(self._venster)
+        if key == Qt.Key_F11:
+            toggle_fullscreen(self._window)
             return True
 
-        spelers = self._actieve_spelers()
-        if not spelers:
+        players = self._active_players()
+        if not players:
             return False
 
-        if toets == Qt.Key_Space:
-            self.stop_spoelen()
-            # Eén beslissing voor alle spelers: loopt er beeld, dan stopt het allemaal.
-            # Per speler los beslissen laat twee video's naast elkaar uit de pas lopen.
-            if self._loopt(spelers):
-                self._pauzeer(spelers)
-            elif self._op_afspelen is not None:
-                self._op_afspelen(True)
+        if key == Qt.Key_Space:
+            self.stop_scrubbing()
+            # One decision for all players: if anything is playing, everything stops.
+            # Deciding per player separately lets two videos side by side drift apart.
+            if self._is_running(players):
+                self._pause(players)
+            elif self._on_play is not None:
+                self._on_play(True)
             else:
-                for sp in spelers:
-                    sp.play()
-        elif toets in (Qt.Key_Left, Qt.Key_Right):
-            self.stop_spoelen()
-            self._pauzeer(spelers)
-            stap = 1 if toets == Qt.Key_Right else -1
-            for sp in spelers:
-                sp.go_to(sp.huidige_idx + stap)
-        elif toets == Qt.Key_Home:
-            self.stop_spoelen()
-            for sp in spelers:
-                sp.go_to(0)
-        elif toets == Qt.Key_End:
-            self.stop_spoelen()
-            for sp in spelers:
-                sp.go_to(len(sp.resultaten) - 1)
+                for p in players:
+                    p.play()
+        elif key in (Qt.Key_Left, Qt.Key_Right):
+            self.stop_scrubbing()
+            self._pause(players)
+            step = 1 if key == Qt.Key_Right else -1
+            for p in players:
+                p.go_to(p.huidige_idx + step)
+        elif key == Qt.Key_Home:
+            self.stop_scrubbing()
+            for p in players:
+                p.go_to(0)
+        elif key == Qt.Key_End:
+            self.stop_scrubbing()
+            for p in players:
+                p.go_to(len(p.resultaten) - 1)
         else:
             return False
         return True
 
 
-class MasterKlok(QObject):
+class MasterClock(QObject):
     """
-    Eén klok die twee (of meer) spelers tegelijk laat lopen.
+    One clock that runs two (or more) players at the same time.
 
-    Twee losse frame-timers lopen binnen enkele seconden uit de pas — twee decodes +
-    overlay + rescale kosten meer dan één timerinterval — en zouden bij verschillende fps
-    sowieso niet kloppen. Daarom rekent `_tick` het doelframe per speler uit de verstreken
-    wandkloktijd × de eigen fps: zelfcorrigerend, dus geen drift, en bij traag decoderen
-    worden frames overgeslagen in plaats van dat de kanten uit elkaar lopen.
+    Two separate frame timers drift apart within a few seconds — two decodes + overlay +
+    rescale cost more than one timer interval — and wouldn't line up at different fps
+    anyway. So `_tick` computes each player's target frame from the elapsed wall-clock
+    time x its own fps: self-correcting, so no drift, and under slow decoding, frames get
+    skipped instead of the two sides drifting apart.
 
-    Gedeeld door de vergelijkpagina (twee analyses) en het kijkvenster (twee ruwe video's);
-    de eigenaar regelt zelf wat er vóór het starten gebeurt (naar het sync-punt springen,
-    andere weergaven pauzeren) en geeft de spelers mee. `factor` is een callable die de
-    afspeelsnelheid oplevert, want die staat in een combo van de eigenaar.
+    Shared by the compare page (two analyses) and the viewing window (two raw videos);
+    the owner handles what happens before starting (jumping to the sync point, pausing
+    other views) and passes in the players. `factor` is a callable that returns the
+    playback speed, since that lives in a combo box owned by the caller.
     """
 
-    def __init__(self, parent, factor, op_klaar=None):
+    def __init__(self, parent, factor, on_done=None):
         super().__init__(parent)
-        self._factor_bron = factor
-        self._op_klaar = op_klaar      # aangeroepen als de klok zelf het einde bereikt
+        self._factor_source = factor
+        self._on_done = on_done     # called when the clock itself reaches the end
         self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)   # zie VideoPlayer.play_timer
+        self._timer.setTimerType(Qt.PreciseTimer)   # see VideoPlayer.play_timer
         self._timer.timeout.connect(self._tick)
-        self._lopend = []     # [(VideoPlayer, basisframe)] tijdens het samen afspelen
+        self._running = []    # [(VideoPlayer, base_frame)] while playing together
         self._t0 = 0.0
         self._factor = 1.0
 
-    def loopt(self):
+    def is_running(self):
         return self._timer.isActive()
 
-    def start(self, spelers):
-        """Laat deze spelers vanaf hun huidige frame samen lopen."""
-        self._lopend = [(sp, max(0, sp.huidige_idx)) for sp in spelers]
-        self._factor = self._factor_bron() or 1.0
+    def start(self, players):
+        """Runs these players together, starting from their current frame."""
+        self._running = [(p, max(0, p.huidige_idx)) for p in players]
+        self._factor = self._factor_source() or 1.0
         self._t0 = time.monotonic()
         self._timer.start(self._interval_ms())
 
     def stop(self):
-        """Stopt de klok én pauzeert de spelers die eronder liepen — alleen díe. Hun eigen
-        timer stond al stil, maar hun vooruitlezer niet, en die houdt de capture vast plus
-        tot 96 MB aan gedecodeerde frames waar niemand meer op wacht. Bewust niet álle
-        spelers van de eigenaar: deze methode hangt ook aan de ▶-knop van elke kant
-        ("handmatig overnemen"), en die knop heeft zijn eigen `_toggle_playback` al vóór
-        ons laten lopen — wie dan alles pauzeert, maakt ▶ per kant onbruikbaar."""
+        """Stops the clock and pauses only the players that were running under it. Their
+        own timer already stood still, but their forward reader didn't, and that holds
+        on to the capture plus up to 96 MB of decoded frames nobody's waiting on anymore.
+        Deliberately not all of the owner's players: this method also hangs off each
+        side's own play button ("take over manually"), and that button already ran its
+        own `_toggle_playback` before us — pausing everything here would make each
+        side's own play button useless."""
         if self._timer.isActive():
             self._timer.stop()
-        lopend, self._lopend = self._lopend, []
-        for sp, _ in lopend:
-            sp.pause()
+        running, self._running = self._running, []
+        for p, _ in running:
+            p.pause()
 
-    def herijk(self):
-        """Bij een snelheidswissel: opnieuw ijken vanaf de huidige stand, anders zou het
-        doelframe terugspringen — de factor geldt anders met terugwerkende kracht op de al
-        verstreken tijd. De snelheid verandert ook hoeveel frames er per seconde langs
-        moeten, dus hoe vaak de klok moet tikken."""
+    def recalibrate(self):
+        """On a speed change: recalibrate from the current position, otherwise the target
+        frame would jump backward — the factor would otherwise apply retroactively to
+        time already elapsed. The speed also changes how many frames per second need to
+        pass, i.e. how often the clock needs to tick."""
         if not self._timer.isActive():
             return
-        self._lopend = [(sp, max(0, sp.huidige_idx)) for sp, _ in self._lopend]
-        self._factor = self._factor_bron() or 1.0
+        self._running = [(p, max(0, p.huidige_idx)) for p, _ in self._running]
+        self._factor = self._factor_source() or 1.0
         self._t0 = time.monotonic()
         self._timer.start(self._interval_ms())
 
     def _interval_ms(self):
-        """Interval van de klok: een fractie van het kórtste frame van de spelers die
-        meedraaien, want de klok moet elke speler kunnen bedienen — precies dezelfde
-        afweging als in `_play_interval_ms`, inclusief `PLAY_OVERSAMPLE`. Trager dan
-        `ALLES_TICK_MS` wordt hij nooit, zodat slow motion niet nodeloos vaak tikt."""
-        fps = max((sp.video_info.fps or 30.0
-                   for sp, _ in self._lopend if sp.video_info is not None), default=30.0)
+        """Clock interval: a fraction of the *shortest* frame among the players running
+        together, since the clock has to be able to serve every player — exactly the
+        same trade-off as in `_play_interval_ms`, including `PLAY_OVERSAMPLE`. Never
+        slower than `ALL_TICK_MS`, so slow motion doesn't tick needlessly often."""
+        fps = max((p.video_info.fps or 30.0
+                   for p, _ in self._running if p.video_info is not None), default=30.0)
         fps *= self._factor
-        return max(PLAY_TICK_MIN_MS, min(ALLES_TICK_MS, int(1000 / (fps * PLAY_OVERSAMPLE))))
+        return max(PLAY_TICK_MIN_MS, min(ALL_TICK_MS, int(1000 / (fps * PLAY_OVERSAMPLE))))
 
     def _tick(self):
         t = (time.monotonic() - self._t0) * self._factor
-        klaar = True
-        for sp, basis in self._lopend:
-            info = sp.video_info
-            if info is None or not sp.resultaten:
+        done = True
+        for p, base in self._running:
+            info = p.video_info
+            if info is None or not p.resultaten:
                 continue
-            laatste = len(sp.resultaten) - 1
-            doel = basis + int(round(t * (info.fps or 30.0)))
-            if doel < laatste:
-                # `show_on_clock` en niet `go_to`: dit is sequentieel vooruit, dus de
-                # vooruitlezer mag mee — hier draaien twee spelers naast elkaar.
-                sp.show_on_clock(doel)
-                klaar = False
+            last = len(p.resultaten) - 1
+            target = base + int(round(t * (info.fps or 30.0)))
+            if target < last:
+                # `show_on_clock`, not `go_to`: this is sequential-forward, so the
+                # forward reader is allowed to help — two players run side by side here.
+                p.show_on_clock(target)
+                done = False
             else:
-                # Het einde: exact het laatste frame tonen. `show_on_clock` laat een frame
-                # dat de lezer nog niet heeft aan de volgende tik over, en die komt niet
-                # meer — de klok stopt hieronder.
-                sp.go_to(laatste)
-        if klaar:
+                # The end: show exactly the last frame. `show_on_clock` would leave a
+                # frame the reader doesn't have yet to the next tick, and that tick never
+                # comes — the clock stops below.
+                p.go_to(last)
+        if done:
             self.stop()
-            if self._op_klaar is not None:
-                self._op_klaar()
+            if self._on_done is not None:
+                self._on_done()
 
 
 class VergelijkKant(QWidget):
@@ -4455,11 +4460,11 @@ class FragmentKiezer(QDialog):
         # Dezelfde toetsen als overal, plus S/E/Del voor het markeren. Bewust géén QShortcut
         # meer voor die drie: een letter-shortcut vuurt óók terwijl je in het "ga naar"-veld
         # typt, en het filter laat een gefocust tekstveld juist met rust.
-        self.toetsen = SpelerToetsen(
+        self.toetsen = PlayerKeys(
             self, lambda: [self.speler],
             extra={Qt.Key_S: self._start_fragment, Qt.Key_E: self._stop_fragment,
                    Qt.Key_Delete: self._verwijder_selectie},
-            op_spoel=self.lbl_spoel.setText)
+            on_scrub=self.lbl_spoel.setText)
 
         # Pas nadat alles er staat: dan kan de klem in set_window_size tegen een
         # definitieve layout aan rekenen (en een `resize()` wordt genegeerd zodra de inhoud
@@ -4586,13 +4591,13 @@ class FragmentKiezer(QDialog):
         # Niet meer actief (alt-tab, een melding ervoor) → de key-release komt nooit binnen
         # en het spoelen zou eindeloos doorlopen.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
-            self.toetsen.stop_spoelen()
+            self.toetsen.stop_scrubbing()
         super().changeEvent(event)
 
     def done(self, resultaat):
         # Niet closeEvent: een modale dialoog die via accept()/reject() release krijgt er geen.
         # Het videobestand moet los, anders houdt Windows de opname vast.
-        self.toetsen.losmaken()
+        self.toetsen.detach()
         self.speler.release()
         super().done(resultaat)
 
@@ -4765,7 +4770,7 @@ class BekijkVenster(QDialog):
       * **volledig scherm** — je kijkt naar techniek, niet naar knoppen (F11 → venster);
       * **inzoomen en vertragen** komen ongewijzigd uit `VideoPlayer` (muiswiel/zoomregelaar
         en de snelheidcombo tot 1/16×);
-      * de **standaardtoetsen** (spatie, `.`/`,`, pijltjes, Home/End) uit `SpelerToetsen` —
+      * de **standaardtoetsen** (spatie, `.`/`,`, pijltjes, Home/End) uit `PlayerKeys` —
         hier bedacht, maar sindsdien overal in de app dezelfde;
       * **punten** die je op een frame zet en die bewaard blijven (`bron_markering`), zodat
         dezelfde sprong of afzet er de volgende sessie nog staat — en in de gedeelde
@@ -4775,7 +4780,7 @@ class BekijkVenster(QDialog):
     komt uit de opnamelijst (twee rijen geselecteerd) of via "➕ Tweede video ernaast..."
     (`kies_tweede`, een callable van MainWindow die de bestandskiezer, de registratie als
     losse video en de beschikbaarheidscheck doet — die horen niet in dit venster). Met twee
-    kanten loopt het afspelen op dezelfde `MasterKlok` als de vergelijkpagina, met een
+    kanten loopt het afspelen op dezelfde `MasterClock` als de vergelijkpagina, met een
     sync-punt per kant en één gedeelde snelheid; spatie bedient dan de klok. De **punten
     zijn er alleen met één video** — bij twee is er per video precies één sync-punt (per
     sessie, niet opgeslagen), en zodra een kant met ✕ dichtgaat komen de punten van de
@@ -4885,9 +4890,9 @@ class BekijkVenster(QDialog):
         self.hulp.setStyleSheet("color: #888;")
         v.addWidget(self.hulp)
 
-        self.klok = MasterKlok(
+        self.klok = MasterClock(
             self, factor=lambda: self.combo_alles_snelheid.currentData() or 1.0,
-            op_klaar=self._stop_alles)
+            on_done=self._stop_alles)
 
         for bron, info in paren:
             self._voeg_kant(bron, info)
@@ -4897,11 +4902,11 @@ class BekijkVenster(QDialog):
         extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
         for n in range(9):
             extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
-        self.toetsen = SpelerToetsen(
+        self.toetsen = PlayerKeys(
             self, lambda: [k.speler for k in self.kanten], extra=extra,
-            op_afspelen=self._toetsen_afspelen,
-            is_playing=lambda: self.klok.loopt() or any(k.speler.is_playing() for k in self.kanten),
-            op_spoel=self.lbl_spoel.setText)
+            on_play=self._toetsen_afspelen,
+            is_playing=lambda: self.klok.is_running() or any(k.speler.is_playing() for k in self.kanten),
+            on_scrub=self.lbl_spoel.setText)
 
         self._zet_modus()
 
@@ -4995,7 +5000,7 @@ class BekijkVenster(QDialog):
         self._vernieuw_punten()
         kant.balk.zet(cursor=max(0, kant.speler.huidige_idx))
 
-    # ── Samen afspelen (twee kanten, MasterKlok) ─────────────────────────
+    # ── Samen afspelen (twee kanten, MasterClock) ─────────────────────────
     def _toetsen_afspelen(self, play):
         """Spatie: met twee video's de klok, met één gewoon de speler. Spatie is
         afspelen/pauze en **hervat dus waar de video's staan**; alleen de knop
@@ -5033,7 +5038,7 @@ class BekijkVenster(QDialog):
     def _pauzeer_alles(self):
         """Alles stil: klok, spoelen én elke speler los. Idempotent."""
         self.klok.stop()
-        self.toetsen.stop_spoelen()
+        self.toetsen.stop_scrubbing()
         for kant in self.kanten:
             kant.speler.pause()
 
@@ -5052,7 +5057,7 @@ class BekijkVenster(QDialog):
         idx = self.combo_alles_snelheid.currentIndex()
         for kant in self.kanten:
             kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
-        self.klok.herijk()
+        self.klok.recalibrate()
 
     # ── Puntenpaneel ─────────────────────────────────────────────────────
     def _bouw_puntenpaneel(self):
@@ -5230,13 +5235,13 @@ class BekijkVenster(QDialog):
         # de key-release nooit meer binnen en zou het spoelen eindeloos doorlopen.
         if (event.type() == QEvent.ActivationChange and not self.isActiveWindow()
                 and hasattr(self, "toetsen")):
-            self.toetsen.stop_spoelen()
+            self.toetsen.stop_scrubbing()
         super().changeEvent(event)
 
     def done(self, resultaat):
         # Niet closeEvent: een modale dialoog die via accept()/reject() release krijgt er geen.
         # De videobestanden moeten los, anders houdt Windows de opname vast.
-        self.toetsen.losmaken()
+        self.toetsen.detach()
         self.klok.stop()
         for kant in self.kanten:
             kant.release()
@@ -5471,12 +5476,12 @@ class MainWindow(QMainWindow):
         # want `changeEvent` kan door Qt aangeroepen worden vóórdat het venster er staat.
         self._toetsen = []
 
-        # Vergelijkpagina: één masterklok voor "Start alles" (zie MasterKlok). De factor
+        # Vergelijkpagina: één masterklok voor "Start alles" (zie MasterClock). De factor
         # komt uit de gedeelde snelheidscombo, die pas in _bouw_ui ontstaat — de callable
         # wordt pas bij het starten gelezen.
-        self.klok = MasterKlok(
+        self.klok = MasterClock(
             self, factor=lambda: self.combo_alles_snelheid.currentData() or 1.0,
-            op_klaar=self._stop_alles)
+            on_done=self._stop_alles)
 
         self._melding("Venster opbouwen...")
         self._bouw_ui()
@@ -5542,19 +5547,19 @@ class MainWindow(QMainWindow):
         #
         # Beide moeten bestaan vóór de `currentChanged`-haak hieronder, want die loopt via
         # `_pauzeer_alles` en dat stopt ook een lopende spoelactie.
-        self.toetsen_analyse = SpelerToetsen(
-            self, lambda: [self.speler], op_spoel=self.lbl_spoel.setText,
-            actief=lambda: self.stack.currentWidget() is self.pagina_analyse)
-        self.toetsen_vergelijk = SpelerToetsen(
+        self.toetsen_analyse = PlayerKeys(
+            self, lambda: [self.speler], on_scrub=self.lbl_spoel.setText,
+            active=lambda: self.stack.currentWidget() is self.pagina_analyse)
+        self.toetsen_vergelijk = PlayerKeys(
             self,
             lambda: [k.speler for k in (self.kant_links, self.kant_rechts)
                      if k.heeft_analyse()],
-            op_spoel=self.lbl_spoel.setText,
-            op_afspelen=self._toetsen_vergelijk_afspelen,
-            is_playing=lambda: (self.klok.loopt()
+            on_scrub=self.lbl_spoel.setText,
+            on_play=self._toetsen_vergelijk_afspelen,
+            is_playing=lambda: (self.klok.is_running()
                             or self.kant_links.speler.is_playing()
                             or self.kant_rechts.speler.is_playing()),
-            actief=lambda: self.stack.currentWidget() is self.pagina_vergelijk)
+            active=lambda: self.stack.currentWidget() is self.pagina_vergelijk)
         self._toetsen = [self.toetsen_analyse, self.toetsen_vergelijk]
 
         # Eén haak i.p.v. bij elke setCurrentWidget-aanroep: een verlaten pagina mag niet
@@ -5590,7 +5595,7 @@ class MainWindow(QMainWindow):
         een lopende spoelactie. Idempotent, dus veilig om overal aan te roepen."""
         self._stop_alles()
         for toetsen in self._toetsen:
-            toetsen.stop_spoelen()
+            toetsen.stop_scrubbing()
         self.speler.pause()
         for kant in (self.kant_links, self.kant_rechts):
             kant.speler.pause()
@@ -7357,7 +7362,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def _start_alles(self, vanaf_sync=None):
-        """Beide video's tegelijk afspelen, aangestuurd door één `MasterKlok`.
+        """Beide video's tegelijk afspelen, aangestuurd door één `MasterClock`.
         `vanaf_sync`: None = wat het vinkje zegt (de knop), False = hervatten (spatie)."""
         kanten = [k for k in (self.kant_links, self.kant_rechts) if k.heeft_analyse()]
         if not kanten:
@@ -7379,7 +7384,7 @@ class MainWindow(QMainWindow):
         self.klok.start([k.speler for k in kanten])
 
     def _stop_alles(self):
-        # De klok pauzeert zelf de spelers die eronder liepen (zie MasterKlok.stop); de
+        # De klok pauzeert zelf de spelers die eronder liepen (zie MasterClock.stop); de
         # andere met rust laten, anders werkt ▶ per kant niet meer.
         self.klok.stop()
 
@@ -7388,11 +7393,11 @@ class MainWindow(QMainWindow):
 
         Beide kanten krijgen dezelfde factor — ook voor los afspelen, want twee video's
         op verschillend tempo naast elkaar zijn niet te vergelijken. Draait de masterklok,
-        dan wordt die opnieuw geijkt vanaf de huidige stand (`MasterKlok.herijk`)."""
+        dan wordt die opnieuw geijkt vanaf de huidige stand (`MasterClock.recalibrate`)."""
         idx = self.combo_alles_snelheid.currentIndex()
         for kant in (self.kant_links, self.kant_rechts):
             kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
-        self.klok.herijk()
+        self.klok.recalibrate()
 
     def _lees_eerste_frame(self, pad=None):
         """Leest het eerste frame van de gekozen video, of None bij een fout.
@@ -8855,7 +8860,7 @@ class MainWindow(QMainWindow):
         # van . of , komt dan nooit binnen en het spoelen zou eindeloos doorlopen.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
             for toetsen in self._toetsen:
-                toetsen.stop_spoelen()
+                toetsen.stop_scrubbing()
         super().changeEvent(event)
 
     def closeEvent(self, event):
@@ -8866,7 +8871,7 @@ class MainWindow(QMainWindow):
         self._stop_plaatsen()   # een lopende reeks nog vastleggen of terugdraaien
         self._pauzeer_alles()
         for toetsen in self._toetsen:
-            toetsen.losmaken()
+            toetsen.detach()
         self.speler.release()
         self.kant_links.leeg()
         self.kant_rechts.leeg()

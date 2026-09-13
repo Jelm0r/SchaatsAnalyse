@@ -498,13 +498,79 @@ document supersedes it for anything about actual progress and lessons learned).
         windows pass, including the three `VideoPlayer`-backed windows
         (`FragmentKiezer`, `BekijkVenster` x2, `MainWindow` analysis/compare pages).
 
-      - **Next up for 8a**: `SpelerToetsen` + `MasterKlok` (~3742-4046 at this session's
-        end state) -- this is also where the two remaining Dutch "vooruitlezer"
-        mentions noted in session 4 live, and where the module-level constants left
-        Dutch in session 1's list that are *these* classes' own dependencies
-        (`VIDEO_TOETSEN_HULP` is already done, but `SPOEL_FACTOR`/`SPOEL_TICK_MS`,
-        `ALLES_TICK_MS` are still Dutch/mixed and belong here) should get renamed.
-        After that, in order:
+      - **Session 6** — `SpelerToetsen`→`PlayerKeys`, `MasterKlok`→`MasterClock`
+        (~3742-4046 at session 5's end state): full identifier/docstring/comment
+        translation of both classes, plus the module-level constants that are their own
+        dependencies noted as still-Dutch in session 1's list: `SPOEL_FACTOR`/
+        `SPOEL_TICK_MS`→`SCRUB_FACTOR`/`SCRUB_TICK_MS`, `ALLES_TICK_MS`→`ALL_TICK_MS`
+        (`VIDEO_TOETSEN_HULP` was already done in session 5, as `VIDEO_KEYS_HELP`). This
+        also closed out the two remaining Dutch "vooruitlezer" mentions session 4 had
+        flagged as living in these classes' comments.
+
+        `PlayerKeys` constructor params: `venster/spelers/actief/op_afspelen/op_spoel`→
+        `window/players/active/on_play/on_scrub` (`extra` and `is_playing` were already
+        English, unchanged). `MasterKlok`'s `op_klaar`→`on_done` (`parent`/`factor`
+        already English). Unlike session 3's `bieb`/`schaatser_id`/etc or session 5's
+        `deinterlacen`/`huidige_idx` (left Dutch as shared vocabulary spanning tens to
+        hundreds of call sites in not-yet-translated `MainWindow` code), these
+        constructor parameters are passed by keyword from only **4** call sites total for
+        `PlayerKeys` (`FragmentKiezer`, `BekijkVenster`, `MainWindow` x2) and **2** for
+        `MasterKlok` (`BekijkVenster`, `MainWindow`) — grepped and confirmed via
+        `extra=`/`op_spoel=`/`actief=`/`op_afspelen=`/`is_playing=`/`factor=`/`op_klaar=`
+        before deciding, same bounded-touch judgment call as session 2's three picker
+        renames, not the wider "shared vocabulary" exception. All 6 call sites updated in
+        the same commit (Pattern G, applied within a single file rather than across a
+        module boundary — same variant session 5 used for `VideoPlayer`'s own public
+        surface).
+
+        Methods renamed and every external call site fixed (grepped per name before and
+        after): `losmaken`→`detach`, `start_spoelen`/`stop_spoelen`→`start_scrubbing`/
+        `stop_scrubbing`, `_spoel_tick`→`_scrub_tick`, `_actieve_spelers`→
+        `_active_players`, `_loopt`→`_is_running`, `_pauzeer`→`_pause`, `_meld`→`_report`
+        (all `PlayerKeys`); `loopt`→`is_running`, `herijk`→`recalibrate` (`MasterKlok`;
+        `start`/`stop`/`_interval_ms`/`_tick` were already English). Internal attributes
+        translated throughout both classes (`_venster`→`_window`, `_spelers`→`_players`,
+        `_richting`→`_direction`, `_lopend`→`_running`, `_factor_bron`→`_factor_source`,
+        etc.) — confirmed via grep that every one of these (all leading-underscore,
+        private) has zero external readers, unlike the `self.speler`/`self.klok`/
+        `self.toetsen` attribute names that *hold instances* of these classes in
+        `FragmentKiezer`/`BekijkVenster`/`MainWindow`, which were deliberately left Dutch
+        (same precedent as session 5 leaving `self.speler` pointing at a `VideoPlayer`
+        instance) since renaming those belongs to each owner class's own future session.
+        Local variables inside method bodies translated too (`verstreken`→`elapsed`,
+        `stap`→`step`, `doel`→`target`, `klaar`→`done`, `soort`→`kind`, `toets`→`key`,
+        `laatste`→`last`, `vanaf`→`start`, etc.) — `p.resultaten`/`p.huidige_idx` (the
+        `VideoPlayer` properties these classes read) were left as-is, matching the
+        project-wide convention that those two names stay Dutch everywhere until
+        `VideoPlayer`'s own already-translated code is the only place that defines them
+        (it is; these classes just read them).
+
+        Three bare mentions of the old class names in still-Dutch prose elsewhere in the
+        file (session 4/5's own docstrings and comments inside `VideoPlayer`,
+        `BekijkVenster`, `MainWindow`) were updated to the new names as plain factual
+        pointers, without translating the surrounding still-Dutch sentence — same
+        judgment call as leaving a comment's prose alone while fixing a renamed
+        identifier it happens to reference by name.
+
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs (offscreen
+        Qt); a throwaway script (fake `VideoPlayer`-shaped objects, no real video/model)
+        driving `PlayerKeys` through a real `QApplication` event filter — space
+        play/pause, arrow-key stepping, Home/End, the `extra` override, a focused
+        `QLineEdit` swallowing its own keys, a modifier key passing through untouched,
+        and `start_scrubbing`/`stop_scrubbing` actually advancing a fake player's frame
+        over real wall-clock time — and `MasterClock` end-to-end (`start`/`is_running`/
+        `recalibrate`/`stop`, frames advancing via `show_on_clock`, landing exactly on
+        the last frame and firing `on_done` when a run reaches the end); grepped the
+        whole file for every old name (`SpelerToetsen`, `MasterKlok`, `SPOEL_FACTOR`,
+        `SPOEL_TICK_MS`, `ALLES_TICK_MS`, `stop_spoelen`, `start_spoelen`, `_spoel_tick`,
+        `.losmaken(`, `.loopt(`, `.herijk(`) — zero hits repo-wide outside this progress
+        document itself; `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick
+        mode) — all 16 windows pass, including both `BekijkVenster` variants and the
+        `MainWindow` compare page, which exercise both renamed classes end-to-end.
+
+      - **Next up for 8a**, in order (line numbers are from session 5's end state and
+        will have drifted further after session 6's edits — re-`grep -n "^class "`
+        first, don't trust these verbatim):
         - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4046-4600).
         - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4600-5246).
         - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5246-5413).
@@ -517,7 +583,7 @@ document supersedes it for anything about actual progress and lessons learned).
           also where `bieb`/`schaatser_id`/`titel`/`instellingen`/`aangemaakt_door`/
           `analyse_id`/`naam`/`geboortejaar`/`notities`/`taken`/`schaatser_naam` from
           session 3's "deliberately left Dutch" list, and `deinterlacen`/`huidige_idx`
-          from this session's, actually live and could finally be renamed in one
+          from session 5's, actually live and could finally be renamed in one
           coordinated pass, if a future session decides that's worth doing -- check
           first whether `skate_db.py`'s own parameter names would need to move
           together for `deinterlacen`/etc., since right now they match on purpose).
