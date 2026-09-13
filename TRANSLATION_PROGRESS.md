@@ -20,6 +20,35 @@ those were only caught by actually *running* things (self-tests, the GUI screen 
 never by `py_compile` alone. Budget for that verification step; it is not optional
 polish.
 
+**Process amendment, 13 Sep 2026 (user's explicit choice — "maximum speed"):** the
+compatibility patterns above are still mandatory and still get applied per class/section
+exactly as before — they're the actual substance of this work, not overhead, and are what
+caught every real bug so far. What changes is everything *around* them, to cut tokens/
+session count:
+- **Batch much bigger chunks per session** — a whole run of remaining classes at once
+  (e.g. all of `VergelijkKant` through `KopieerDialoog` in one pass) instead of one class
+  at a time. `MainWindow` (~3,460 lines) will still likely need to be split, purely
+  because of its size, not out of caution.
+- **No bespoke throwaway verification script for a class with no real behavioral risk**
+  (no dataclass/constructor-keyword rename, no dict/row-shape change, nothing another
+  file reads by structure) — for those, `py_compile` + a real `import skate_gui` under
+  both venvs + a repo-wide grep for every old identifier + the screen test (quick mode
+  during the pass, `--alles` only at the true end of Phase 8) is enough. Still write a
+  real script for anything touching a worker's signals, a dialog's constructor kwargs, or
+  any dict a still-untranslated caller reads by key — those are exactly the categories
+  that have produced real bugs.
+- **Verify once at the end of a large chunk, not after every class** — commit checkpoints
+  still happen (don't let this become one giant uncommitted diff across sessions), just
+  less often than "every class."
+- **Stop duplicating the full narrative in both the commit message and this document.**
+  Write the detailed "what/why/what was found" story **once**, in the commit message
+  (git already keeps that forever). This document's own session-log entries from here on
+  should be short: what got renamed (the rename table), which patterns applied and why,
+  any bug found, a one-line verification summary, and the commit hash to read for the
+  full story — not a second copy of the same paragraphs. (Sessions 1-6's entries above
+  predate this amendment and are already written the old, fuller way — leave them as
+  they are rather than rewriting history.)
+
 ## Why this is happening
 
 Non-Dutch developers are joining the project; the whole codebase (~21,000 lines across
@@ -568,12 +597,54 @@ document supersedes it for anything about actual progress and lessons learned).
         mode) — all 16 windows pass, including both `BekijkVenster` variants and the
         `MainWindow` compare page, which exercise both renamed classes end-to-end.
 
-      - **Next up for 8a**, in order (line numbers are from session 5's end state and
-        will have drifted further after session 6's edits — re-`grep -n "^class "`
-        first, don't trust these verbatim):
-        - `VergelijkKant`, `FragmentBalk`, `FragmentKiezer` (~4046-4600).
-        - `PuntenBalk`, `BekijkKant`, `BekijkVenster` (~4600-5246).
-        - `LokaalProef`, `KopieerWorker`, `KopieerDialoog` (~5246-5413).
+      - **Session 7** (first session under the "maximum speed" process amendment above) —
+        `VergelijkKant`→`CompareSide`, `FragmentBalk`→`FragmentBar`, `FragmentKiezer`→
+        `FragmentPicker`, `PuntenBalk`→`PointsBar`, `BekijkKant`→`ViewSide`,
+        `BekijkVenster`→`ViewWindow`, `LokaalProef`→`LocalProbe`, `KopieerWorker`→
+        `CopyWorker`, `KopieerDialoog`→`CopyDialog`, plus `_tijd_tekst`/`_lees_tijd`/
+        `_bytes_tekst`/`_resterend_tekst`/`KOPIEER_VENSTER_S` →
+        `_time_text`/`_read_time`/`_bytes_text`/`_remaining_text`/`COPY_WINDOW_S`
+        (~4051-5417, one whole-file mechanical rename pass + per-class docstring/comment
+        translation). Also renamed, scoped to this range only (same Dutch name is reused
+        independently by later still-Dutch classes, so a file-wide regex would have been
+        unsafe): the `KLIK` signal → `CLICKED` and each class's own `KLEUR_*`/`HOOGTE`/
+        `RAAK_PX`/`PANEEL_BREEDTE` constants → `COLOR_*`/`HEIGHT`/`HIT_PX`/`PANEL_WIDTH`,
+        `_klik_op_rij`/`_klik_op_balk`/`_frame_getoond`/`_bevestig`/`_werk_bij`/
+        `_verwijder_selectie`/`_zet_sync`/`_toon_sync_label` → `_click_row`/`_click_bar`/
+        `_frame_shown`/`_confirm`/`_refresh`/`_delete_selection`/`_set_sync`/
+        `_show_sync_label`. `CopyWorker`'s and `LocalProbe`'s Signals renamed too
+        (`voortgang`/`klaar`→`progress`/`done`, `gemeten`→`measured`, matching session 3's
+        precedent for `AnalysisWorker`/`BatchWorker`), with the one external connect site
+        each has in `MainWindow` updated. Left Dutch (same "shared vocabulary spanning
+        MainWindow" judgment as sessions 3/5): `toon`, `analyse_id`, `heeft_analyse`,
+        `leeg`, `naar_sync`, `events`, `sync_frame`, `naam`, `gedaan`, `fragmenten`,
+        `bron_pad`, `_spring`, `_ga_naar_tijd`, `_verwijder`, `punten`, `bron`, `bieb`.
+        **Found and fixed two real, pre-existing bugs**, both from session 5's whole-file
+        mechanical regex pass having rewritten common Dutch verbs used as ordinary prose
+        elsewhere in the file (the exact risk flagged in session 5's own log): (1) a
+        **user-facing tooltip** on the ViewWindow "▶ Start alles" button literally read
+        "Spatie is_playing ook beide tegelijk..." (should be "speelt", Dutch for "plays")
+        — `speelt`→`is_playing` had been applied file-wide, not scoped to VideoPlayer;
+        (2) a comment in `MainWindow` read "...een plaats-reeks release die eerst netjes
+        af" (should be "sluit", Dutch for "closes") from the same over-broad `sluit`→
+        `release` pass — reverted both to correct Dutch (not translated, since neither
+        section is due for translation yet). Also fixed one stale cross-reference each in
+        `skate_db.py` (`BekijkVenster`→`ViewWindow` in a docstring) and
+        `schaats_schermtest.py` (`G.FragmentKiezer`/`G.BekijkVenster` call sites, which
+        would otherwise `AttributeError` on the next screen-test run).
+        **Verified once, at the end of the whole chunk** (per the process amendment):
+        `py_compile`; real `import skate_gui` under both venvs; a repo-wide grep for
+        every old name (zero hits outside this progress document); a single throwaway
+        script covering the classes with actual behavioral risk — `CopyWorker`/
+        `CopyDialog`'s renamed `progress`/`done` signals, `LocalProbe`'s renamed
+        `measured` signal, `FragmentBar`/`PointsBar`'s `CLICKED` signal + renamed color
+        constants (incl. a real `mousePressEvent` hit-test), and `CompareSide`'s renamed
+        private methods — all pass; `schaats_schermtest.py` full run (not just quick
+        mode, since this was the true end of a multi-class chunk) — all 16 windows pass,
+        including `FragmentPicker` and both `ViewWindow` variants.
+
+      - **Next up for 8a**, in order (line numbers will have drifted after session 7 —
+        re-`grep -n "^class "` first, don't trust these verbatim):
         - `MainWindow` (~5413-8877, ~3,460 lines — will very likely need to be split
           across more than one session by itself; it owns most of the ~150
           `QMessageBox` calls and ~178 tooltips that 8c is nominally about, so some
@@ -588,7 +659,7 @@ document supersedes it for anything about actual progress and lessons learned).
           first whether `skate_db.py`'s own parameter names would need to move
           together for `deinterlacen`/etc., since right now they match on purpose).
         - `main()` (~8877-8898).
-        Line numbers are from session 5's end state and will drift as each chunk is
+        Line numbers are from session 7's end state and will drift as each chunk is
         translated — re-`grep -n "^class \|^def "` at the start of each session rather
         than trusting the numbers above verbatim.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do

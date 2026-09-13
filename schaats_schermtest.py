@@ -212,11 +212,11 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
     dialoog("AnalysisPicker", lambda: G.AnalysisPicker(bieb))
     dialoog("AnalysisInfoDialog", lambda: G.AnalysisInfoDialog(
         schaats_db.analyse_meta(bieb, aid1), "Test Schaatser"))
-    dialoog("FragmentKiezer", lambda: G.FragmentKiezer(
+    dialoog("FragmentPicker", lambda: G.FragmentPicker(
         opname, info, gedaan=[{"start_frame": 2, "eind_frame": 10, "titel": "x"}]))
-    dialoog("BekijkVenster (1 video)", lambda: G.BekijkVenster([(bron, info)], "Tester"))
-    dialoog("BekijkVenster (2 video's)",
-            lambda: G.BekijkVenster([(bron, info), (bron_l, info)], "Tester"))
+    dialoog("ViewWindow (1 video)", lambda: G.ViewWindow([(bron, info)], "Tester"))
+    dialoog("ViewWindow (2 video's)",
+            lambda: G.ViewWindow([(bron, info), (bron_l, info)], "Tester"))
 
     mw = G.MainWindow()
     mw.show()

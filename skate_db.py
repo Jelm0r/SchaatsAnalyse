@@ -1079,7 +1079,7 @@ def source_video_for_path(bieb, pad, meta_lezer=None):
     `list_source_videos`. The GUI doesn't call this directly but through `loose_video`,
     which picks the **local** library; only the row logic lives here.
 
-    Meant for "just watching" (`BekijkVenster`): nothing is measured or copied there,
+    Meant for "just watching" (`ViewWindow`): nothing is measured or copied there,
     but the points a trainer sets must still be kept, and those hang off a
     source_video row via `source_marking.source_id`. Hence a real row, with two
     differences from a recording out of `opnames/`:
