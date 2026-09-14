@@ -154,7 +154,7 @@ def _meet(naam, breedte, hoogte, taakbalk, letter, uit_pad):
     sid = schaats_db.maak_schaatser(bieb, "Test Schaatser", 2010)
     sid2 = schaats_db.maak_schaatser(bieb, lang, 2008)
     inst = {"smooth_n": 5, "threshold": 0.015, "smooth_landmarks": True,
-            "bocht_overslaan": True, "doel_punt": [0.5, 0.5], "horizon_deg": 0.0,
+            "skip_corner": True, "doel_punt": [0.5, 0.5], "horizon_deg": 0.0,
             "auto_horizon": False, "heavy": False, "deinterlaced": False}
     aid1 = schaats_db.sla_analyse_op(bieb, sid, "Analyse één", video, info, resultaten,
                                      events, "yolo", dict(inst), aangemaakt_door="Tester")

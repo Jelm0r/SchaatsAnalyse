@@ -54,7 +54,8 @@ NPZ_RAW_NAME = "landmarks_ruw.npz"   # pristine landmarks from before the first 
 SCHEMA_VERSION = 6  # v2 (phase 4): analyse.video_bytes; v3 (phase 8): bronvideo + analyse.bron_*;
                     # v4: bron_markering (points from the manual viewing window);
                     # v6: whole schema translated to English (tables, columns, the
-                    # source_video.status enum, and the event cache's stored text)
+                    # source_video.status enum, the event cache's stored text, and
+                    # several settings_json content keys)
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts", ".wmv")
 
 # Status of a recording in the work list (phase 8). Deliberately manual: the program
@@ -77,8 +78,27 @@ LOCAL_DIR = "local"                     # under data_dir(): the local library
 # ── Config (per user, so local — not in the shared folder) ─────────────────────
 
 def config_path():
+    """Where config.json lives (per-user, %APPDATA%, not the shared library folder).
+
+    One-time migration: earlier versions (before the translate-to-english rename)
+    wrote this under the old folder name "SchaatsAnalyse". If the new folder's
+    config.json doesn't exist yet but the old one does, copy it forward — otherwise a
+    trainer who already picked a library folder and set their name would appear to
+    lose both the moment this version runs. Same pattern as `data_dir()` in
+    skate_environment.py; deliberately a file copy here (not a folder rename) since
+    this folder holds exactly one file and a copy is safe even if something still has
+    the old file open."""
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base, "SkateAnalysis", "config.json")
+    path = os.path.join(base, "SkateAnalysis", "config.json")
+    if not os.path.isfile(path):
+        old_path = os.path.join(base, "SchaatsAnalyse", "config.json")
+        if os.path.isfile(old_path):
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                shutil.copy2(old_path, path)
+            except OSError:
+                pass
+    return path
 
 
 def default_library():
@@ -112,16 +132,18 @@ def load_config():
             raise ValueError("config is not a dict")
     except Exception:
         cfg = {}
-    # NOTE: the dict keys themselves stay Dutch ("bibliotheek_pad"/"trainer_naam") on
-    # purpose, even though the function names around them are now English (see the
-    # translate-to-english plan). schaats_gui.py isn't translated yet and reads/writes
-    # this exact dict directly by these key names in several places (e.g. saving the
-    # library path or the trainer name); renaming the keys here without also touching
-    # those call sites would make this function default a value schaats_gui.py had
-    # already saved under the old key, silently discarding it. Revisit together with
-    # schaats_gui.py's own phase.
-    cfg.setdefault("bibliotheek_pad", default_library())
-    cfg.setdefault("trainer_naam", "")    # phase 4: travels along as analysis.created_by
+    # Dual-read (translate-to-english, phase 8): an existing config.json on a trainer's
+    # machine still has the old Dutch keys. Carry the value over to the new key (without
+    # touching the old one — nothing here rewrites the file), so nobody's saved library
+    # path or trainer name silently vanishes the first time this version runs. Every
+    # write from here on (skate_gui.py's two call sites) uses only the new keys, so a
+    # config.json saved once under this version never has the old keys again.
+    if "library_path" not in cfg and "bibliotheek_pad" in cfg:
+        cfg["library_path"] = cfg["bibliotheek_pad"]
+    if "trainer_name" not in cfg and "trainer_naam" in cfg:
+        cfg["trainer_name"] = cfg["trainer_naam"]
+    cfg.setdefault("library_path", default_library())
+    cfg.setdefault("trainer_name", "")    # phase 4: travels along as analysis.created_by
     return cfg
 
 
@@ -140,14 +162,14 @@ def library_path():
     env = os.environ.get(ENV_LIBRARY)
     if env:
         return env
-    return load_config()["bibliotheek_pad"]
+    return load_config()["library_path"]
 
 
 def trainer_name():
     """The name of the current trainer (phase 4), empty if not set. Saved as
     created_by on new analyses, so in a shared library it's visible who made which
     analysis."""
-    return (load_config().get("trainer_naam") or "").strip()
+    return (load_config().get("trainer_name") or "").strip()
 
 
 # ── App version (which code produced this analysis?) ───────────────────────────
@@ -470,7 +492,40 @@ def _migrate(con, van, bieb):
             "WHEN 'klaar' THEN 'done' WHEN 'onbruikbaar' THEN 'unusable' "
             "ELSE status END")
 
-        # 4. The event cache is disposable (the npz is the real source of truth,
+        # 4. `settings_json` content keys — not just the column that holds it (renamed
+        #    above), but the JSON *inside* it. `doel_punt`/`doel_kader`/`perspectief`
+        #    (the analyze()-parameter spelling) are deliberately NOT touched here: they
+        #    mirror keyword arguments into skate_analysis.py's/skate_yolo.py's
+        #    `analyze()` that stay Dutch permanently (see TRANSLATION_PROGRESS.md's
+        #    glossary entry for `doel_kader`), so renaming the storage key would just
+        #    invent a second spelling for the exact same concept. `perspective` (the
+        #    saved calibration blob, a different concern from the live `perspectief=`
+        #    argument that only ever exists in memory) DOES get renamed, along with the
+        #    four keys below with no such tie to a function signature. A malformed or
+        #    unreadable settings_json is left alone rather than aborting the whole
+        #    migration for every other analysis.
+        _key_renames = (("bocht_overslaan", "skip_corner"),
+                        ("perspectief_gebruikt", "perspective_used"),
+                        ("perspectief", "perspective"),
+                        ("backend_naam", "backend_name"),
+                        ("app_versie", "app_version"))
+        for row in con.execute("SELECT id, settings_json FROM analysis").fetchall():
+            try:
+                settings = json.loads(row["settings_json"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(settings, dict):
+                continue
+            gewijzigd = False
+            for old, new in _key_renames:
+                if old in settings and new not in settings:
+                    settings[new] = settings.pop(old)
+                    gewijzigd = True
+            if gewijzigd:
+                con.execute("UPDATE analysis SET settings_json = ? WHERE id = ?",
+                           (json.dumps(settings, ensure_ascii=False), row["id"]))
+
+        # 5. The event cache is disposable (the npz is the real source of truth,
         #    recomputed fresh every time an analysis is opened), but leaving it stale
         #    is worse than cosmetic: skate_analysis.py's own English rename (an earlier
         #    step of this same effort) already means a freshly computed cache row's
@@ -518,7 +573,12 @@ def _recompute_all_caches(con, bieb):
             settings = json.loads(row["settings_json"] or "{}")
             info, results = load_landmarks(npz_path)
             perspective = None
-            persp_dict = settings.get("perspectief") or settings.get("perspective")
+            # "perspective" is the current spelling (step 4 above already renamed it
+            # for every row by the time this runs); "perspectief" is read as a
+            # fallback only for the rare case this recompute runs against
+            # settings_json step 4 didn't reach (malformed JSON, since step 4 skips
+            # those rows too).
+            persp_dict = settings.get("perspective") or settings.get("perspectief")
             if persp_dict:
                 try:
                     perspective = PerspectiveConfig.uit_dict(persp_dict)
@@ -678,11 +738,22 @@ def list_calibrations(bieb, beeld_w=None, beeld_h=None):
 
     With `beeld_w`/`beeld_h`, only calibrations of that same image size are returned:
     the lines are in pixels, so on a differently-sized video they'd sit next to where
-    they should. Returns dicts with id/title/skater/date/`perspectief` (the raw dict)
-    and `notitie`.
+    they should. Returns dicts with id/title/skater/date/`perspective` (the raw dict)
+    and `note`.
 
     There's deliberately no separate calibration table: the calibration lives in
     `settings_json`, so this costs one json.loads per analysis and no schema bump."""
+    # Local import, same reasoning as `_recompute_all_caches` below: keeps skate_db.py
+    # importable without pulling in skate_perspective.py at module load. `from_dict()`
+    # dual-reads image_w/image_h/note against the old beeld_w/beeld_h/notitie spelling
+    # (Pattern E) -- reading `inv["beeld_w"]` directly here was a real, pre-existing bug
+    # (found while translating this function): CalibrationInput.to_dict() has written
+    # `image_w`/`image_h`/`note` since phase 3, so every calibration saved since then
+    # had this function silently treat it as sizeless and note-less. Same class of bug
+    # as the one already fixed in skate_gui.py's `_calibration_rows` (see the phase 8a
+    # session 2 log in TRANSLATION_PROGRESS.md) -- that fix never touched this function,
+    # since this one lives in skate_db.py.
+    from skate_perspective import CalibrationInput
     uit = []
     with _connect(bieb) as con:
         rijen = con.execute(
@@ -695,18 +766,26 @@ def list_calibrations(bieb, beeld_w=None, beeld_h=None):
             inst = json.loads(r["settings_json"] or "{}")
         except (ValueError, TypeError):
             continue
-        p = inst.get("perspectief")
-        if not p or not p.get("invoer"):
+        # `perspective` is the current settings-json storage key (skate_gui.py writes
+        # it as of this session); `perspectief` is read as a fallback for an analysis
+        # saved before this rename. Distinct from `perspectief=`, the keyword argument
+        # into analyze(), which stays Dutch permanently -- see TRANSLATION_PROGRESS.md's
+        # glossary entry for `doel_kader`, which the same reasoning applies to.
+        p = inst.get("perspective") or inst.get("perspectief")
+        if not p or "calibration_input" not in p and "invoer" not in p:
             continue
-        inv = p["invoer"]
-        if beeld_w is not None and int(inv.get("beeld_w", -1)) != int(beeld_w):
+        try:
+            inv = CalibrationInput.from_dict(p.get("calibration_input", p.get("invoer")))
+        except (KeyError, TypeError, ValueError):
             continue
-        if beeld_h is not None and int(inv.get("beeld_h", -1)) != int(beeld_h):
+        if beeld_w is not None and inv.image_w != int(beeld_w):
+            continue
+        if beeld_h is not None and inv.image_h != int(beeld_h):
             continue
         uit.append({"id": r["id"], "titel": r["title"], "datum": r["date"],
-                    "schaatser": r["schaatser"], "w": inv.get("beeld_w"),
-                    "h": inv.get("beeld_h"), "perspectief": p,
-                    "notitie": inv.get("notitie", "")})
+                    "schaatser": r["schaatser"], "w": inv.image_w,
+                    "h": inv.image_h, "perspective": p,
+                    "note": inv.note})
     return uit
 
 
@@ -724,7 +803,7 @@ def save_analysis(bieb, schaatser_id, titel, video_pad, info, resultaten, events
     copied video) is kept so a colleague opening the analysis while the cloud sync is
     still running can recognize a half download.
 
-    The **app version** and the full `backend_naam` are added to `instellingen` here —
+    The **app version** and the full `backend_name` are added to `instellingen` here —
     one place, so every save route (single analysis, batch, self-test) records it
     without having to think about it. It travels in `settings_json`, so no schema bump.
     `setdefault`: a caller that already filled it in wins.
@@ -735,12 +814,14 @@ def save_analysis(bieb, schaatser_id, titel, video_pad, info, resultaten, events
     (`source_fragments`).
     """
     inst = dict(instellingen or {})
-    # NOTE: these three keys stay Dutch on purpose, same reasoning as load_config()
-    # above — schaats_gui.py isn't translated yet and reads `app_versie`/`backend_naam`
-    # by these exact names in its Info dialog and title tooltip.
-    inst.setdefault("backend_naam", backend or "")   # the `backend` column is normalized
+    # translate-to-english (phase 8): `backend_name`/`app_version` (English keys, both
+    # renamed together with skate_gui.py's own reader in the same commit — the
+    # v5->v6 migration above rewrites these two keys in every already-saved analysis,
+    # so there's no old spelling left to dual-read here). `app_commit` needed no
+    # rename, it was already English.
+    inst.setdefault("backend_name", backend or "")   # the `backend` column is normalized
     versie = app_version()
-    inst.setdefault("app_versie", versie["label"])
+    inst.setdefault("app_version", versie["label"])
     inst.setdefault("app_commit", versie["commit"])
 
     analyse_id = str(uuid.uuid4())
@@ -1653,11 +1734,18 @@ if __name__ == "__main__":
             # A skater must exist first so the analyse row's foreign key holds.
             c.execute("INSERT INTO schaatser(naam) VALUES ('Oude Schaatser')")
             sid_v5 = c.execute("SELECT id FROM schaatser").fetchone()[0]
+            oude_instellingen = json.dumps({
+                "smooth_n": 5, "bocht_overslaan": True, "perspectief_gebruikt": True,
+                "perspectief": {"invoer": {"beeld_w": 64}}, "backend_naam": "YOLO-pose + ByteTrack",
+                "app_versie": "2026-01-01 - oud1234",
+                # doel_punt/doel_kader must survive the migration UNCHANGED -- they
+                # stay Dutch permanently (see step 4's comment in _migrate).
+                "doel_punt": [0.5, 0.5]})
             c.execute(
                 "INSERT INTO analyse(id, schaatser_id, titel, datum, video_bestand, "
                 "w, h, fps, totaal_frames, backend, instellingen_json) VALUES "
                 "('a-v5', ?, 'Oude analyse', '2026-01-01', 'media/a-v5/v.mp4', "
-                "64, 48, 25.0, 20, 'yolo', '{}')", (sid_v5,))
+                "64, 48, 25.0, 20, 'yolo', ?)", (sid_v5, oude_instellingen))
             c.execute(
                 "INSERT INTO afzet_event_cache(analyse_id, idx, been, start_frame, "
                 "eind_frame, hoek, min_hoek, max_hoek, opmerking) VALUES "
@@ -1675,6 +1763,16 @@ if __name__ == "__main__":
             ).fetchone()
             assert row["leg"] == "links"          # leg VALUES stay Dutch for now, by design
             assert row["note"] == "truncated"      # marker TEXT is remapped even on fallback
+            # Step 4: settings_json content keys renamed in place, doel_punt untouched.
+            inst_v5 = json.loads(
+                c.execute("SELECT settings_json FROM analysis WHERE id = 'a-v5'"
+                         ).fetchone()[0])
+            assert inst_v5["skip_corner"] is True and "bocht_overslaan" not in inst_v5
+            assert inst_v5["perspective_used"] is True and "perspectief_gebruikt" not in inst_v5
+            assert inst_v5["perspective"] == {"invoer": {"beeld_w": 64}} and "perspectief" not in inst_v5
+            assert inst_v5["backend_name"] == "YOLO-pose + ByteTrack" and "backend_naam" not in inst_v5
+            assert inst_v5["app_version"] == "2026-01-01 - oud1234" and "app_versie" not in inst_v5
+            assert inst_v5["doel_punt"] == [0.5, 0.5]
 
         # Newer DB (a colleague with a more recent app): refuse, don't downgrade.
         nieuw = os.path.join(tmp, "nieuw_v99")
@@ -1696,6 +1794,45 @@ if __name__ == "__main__":
         os.environ[ENV_LIBRARY] = bieb
         assert library_path() == bieb
         del os.environ[ENV_LIBRARY]
+
+        # config.json: the one-time "SchaatsAnalyse" -> "SkateAnalysis" folder copy
+        # (config_path) and the old-key -> new-key dual read (load_config), both
+        # added together with the phase-8 settings-key rename. A trainer upgrading
+        # from before this change has a config.json with the old folder AND the old
+        # keys; both must still resolve to the value they saved.
+        oud_appdata = os.environ.get("APPDATA")
+        appdata_tmp = os.path.join(tmp, "appdata_migratie")
+        os.environ["APPDATA"] = appdata_tmp
+        try:
+            oude_map = os.path.join(appdata_tmp, "SchaatsAnalyse")
+            os.makedirs(oude_map)
+            with open(os.path.join(oude_map, "config.json"), "w", encoding="utf-8") as f:
+                json.dump({"bibliotheek_pad": "D:/Oude Bieb", "trainer_naam": "Oude Trainer"}, f)
+            pad = config_path()   # should copy the old file into the new folder
+            assert os.path.isfile(pad) and "SkateAnalysis" in pad
+            assert os.path.isfile(os.path.join(oude_map, "config.json")), \
+                "the old file should be copied, not moved"
+            cfg = load_config()
+            assert cfg["library_path"] == "D:/Oude Bieb" and cfg["trainer_name"] == "Oude Trainer"
+            assert library_path() == "D:/Oude Bieb" and trainer_name() == "Oude Trainer"
+            # A second call must not re-copy over a config.json that already exists
+            # (e.g. one already updated by a newer save_config() call).
+            with open(pad, "w", encoding="utf-8") as f:
+                json.dump({"library_path": "D:/Nieuwe Bieb"}, f)
+            assert config_path() == pad
+            assert load_config()["library_path"] == "D:/Nieuwe Bieb"
+            # A brand-new config.json (no old folder at all) just gets the defaults --
+            # no crash from an absent SchaatsAnalyse folder.
+            os.remove(pad)
+            os.rmdir(os.path.dirname(pad))
+            shutil.rmtree(oude_map)
+            cfg = load_config()
+            assert cfg["library_path"] == default_library() and cfg["trainer_name"] == ""
+        finally:
+            if oud_appdata is None:
+                os.environ.pop("APPDATA", None)
+            else:
+                os.environ["APPDATA"] = oud_appdata
 
         # Synthetic analysis (phase 0 serialization form) + dummy video file.
         n = 20
@@ -1735,12 +1872,16 @@ if __name__ == "__main__":
         assert set(versie) == {"commit", "datum", "vuil", "label"}
         assert bool(versie["label"]) == bool(versie["commit"])
 
-        # `backend_naam` deliberately left out: save_analysis should fill it in itself.
+        # `backend_name` deliberately left out: save_analysis should fill it in itself.
+        # `doel_punt`/`doel_kader` stay Dutch on purpose (settings-json storage keys
+        # that mirror analyze()'s own permanently-Dutch keyword arguments -- see
+        # TRANSLATION_PROGRESS.md's glossary entry for `doel_kader`); every other key
+        # here is English since this session's phase-8 settings-key rename.
         instellingen = {"smooth_n": 5, "threshold": 0.015, "smooth_landmarks": True,
-                        "bocht_overslaan": True,
+                        "skip_corner": True,
                         "doel_punt": [0.5, 0.5], "doel_kader": [0.45, 0.4, 0.55, 0.6],
                         "horizon_deg": 0.0, "auto_horizon": False,
-                        "heavy": False, "perspectief_gebruikt": False}
+                        "heavy": False, "perspective_used": False}
         aid = save_analysis(bieb, sid, "Proefanalyse", video, info, resultaten, events,
                              backend="YOLO-pose + ByteTrack", instellingen=instellingen,
                              aangemaakt_door="Coach Tester")
@@ -1753,7 +1894,7 @@ if __name__ == "__main__":
         assert abs(la[0]["gem_hoek"] - 41.0) < 1e-9 and la[0]["backend"] == "yolo"
         assert la[0]["created_by"] == "Coach Tester"
         # The list view carries the settings along (for the app-version tooltip).
-        assert la[0]["instellingen"]["app_versie"] == versie["label"]
+        assert la[0]["instellingen"]["app_version"] == versie["label"]
         assert list_skaters(bieb)[0]["aantal_analyses"] == 1
 
         # analysis_meta = the same meta without reading the npz.
@@ -1771,13 +1912,61 @@ if __name__ == "__main__":
         # app version and the full backend name.
         opgeslagen = data["meta"]["instellingen"]
         assert all(opgeslagen[k] == v for k, v in instellingen.items())
-        assert opgeslagen["backend_naam"] == "YOLO-pose + ByteTrack"
-        assert opgeslagen["app_versie"] == versie["label"]
+        assert opgeslagen["backend_name"] == "YOLO-pose + ByteTrack"
+        assert opgeslagen["app_version"] == versie["label"]
         assert opgeslagen["app_commit"] == versie["commit"]
         assert data["meta"]["created_by"] == "Coach Tester"
         assert data["meta"]["video_bytes"] == os.path.getsize(video)
         assert os.path.isfile(data["video_pad"])
         assert data["video_pad"] == analysis_video_path(bieb, aid)
+
+        # `list_calibrations`: a real calibration through the real PerspectiveConfig/
+        # CalibrationInput round-trip (not a hand-built dict), since indexing the
+        # nested calibration-input dict by hand is exactly what the real pre-existing
+        # bug this function had did wrong (see its docstring). Also covers the
+        # `perspective`/`perspectief` top-level dual-read together in one library.
+        # On its own skater + cleaned up via delete_skater afterwards, so it doesn't
+        # perturb the analysis counts the rest of this self-test asserts against `sid`.
+        from skate_analysis import PerspectiveConfig
+        from skate_perspective import CalibrationInput, _SynthCamera, _scene_lines
+        sid_persp = create_skater(bieb, "Perspectief Tester")
+        # Same pose as skate_perspective.py's own serialization self-test -- known to
+        # produce a well-conditioned (non-degenerate) calibration.
+        cam = _SynthCamera("test", C=(-8, -14, 2.5), target=(6, 8, 0), roll_deg=0.0, f=1400)
+        track, cross = _scene_lines(cam)
+        inv = CalibrationInput(track_lines=track, cross_lines=cross,
+                               image_w=cam.w, image_h=cam.h, note="kalibratie-notitie")
+        cfg = PerspectiveConfig(calibration=inv.calibrate(), calibration_input=inv,
+                                lower_leg_l=0.44)
+        instellingen_persp = dict(instellingen, perspective=cfg.to_dict())
+        aid_p = save_analysis(bieb, sid_persp, "Met perspectief", video, info, resultaten,
+                              events, backend="YOLO-pose + ByteTrack",
+                              instellingen=instellingen_persp)
+        # A second analysis using the OLD top-level key + the old nested key spelling
+        # (as if saved before this session's rename), to confirm the dual-read still
+        # resolves both at once, not just whichever one is currently written.
+        def _line_to_list(line):
+            return [[float(p[0]), float(p[1])] for p in line]
+        oud_persp = {"invoer": {"rijlijnen": [_line_to_list(l) for l in track],
+                                "dwarslijnen": [_line_to_list(l) for l in cross],
+                                "beeld_w": cam.w, "beeld_h": cam.h,
+                                "lijnafstand": 4.0, "notitie": "oude stijl"}}
+        aid_oud = save_analysis(bieb, sid_persp, "Oude stijl", video, info, resultaten,
+                                events, backend="YOLO-pose + ByteTrack",
+                                instellingen=dict(instellingen, perspectief=oud_persp))
+
+        kals = list_calibrations(bieb, beeld_w=cam.w, beeld_h=cam.h)
+        gevonden = {k["id"]: k for k in kals}
+        assert aid_p in gevonden and aid_oud in gevonden
+        assert gevonden[aid_p]["note"] == "kalibratie-notitie"
+        assert gevonden[aid_p]["w"] == cam.w and gevonden[aid_p]["h"] == cam.h
+        assert gevonden[aid_p]["perspective"] == cfg.to_dict()
+        assert gevonden[aid_oud]["note"] == "oude stijl"
+        # A different image size must exclude both (the lines are in pixels).
+        assert list_calibrations(bieb, beeld_w=cam.w + 1, beeld_h=cam.h) == []
+        # `aid` (the very first analysis, no calibration at all) is never returned.
+        assert aid not in gevonden
+        delete_skater(bieb, sid_persp)   # cascade: both analyses + their media folders
 
         # Cloud-sync check (phase 4): size matches -> None; smaller -> incomplete; gone -> missing.
         assert video_sync_status(data["video_pad"], data["meta"]["video_bytes"]) is None

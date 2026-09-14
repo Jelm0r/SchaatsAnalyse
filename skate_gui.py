@@ -388,10 +388,12 @@ def _calibration_rows(inst):
     storage but is worked out again here -- exactly like when the analysis is opened --
     so the Info dialog shows what the analysis would actually use *now*.
 
-    The top-level `perspectief` key (and the row labels/text below) are
-    `instellingen_json` content and stay Dutch here on purpose, deferred to Phase 8d
-    together with `doel_punt`/`doel_kader`/etc (see TRANSLATION_PROGRESS.md). The
-    *nested* calibration-input dict, though, is read through
+    Reads `inst["perspective"]`, falling back to the old `inst["perspectief"]` spelling
+    for an analysis saved before this dual-read was added (Pattern E -- see
+    TRANSLATION_PROGRESS.md's "Deferred to Phase 8" section: `perspective` is the
+    settings-json *storage* key, unlike `perspectief=` the keyword argument into
+    `analyze()`, which stays Dutch permanently and is a separate concern from this
+    dict key). The *nested* calibration-input dict is read through
     `CalibrationInput.from_dict()` rather than by indexing raw keys directly: that
     dict's keys have been English since Phase 3 (`track_lines`, `image_w`, ... -- see
     `CalibrationInput.to_dict()`), and `from_dict()` already dual-reads the old Dutch
@@ -402,7 +404,7 @@ def _calibration_rows(inst):
     every perspective-corrected analysis saved since Phase 3 landed (confirmed with a
     throwaway round-trip: the old code returned `[]` for a `PerspectiveConfig.to_dict()`
     dict, this version returns the expected rows)."""
-    p = inst.get("perspectief")
+    p = inst.get("perspective") or inst.get("perspectief")
     if not p:
         return []
     inv_dict = p.get("calibration_input") or p.get("invoer")
@@ -412,30 +414,32 @@ def _calibration_rows(inst):
     # `method`/`methode` may still hold an old on-disk value ('onderbeen'/'beenvlak',
     # from an analysis saved before Phase 3) -- same normalization as the shim in
     # `skate_perspective.reconstruct_angle()`.
-    methode_raw = p.get("method", p.get("methode"))
-    methode = {"lower_leg": "onderbeenlengte (bol-snijding)", "onderbeen": "onderbeenlengte (bol-snijding)",
-              "leg_plane": "beenvlak (rijrichting)", "beenvlak": "beenvlak (rijrichting)"
-              }.get(methode_raw, methode_raw)
-    onderbeen_l = p.get("lower_leg_l", p.get("onderbeen_l"))
+    method_raw = p.get("method", p.get("methode"))
+    method = {"lower_leg": "lower-leg length (sphere intersection)",
+              "onderbeen": "lower-leg length (sphere intersection)",
+              "leg_plane": "leg plane (direction of travel)",
+              "beenvlak": "leg plane (direction of travel)"
+              }.get(method_raw, method_raw)
+    lower_leg_l = p.get("lower_leg_l", p.get("onderbeen_l"))
     rows = [
-        ("Kalibratie:", f"{len(inv.track_lines)} baanlijnen + {len(inv.cross_lines)} dwarslijnen, "
-                        f"{inv.line_distance} m uit elkaar, "
-                        f"op beeld {inv.image_w}×{inv.image_h}",
-         "De nagetrokken lijnen worden bewaard; de camerastand wordt eruit herberekend."),
-        ("Reconstructie:", methode
-         + (f", onderbeen {onderbeen_l * 100:.1f} cm" if onderbeen_l else ""),
+        ("Calibration:", f"{len(inv.track_lines)} track lines + {len(inv.cross_lines)} cross lines, "
+                        f"{inv.line_distance} m apart, "
+                        f"on a {inv.image_w}×{inv.image_h} image",
+         "The traced lines are saved; the camera pose is recomputed from them."),
+        ("Reconstruction:", method
+         + (f", lower leg {lower_leg_l * 100:.1f} cm" if lower_leg_l else ""),
          None),
     ]
     if inv.note:
-        rows.append(("Kalibratie-notitie:", inv.note, None))
+        rows.append(("Calibration note:", inv.note, None))
     try:
         kal = inv.calibrate()
-        rows.append(("Camerastand:",
-                      f"f = {kal.f:.0f} px{' (geschat)' if kal.f_estimated else ''}, "
-                      f"hoogte {kal.camera_height:.1f} m, horizon {kal.horizon_deg:+.2f}°, "
-                      f"residu {kal.residual_px:.1f} px", None))
+        rows.append(("Camera pose:",
+                      f"f = {kal.f:.0f} px{' (estimated)' if kal.f_estimated else ''}, "
+                      f"height {kal.camera_height:.1f} m, horizon {kal.horizon_deg:+.2f}°, "
+                      f"residual {kal.residual_px:.1f} px", None))
     except Exception as e:
-        rows.append(("Camerastand:", f"niet herberekenbaar: {e}", None))
+        rows.append(("Camera pose:", f"cannot be recomputed: {e}", None))
     return rows
 
 # File filter for every video picker, derived from the extensions the library itself
@@ -2512,9 +2516,10 @@ class AnalysisInfoDialog(QDialog):
             ("Skater:", schaatser_naam or "—", None),
             ("Analysis date:", datum, None),
             ("Created by:", meta.get("aangemaakt_door") or "—", None),
-            ("App version:", inst.get("app_versie") or "unknown (from before this feature)",
-             self.APPVERSIE_TIP),
-            ("Backend:", inst.get("backend_naam") or meta.get("backend") or "—", None),
+            ("App version:", inst.get("app_version", inst.get("app_versie"))
+             or "unknown (from before this feature)", self.APPVERSIE_TIP),
+            ("Backend:", inst.get("backend_name", inst.get("backend_naam"))
+             or meta.get("backend") or "—", None),
             ("Video:", f"{os.path.basename(meta.get('video_bestand') or '')}  —  "
                        f"{meta.get('w')}×{meta.get('h')} @ "
                        f"{(meta.get('fps') or 0):.1f} fps, "
@@ -2529,14 +2534,15 @@ class AnalysisInfoDialog(QDialog):
              "Click = the detection pass looks for the skater at that spot. Box = on top\n"
              "of that, the spyglass follows them from the box wherever detection doesn't\n"
              "see them (yet), e.g. because they're small in frame."),
-            ("Skip corner:", _yes_no(inst.get("bocht_overslaan")), None),
+            ("Skip corner:", _yes_no(inst.get("skip_corner", inst.get("bocht_overslaan"))), None),
             ("Interlacing filtered:",
              _yes_no(inst.get("deinterlaced")) if "deinterlaced" in inst
              else "unknown (from before this feature)",
              "Camcorder footage (1080i) weaves two moments 1/50 s apart into one\n"
              "frame. If this was on, that combing was filtered out before detection."),
             ("Horizon:", horizon, None),
-            ("Perspective correction:", _yes_no(inst.get("perspectief_gebruikt")), None),
+            ("Perspective correction:",
+             _yes_no(inst.get("perspective_used", inst.get("perspectief_gebruikt"))), None),
         ] + _calibration_rows(inst)
         for label, waarde, tip in rijen:
             w = QLabel(str(waarde))
@@ -6796,7 +6802,7 @@ class MainWindow(QMainWindow):
             return
         self.trainer_naam = naam.strip()
         cfg = skate_db.load_config()
-        cfg["trainer_naam"] = self.trainer_naam
+        cfg["trainer_name"] = self.trainer_naam
         skate_db.save_config(cfg)
         self._show_trainer_naam()
 
@@ -6805,7 +6811,7 @@ class MainWindow(QMainWindow):
         if not pad:
             return
         cfg = skate_db.load_config()
-        cfg["bibliotheek_pad"] = pad
+        cfg["library_path"] = pad
         skate_db.save_config(cfg)
         self._set_library(pad)
 
@@ -6905,7 +6911,8 @@ class MainWindow(QMainWindow):
                 # version -- so without opening it you can see whether an analysis was
                 # still run with old code.
                 door = (a.get("aangemaakt_door") or "").strip()
-                versie = ((a.get("instellingen") or {}).get("app_versie") or "").strip()
+                inst_a = a.get("instellingen") or {}
+                versie = (inst_a.get("app_version", inst_a.get("app_versie")) or "").strip()
                 tip = "\n".join(r for r in (f"Created by {door}" if door else "",
                                             f"App version: {versie}" if versie else "") if r)
                 for kolom, tekst in enumerate(
@@ -7088,19 +7095,19 @@ class MainWindow(QMainWindow):
             "smooth_n": self.smooth_n,
             "threshold": self.threshold,
             "smooth_landmarks": not self.geen_smoothing,
-            "bocht_overslaan": self.bocht_overslaan,
+            "skip_corner": self.bocht_overslaan,
             "deinterlaced": self.deinterlacen,
             "doel_punt": list(self.doel_punt) if self.doel_punt else None,
             "doel_kader": list(self.doel_kader) if self.doel_kader else None,
             "horizon_deg": self.horizon_deg,
             "auto_horizon": self.auto_horizon,
             "heavy": heavy,
-            "backend_naam": BACKEND_NAME,
-            "perspectief_gebruikt": self.perspectief is not None,
+            "backend_name": BACKEND_NAME,
+            "perspective_used": self.perspectief is not None,
             # The calibration input (lines + parameters), so reopening recomputes the
             # correction instead of letting it evaporate -- and so a next analysis from
             # the same camera position can reuse it.
-            "perspectief": self.perspectief.naar_dict() if self.perspectief else None,
+            "perspective": self.perspectief.naar_dict() if self.perspectief else None,
         }
         self._pending_save = {"schaatser_id": dlg.schaatser_id, "titel": dlg.titel,
                                 "instellingen": instellingen}
@@ -7131,7 +7138,7 @@ class MainWindow(QMainWindow):
             for k in eerdere[:15]:
                 datum = k["datum"] or ""
                 naam = k["schaatser"] or "?"
-                extra = f" — {k['notitie']}" if k["notitie"] else ""
+                extra = f" — {k['note']}" if k["note"] else ""
                 keuzes.append(f"{k['titel']} ({naam}, {datum}){extra}")
             keuze, ok = QInputDialog.getItem(
                 self, "Reuse a calibration?",
@@ -7145,7 +7152,7 @@ class MainWindow(QMainWindow):
             idx = keuzes.index(keuze)
             if idx > 0:
                 try:
-                    config = PerspectiveConfig.uit_dict(eerdere[idx - 1]["perspectief"])
+                    config = PerspectiveConfig.uit_dict(eerdere[idx - 1]["perspective"])
                     invoer = config.invoer
                 except Exception as e:
                     QMessageBox.warning(
@@ -7201,10 +7208,16 @@ class MainWindow(QMainWindow):
         # Perspective calibration back from the settings (the lines are saved, the
         # matrices are recomputed here). If that fails, opening just continues without
         # correction -- with a warning, since the angles then deviate.
+        # "perspective" is the settings-json storage key (English since this session);
+        # "perspectief" is the old spelling, read as a fallback for an analysis saved
+        # before this rename -- not to be confused with the `perspectief=` keyword
+        # argument into analyze()/process_derivatives, which is a separate, permanently
+        # Dutch concern (see TRANSLATION_PROGRESS.md's "Deferred to Phase 8" section).
+        perspectief_dict = inst.get("perspective") or inst.get("perspectief")
         perspectief, persp_fout = None, None
-        if inst.get("perspectief"):
+        if perspectief_dict:
             try:
-                perspectief = PerspectiveConfig.uit_dict(inst["perspectief"])
+                perspectief = PerspectiveConfig.uit_dict(perspectief_dict)
             except Exception as e:
                 persp_fout = str(e)
 
@@ -7231,7 +7244,7 @@ class MainWindow(QMainWindow):
             "titel": data["meta"]["titel"],
             "smooth_n": smooth_n,
             "threshold": threshold,
-            "perspectief_gebruikt": bool(inst.get("perspectief_gebruikt")),
+            "perspectief_gebruikt": bool(inst.get("perspective_used", inst.get("perspectief_gebruikt"))),
             "perspectief": perspectief,
             "perspectief_fout": persp_fout,
             # This way the player sees exactly the pixels the measurement was made on. An
@@ -7815,16 +7828,16 @@ class MainWindow(QMainWindow):
                 "smooth_n": smooth_n,
                 "threshold": threshold,
                 "smooth_landmarks": not geen_smoothing,
-                "bocht_overslaan": bocht,
+                "skip_corner": bocht,
                 "deinterlaced": deint,
                 "doel_punt": list(doel) if doel else None,
                 "doel_kader": list(kader) if kader else None,
                 "horizon_deg": horizon_deg,
                 "auto_horizon": auto_horizon,
                 "heavy": heavy,
-                "backend_naam": BACKEND_NAME,
-                "perspectief_gebruikt": batch_perspectief is not None,
-                "perspectief": batch_perspectief.naar_dict() if batch_perspectief else None,
+                "backend_name": BACKEND_NAME,
+                "perspective_used": batch_perspectief is not None,
+                "perspective": batch_perspectief.naar_dict() if batch_perspectief else None,
             }
             taken.append({
                 "input_pad": pad, "schaatser_id": schaatser_id, "titel": titel,

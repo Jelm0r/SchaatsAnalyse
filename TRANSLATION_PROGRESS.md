@@ -863,6 +863,99 @@ document supersedes it for anything about actual progress and lessons learned).
         `schaats_schermtest.py` full run -- 16/16 windows pass, including `FragmentPicker`
         and both `ViewWindow` variants.
 
+      - **Session 13** -- the deferred `instellingen_json`/`config.json` key
+        translation from "Deferred to Phase 8" below, done as one coordinated change
+        across `skate_db.py` (reader/writer of both) and `skate_gui.py` (the actual
+        construction/read sites). **Narrower than that section originally scoped**,
+        because of something only discovered while doing this: `doel_punt`/
+        `doel_kader`/`perspectief` (the calibration-blob-holding keyword, not the
+        storage key -- see below) are already permanently settled as Dutch by the
+        Phase 6 glossary note on `doel_kader` ("kept `bocht`, `doel_punt`,
+        `doel_kader`, `perspectief`, `waarschuwing_callback` as the literal parameter
+        names of the public `analyze()` function... Still Dutch in `schaats_gui.py`
+        itself"), which *supersedes* this section's framing of them as merely
+        "deferred" -- they are not translated by this session and should not be
+        renamed by a future one either. Renamed instead, as pure settings-json/
+        config.json *storage keys* with no tie to any function's keyword arguments:
+        `bocht_overslaan`->`skip_corner`, `perspectief_gebruikt`->`perspective_used`,
+        `backend_naam`->`backend_name`, `app_versie`->`app_version` (`app_commit`
+        needed no change, already English), plus config.json's `bibliotheek_pad`->
+        `library_path` and `trainer_naam`->`trainer_name`. Also renamed the **saved
+        calibration blob's own key**, `perspectief`->`perspective` (distinct from the
+        live `perspectief=` keyword argument that only ever exists in memory --
+        the blob is `self.perspectief.naar_dict()`, a JSON-able snapshot, so nothing
+        stops its storage key from having a different spelling than the attribute
+        holding the live object that produced it).
+
+        **One-time rewrite of existing analyses' settings_json**, done via the
+        database migration mechanism rather than a separate manual script: extended
+        the *already-uncommitted-to-production* v5->v6 `_migrate` step (this whole
+        effort is an unmerged branch -- no real trainer's library has gone through
+        this schema version yet, so extending that same step is safe and is exactly
+        the "coordinated one-time rewrite" this section originally called for,
+        without needing a bespoke migration tool) with a new step 4 that renames the
+        four keys above inside every analysis row's `settings_json`, leaving
+        `doel_punt`/`doel_kader`/`perspectief` untouched. `config.json` got the
+        equivalent for its own two keys: `load_config()` now dual-reads old/new (a
+        single per-user file, cheap to keep permanently rather than migrate), and
+        `config_path()` gained the same one-time folder copy
+        (`%APPDATA%\SchaatsAnalyse` -> `...\SkateAnalysis`) that `data_dir()` in
+        `skate_environment.py` already had for `%LOCALAPPDATA%` -- **a real,
+        pre-existing gap found while doing this**: `skate_db.py`'s `config_path()`
+        was already pointing at the new folder name since Phase 5, with no migration
+        of its own, so any real installation upgrading straight to a post-Phase-5
+        build would have silently lost its saved library path and trainer name (the
+        module docstring for `data_dir()` even said "not %APPDATA% either (where the
+        library config stays)", which stopped being true the moment Phase 5 renamed
+        `config_path()`'s folder without noticing the docstring's assumption).
+
+        **Two more real, pre-existing bugs found and fixed while touching
+        `list_calibrations`** (Pattern D, predating this session -- introduced when
+        Phase 3 translated `CalibrationInput.to_dict()`'s keys out from under this
+        still-Dutch function, same root cause as the `_calibration_rows` bug session
+        2 already found and fixed in `skate_gui.py`, but this one lives in
+        `skate_db.py` and was never touched by that fix): (1) it indexed the nested
+        calibration dict directly by the old Dutch keys (`inv.get("beeld_w")`,
+        `inv.get("beeld_h")`, `inv.get("notitie", "")`), which no longer exist in
+        anything `to_dict()` has written since Phase 3 (`image_w`/`image_h`/`note`)
+        -- so **every image-size filter and every displayed note silently failed**
+        for any perspective-corrected analysis, for every caller of this function
+        (there had never been a self-test for it at all, in either language). Fixed
+        by reading through `CalibrationInput.from_dict()`, the same fix session 2
+        already applied to `_calibration_rows`. (2) The function's own returned dict
+        used the storage-key spelling (`"perspectief"`/`"notitie"`) that this session
+        was already in the middle of renaming -- renamed the *return value*'s keys to
+        `"perspective"`/`"note"` too (its only caller, `skate_gui.py`'s
+        `_choose_perspectief`, updated in the same commit).
+
+        Also translated `_calibration_rows`' row labels/text (Info dialog) to
+        English while in there -- this was the one piece of Phase 8b/8c explicitly
+        left for "Phase 8d's coordinated rewrite" back in session 10/11, and this
+        session's settings-key rename is that rewrite.
+
+        **Verified**: `py_compile` across every touched file; a real
+        `import skate_db`/`import skate_analysis`/`import skate_perspective` (plain
+        venv) and `import skate_gui` (`.venv-yolo`, offscreen Qt); `skate_db.py`'s own
+        self-test, extended with (a) a `config.json` migration+dual-read round-trip
+        (old-folder copy, old-key->new-key, a config.json already on the new keys
+        untouched, a from-scratch config with no old folder at all) and (b) a
+        `list_calibrations` round-trip using a **real** `PerspectiveConfig`/
+        `CalibrationInput` (via `skate_perspective`'s own synthetic-camera self-test
+        helpers, not a hand-built dict -- hand-indexing is exactly what the bug this
+        fixes did wrong) covering both the new-format and an old-format
+        (`"perspectief"`/`"invoer"`/`"beeld_w"`/`"notitie"`) analysis in the same
+        library, on its own skater cleaned up via `delete_skater` so it doesn't
+        perturb the rest of the self-test's analysis counts; the v5->v6 migration
+        test extended with a real old-style `instellingen_json` fixture asserting
+        every renamed key lands on its new spelling with the old one gone, and
+        `doel_punt` surviving untouched; two more throwaway scripts (a raw-dict
+        dual-read sanity check for all four renamed keys in both directions, and
+        `_load_analysis_data`'s exact perspective-reconstruction logic against a real
+        `PerspectiveConfig.to_dict()` under both the new and old top-level key);
+        `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (updated its own
+        `bocht_overslaan` fixture key to `skip_corner`) -- all 16 windows pass,
+        including `CalibrationPicker` and `AnalysisInfoDialog`.
+
       - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
         first, don't trust these verbatim):
         - A few identifiers deliberately left Dutch this session for being one step
@@ -874,13 +967,9 @@ document supersedes it for anything about actual progress and lessons learned).
           `selectie` (`FragmentBar`'s other two `zet()` keywords, siblings of
           `fragments`/`analyzed`, not renamed since they weren't on the assigned list
           and `cursor` there is already English).
-        - The deferred `instellingen_json`/`config.json` key translation + one-time
-          library rewrite (see "Deferred to Phase 8" below) -- do this once both the
-          reader (`skate_db.py`) and every writer (`MainWindow`'s `_new_analysis`/
-          `_new_batch_analysis`) can be changed together in one commit. This is also
-          the right moment to revisit `save_analysis`'s own still-Dutch `bron_id`/
-          `bron_start_frame`/`bron_eind_frame` parameters (see this session's Pattern G
-          note above) and the day's Phase 8-scoped identifiers noted above.
+        - `save_analysis`'s own still-Dutch `bron_id`/`bron_start_frame`/
+          `bron_eind_frame` parameters (noted in session 12's Pattern G finding) --
+          not touched by session 13, still open.
         - `main()` is fully translated (part of session 8, and session 9 confirmed
           nothing in it needed a rename) -- nothing left there.
         Re-`grep -n "^class \|^def "` at the start of each session rather than trusting
@@ -942,14 +1031,14 @@ document supersedes it for anything about actual progress and lessons learned).
 | schaatser | skater | Product name "SchaatsAnalyse" → **"SkateAnalysis"** (user-chosen). |
 | bronvideo | source_video | |
 | bron_markering | source_marking | |
-| kader (user-drawn box) | box | Done in `skate_yolo.py` (Phase 6) for every *internal-only* name: `KADER_MAAT_MAX`→`BOX_SIZE_MAX`, `KADER_MIN_HOOGTE_PX`→`BOX_MIN_HEIGHT_PX`, `_Kijkglas.start_kader`→`start_box`, etc. **`doel_kader` the parameter itself stays Dutch** — superseding the `target_box` this row originally planned — because `schaats_gui.py`'s two `analyze()` call sites pass it as a keyword argument (`doel_kader=...`); see the `bocht`/`doel_punt`/`perspectief`/`waarschuwing_callback` note in the Phase 6 entry above. Still Dutch in `schaats_gui.py` itself (Phase 8). |
+| kader (user-drawn box) | box | Done in `skate_yolo.py` (Phase 6) for every *internal-only* name: `KADER_MAAT_MAX`→`BOX_SIZE_MAX`, `KADER_MIN_HOOGTE_PX`→`BOX_MIN_HEIGHT_PX`, `_Kijkglas.start_kader`→`start_box`, etc. **`doel_kader` the parameter itself stays Dutch permanently** — superseding the `target_box` this row originally planned — because `schaats_gui.py`'s two `analyze()` call sites pass it as a keyword argument (`doel_kader=...`); see the `bocht`/`doel_punt`/`perspectief`/`waarschuwing_callback` note in the Phase 6 entry above. Confirmed settled, not just deferred, in Phase 8 session 13 (see "Settled in Phase 8, session 13" below): stays Dutch everywhere in `skate_gui.py`, including as a settings-json storage key, since it's the same concept as the keyword argument, not a separate one. |
 | kijkglas (small-target tracking) | spyglass | `_Kijkglas`→`_Spyglass`. Claude's own naming call (low-stakes internal class), not user-specified. Done in Phase 6 (`skate_yolo.py`) — the local variable holding an instance is also `spyglass` now (was left as `kijkglas` in an early pass of this phase; fixed the same session, see "Patterns established" note on residual locals). |
 | doel / doelpunt / DoelTracker | target / target_point / TargetTracker | Done in Phase 4. |
 | kamtanden / kam_masker | combing / comb_mask | Standard video-engineering term. Done in Phase 4 (`_comb_mask`, `deinterlace`). |
 | opname | recording | `OPNAME.md`→`RECORDING.md` (Phase 11). |
 | knippen / fragment | trim/cut / fragment | `knip_fragmenten`→`trim_fragments`. Done in Phase 4. |
 | bibliotheek | library | Done in Phase 5 (`library_path`, etc). |
-| instellingen | settings | DB column `instellingen_json`→`settings_json` done (Phase 5); the JSON *content*'s keys are not (deferred to Phase 8, see below). |
+| instellingen | settings | DB column `instellingen_json`→`settings_json` done (Phase 5); most of the JSON *content*'s keys done in Phase 8 session 13 (see "Settled in Phase 8, session 13" below) — `doel_punt`/`doel_kader` are the deliberate, permanent exceptions. |
 | kalibratie / verdwijnpunt | calibration / vanishing_point | Done in Phase 3. |
 | baanlijn / dwarslijn | track_line / cross_line | Done in Phase 3. |
 | pakkleur | suit color | Done in Phase 6 (`KleurReferentie`→`ColorReference`, `KLEUR_MATCH_MIN`→`COLOR_MATCH_MIN`, etc.). |
@@ -1117,21 +1206,34 @@ consistency with the rest of the (still Dutch-parameter-name) codebase rather th
 an oversight. Do the same grep-first check before Phase 7/8/9 rather than assuming the
 already-committed phases set a stricter precedent than they actually did.
 
-## Deferred to Phase 8 (do not attempt piecemeal before then)
+## Settled in Phase 8, session 13 (formerly "Deferred to Phase 8") — do not re-litigate
 
-`instellingen_json`'s JSON *content* keys (`doel_punt`, `doel_kader`, `bocht_overslaan`,
-`perspectief_gebruikt`, `perspectief`, `backend_naam`, `app_versie`, `app_commit`) and
-`config.json`'s dict keys (`bibliotheek_pad`, `trainer_naam`) are **intentionally still
-Dutch** after Phase 5, even though `skate_db.py` itself is fully translated. Reason:
-the code that *constructs* these dicts lives in `schaats_gui.py`, which isn't
-translated yet. Renaming what `skate_db.py`'s `save_analysis()`/`load_config()` expect
-without also updating `schaats_gui.py`'s construction sites in the same commit would
-silently split a single logical key into two (one written under the old name by
-`schaats_gui.py`, one defaulted under the new name by `skate_db.py`), permanently
-losing whatever `schaats_gui.py` saved. Do this translation **together with** Phase 8,
-in one coordinated change, with a proper one-time rewrite of existing analyses'
-`instellingen_json` (the ~48 analyses currently in the library) — do not attempt a
-"rewrite now, fix the writer later" sequence, for the same reason.
+`instellingen_json`'s JSON *content* keys and `config.json`'s dict keys are now
+translated, done as one coordinated change across `skate_db.py` and `skate_gui.py` in
+session 13 (see that session's log entry above for the full story). **Not everything on
+the original deferred list actually got renamed** — a more specific, later decision
+(the Phase 6 glossary note on `doel_kader`) turned out to supersede this section's
+original framing for three of them:
+
+- **Renamed** (pure storage keys, no tie to any function's keyword arguments):
+  `bocht_overslaan`->`skip_corner`, `perspectief_gebruikt`->`perspective_used`,
+  `perspectief`->`perspective` (the saved calibration blob — a JSON-able snapshot,
+  distinct from the live keyword argument below that only exists in memory),
+  `backend_naam`->`backend_name`, `app_versie`->`app_version`; `config.json`'s
+  `bibliotheek_pad`->`library_path`, `trainer_naam`->`trainer_name`. `app_commit`
+  needed no change (already English).
+- **Permanently NOT renamed** — `doel_punt`, `doel_kader`, and the *keyword-argument*
+  sense of `perspectief` (as opposed to the calibration-blob storage key above): these
+  mirror keyword arguments into `skate_analysis.py`'s/`skate_yolo.py`'s `analyze()`
+  that stay Dutch forever (see the glossary's `doel_kader` row and Pattern G). A future
+  session should not attempt to rename these — it's not unfinished work, it's a
+  settled decision.
+
+The one-time rewrite of existing analyses' `settings_json` was done via the database
+migration mechanism (an extension of the existing v5->v6 `_migrate` step, safe because
+this whole effort is still an unmerged branch — no real library has gone through that
+schema version yet) rather than a separate manual script; `config.json`'s two keys got
+a permanent dual-read instead (a single small per-user file, cheap to keep either way).
 
 ## Verification per phase (do all of these, in this order, every time)
 
