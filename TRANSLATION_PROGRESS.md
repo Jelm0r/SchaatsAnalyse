@@ -1087,17 +1087,43 @@ document supersedes it for anything about actual progress and lessons learned).
       failing window/scenario combinations, the same count and the same category
       (large font + small screen + the compare page) as session 14's post-Phase-8
       baseline, i.e. no regression from this phase's changes.
-- [ ] **Phase 10 — Build, installer, branding**. Rename `schaatsanalyse.spec` →
-      `skate_analysis.spec`, `schaatsanalyse.ico` → `skateanalysis.ico`,
-      `maak_versie.py` → `make_version.py` (which generates `_versie.py` →
-      `_version.py`), `bouw.bat` → `build.bat`. Update `installer.iss` (`AppName`/
-      `AppPublisher`/paths → "SkateAnalysis", **keep the `AppId` GUID byte-identical**
-      — it's commented "never change" in the source and is what Windows uses for
-      upgrade-in-place detection, unrelated to the display name). Rename the
-      remaining `SCHAATSANALYSE_CPU` env var (read in `schaats_yolo.py`/
-      `skate_yolo.py` — should already be `skate_yolo.py` by this point from Phase 6)
-      to `SKATEANALYSIS_CPU`; the other two (`_BIBLIOTHEEK`/`_LOKAAL`) were already
-      renamed in Phase 5.
+- [x] **Phase 10 — Build, installer, branding** (commit `cb8a633`). Renamed and fully
+      translated `schaatsanalyse.spec`→`skate_analysis.spec`, `schaatsanalyse.ico`→
+      `skateanalysis.ico`, `maak_versie.py`→`make_version.py`, `bouw.bat`→
+      `build.bat`. The generated version-stamp file is now `_version.py` (was
+      `_versie.py`) with English attribute names `COMMIT`/`DATE`/`DIRTY` (was
+      `COMMIT`/`DATUM`/`VUIL`) — a full rename, not a dual-read shim, since it's
+      purely internal (only `skate_db.py`'s own `_version_from_bundle()` ever reads
+      it, confirmed via grep); updated that one read site to match. The dict
+      `app_version()` *returns* keeps its `datum`/`vuil` keys as-is (shared
+      vocabulary with still-Dutch `skate_gui.py` callers, same lower-bar rule as
+      everywhere else — this is a different thing from the file/attribute names,
+      which had no external consumer to stay in sync with). `installer.iss`:
+      `AppName`/`AppPublisher`/output paths → "SkateAnalysis"; `AppId` GUID kept
+      byte-identical (commented "never change", Windows's upgrade-in-place identity,
+      unrelated to the display name); `[Languages]` deliberately kept as
+      `Dutch.isl` with a comment explaining why — the actual end users are
+      Dutch-speaking trainers (`INSTALLEREN.md`), independent of the source
+      language. `SCHAATSANALYSE_CPU`→`SKATEANALYSIS_CPU` in `skate_yolo.py` and its
+      only other reader/writer `skate_screentest.py` (`_BIBLIOTHEEK`/`_LOKAAL` were
+      already renamed in Phase 5). `.gitignore`: `_versie.py`→`_version.py` (the one
+      entry tied to a file renamed this phase). Deleted a stale untracked
+      `_versie.py` build artifact left over locally (gitignored, not tracked).
+      Deliberately left untouched: `CLAUDE.md`/`EXE.md`/`TODO_CRASH.md`'s mentions
+      of the old filenames (Phase 11's job, once names are final) and
+      `start_gui.bat`'s Dutch comment (already pointed at `skate_gui.py` from an
+      earlier phase; the comment is incidental, not in this phase's scope).
+      `schaats_yolo.py` (the Pattern-B shim) stays in place — now fully orphaned
+      since `skate_analysis.spec` no longer references the Dutch name in its
+      hiddenimports/entry point, but deleting it is explicitly Phase 12's job.
+      **Verified**: `py_compile` on every touched file under both venvs; real
+      `import skate_gui`/`import skate_db` under `.venv-yolo` (offscreen Qt);
+      `python skate_db.py` self-test; a throwaway script confirming
+      `make_version.write()` → `skate_db._version_from_bundle()` round-trips
+      correctly; `python make_version.py --show` prints the correct ASCII label;
+      `.venv-yolo\Scripts\python.exe skate_screentest.py` (quick mode) — 16/16
+      windows pass; repo-wide grep for the old filenames — zero hits outside the
+      three markdown files Phase 11 will handle.
 - [ ] **Phase 11 — Documentation**. Translate `CLAUDE.md`, `ROADMAP.md`, `BUGS.md`,
       `EXE.md`, `GPU.md`, `TODO_CRASH.md`, `INSTALLEREN.md`→`INSTALL.md`,
       `OPNAME.md`→`RECORDING.md`, `README.md`. Do this only once the actual names/
