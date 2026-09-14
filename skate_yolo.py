@@ -91,9 +91,9 @@ BACKEND_NAME = ("YOLO-pose + ByteTrack + RTMPose refinement" if IS_RTMPOSE
 # places and thereby the measured angles — that's a measurement change and shouldn't
 # be a side effect of a speed optimization.)
 def _cpu_forced():
-    """`SCHAATSANALYSE_CPU=1` forces both passes to the CPU — needed to compare an
+    """`SKATEANALYSIS_CPU=1` forces both passes to the CPU — needed to compare an
     analysis on GPU against an analysis on CPU without tearing down the environment."""
-    return bool(os.environ.get('SCHAATSANALYSE_CPU'))
+    return bool(os.environ.get('SKATEANALYSIS_CPU'))
 
 
 @lru_cache(maxsize=1)

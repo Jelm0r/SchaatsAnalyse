@@ -91,7 +91,7 @@ def _measure(name, width, height, taskbar, font_size, out_path):
     lokaal = os.path.join(tmp, "local")
     os.environ["SKATEANALYSIS_LIBRARY"] = bieb
     os.environ["SKATEANALYSIS_LOCAL"] = lokaal
-    os.environ["SCHAATSANALYSE_CPU"] = "1"
+    os.environ["SKATEANALYSIS_CPU"] = "1"
     sys.path.insert(0, HERE)
 
     from PySide6.QtWidgets import QApplication, QStyleFactory

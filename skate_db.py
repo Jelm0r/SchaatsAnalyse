@@ -191,24 +191,24 @@ def _git(*args):
 
 
 def _version_from_bundle():
-    """The version as the build script set it in `_versie.py`, or None.
+    """The version as the build script set it in `_version.py`, or None.
 
     In a bundled .exe there's no git and no repo, so `_git()` would return empty
     everywhere and every colleague's analysis would land in the library **without a
     version stamp** — exactly what the Info dialog and the title tooltip rely on. The
-    build script therefore records the same fields in a generated `_versie.py`, and the
+    build script therefore records the same fields in a generated `_version.py`, and the
     label format stays exactly the same ("2026-08-24 . 4df9ab5a") so analyses from the
     exe and from the repo stay comparable.
     """
     try:
-        import _versie
+        import _version
     except Exception:
         return None
-    commit = str(getattr(_versie, "COMMIT", "") or "").strip()
+    commit = str(getattr(_version, "COMMIT", "") or "").strip()
     if not commit:
         return None
-    datum = str(getattr(_versie, "DATUM", "") or "").strip()
-    dirty = bool(getattr(_versie, "VUIL", False))
+    datum = str(getattr(_version, "DATE", "") or "").strip()
+    dirty = bool(getattr(_version, "DIRTY", False))
     return {"commit": commit, "datum": datum, "vuil": dirty,
             "label": f"{datum} . {commit}{'+' if dirty else ''}"}
 
@@ -225,7 +225,7 @@ def app_version():
     to run `git show` on. `vuil` (the `+`) doesn't count untracked files — videos and
     npz's next to the code say nothing about the logic that ran.
 
-    In a bundled .exe the answer comes from `_versie.py` (see `_version_from_bundle`)
+    In a bundled .exe the answer comes from `_version.py` (see `_version_from_bundle`)
     instead of from git; the format is identical.
 
     Measured once per process (subprocess costs time; the code doesn't change during a
