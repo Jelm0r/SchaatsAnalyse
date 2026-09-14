@@ -1026,9 +1026,67 @@ document supersedes it for anything about actual progress and lessons learned).
         are user-facing strings, so they don't affect the trainers `INSTALLEREN.md`
         describes -- only a future developer reading the source, same trade-off the
         rest of the already-"finished" modules already made.
-- [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do
-      this *last* among the code files — it imports gui+db+analysis and is the best
-      regression canary once everything else is renamed.
+- [x] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 → 331 lines).
+      Full identifier/docstring/comment/string translation in one pass — no lower-bar
+      concerns here (unlike `skate_analysis.py`/`skate_db.py`'s `resultaten`/`_pad`/
+      `naam`), since this file is a self-contained dev tool with no external callers to
+      stay in sync with (confirmed via `grep -rln "schaats_schermtest"` before
+      starting: only `skate_analysis.py`'s/`skate_gui.py`'s own comments mentioned it
+      by name, no code imported it). Kept `bieb`/`lokaal`/`aangemaakt_door` as-is
+      (shared vocabulary with `skate_db.py`'s own still-Dutch parameter names, same
+      rule as every other phase) and the `doel_punt`/`skip_corner`/... settings dict
+      unchanged (already correct from Phase 8 session 13 — nothing to do there).
+      Renamed the CLI flags too (`--meet`→`--measure`, `--alles`→`--all`,
+      `--letter`→`--font-size`), matching the Phase 7 precedent of translating a
+      dev-only tool's flags; `CLAUDE.md`'s documented invocations go stale until
+      Phase 11, same as every renamed file so far. Fully translated the JSON blob this
+      file's own child process writes and its own parent process reads back
+      (`vensters`→`windows`, `gemaximaliseerd`→`maximized`, `volledig_scherm`→
+      `fullscreen`, `werkgebied`→`workarea`, ...) — safe to do outright since producer
+      and consumer are both this same file, translated together in the same pass.
+
+      **Switched `import schaats_db` (the Dutch Pattern-B shim) to `import skate_db`
+      directly**, translating every one of this file's ~10 `schaats_db.*` call sites
+      to their real English names (`maak_schaatser`→`create_skater`,
+      `sla_analyse_op`→`save_analysis`, `synchroniseer_bronmap`→`sync_source_dir`,
+      `lijst_bronvideos`→`list_source_videos`, `losse_video`→`loose_video`,
+      `lijst_schaatsers`→`list_skaters`, `analyse_meta`→`analysis_meta`) — confirmed
+      via `inspect`-free grep that every call in this file was positional except
+      `aangemaakt_door=` (a real, still-Dutch parameter name on `save_analysis`
+      itself, left alone per the shared-vocabulary rule), so no Pattern C/D/G
+      surprises. This made `schaats_db.py` — the Pattern-B shim, whose own docstring
+      says "delete this file once schaats_schermtest.py is translated and does
+      `import skate_db` directly" — genuinely dead: grepped every alias name it
+      re-exports across the whole repo first (`skate_gui.py` already calls `skate_db`
+      under its real English names throughout, confirmed via
+      `grep -noE "skate_db\.[a-zA-Z_]+"`; the handful of remaining Dutch-word hits in
+      `skate_gui.py` were either doc-comment mentions of old names or the unrelated
+      `trainer_naam` parameter/local, not live aliased calls). **Deleted
+      `schaats_db.py`** and removed the now-unused "Transitional Dutch-name aliases"
+      block at the bottom of `skate_db.py` (~70 lines, `BibliotheekTeNieuw`/
+      `maak_schaatser`/`lijst_schaatsers`/... down to `kopieer_naar_opnames`) —
+      confirmed nothing inside `skate_db.py` itself (including its own self-test)
+      referenced any of them before removing. Left `skate_analysis.py`'s separate
+      `_alias()`-based `FrameResult`/`PushEvent` Dutch aliases (`.hoek`/`.been`/...)
+      alone — those are gated on `skate_gui.py`'s still-partly-Dutch `MainWindow`
+      section and `skate_yolo.py`, unrelated to this phase's scope, still genuinely
+      needed. Also fixed two stale in-passing comment mentions of the old filename in
+      `skate_gui.py` (pure text, no behavior change).
+      **`schaats_yolo.py` is now also fully orphaned** (nothing imports it — confirmed
+      via grep — since `skate_gui.py`'s `_load_backend()` already does
+      `import skate_yolo` directly; its own docstring is stale, still claiming
+      `schaats_gui.py` needs it). Left it in place: it's still referenced by
+      `schaatsanalyse.spec`'s hidden-imports list and PyInstaller entry point (already
+      stale in other ways — `["schaats_gui.py"]` as the entry script), which is Phase
+      10's job to fix as a whole, not something to half-fix here.
+      **Verified**: `py_compile` on every touched file; real `import skate_gui` and
+      `import skate_screentest` under `.venv-yolo` (offscreen Qt); `python skate_db.py`
+      self-test still passes after removing the alias block;
+      `.venv-yolo\Scripts\python.exe skate_screentest.py` (floor/quick mode) — 16/16
+      windows pass, matching the pre-rename baseline exactly; `--all` (~1.5 min) — 22
+      failing window/scenario combinations, the same count and the same category
+      (large font + small screen + the compare page) as session 14's post-Phase-8
+      baseline, i.e. no regression from this phase's changes.
 - [ ] **Phase 10 — Build, installer, branding**. Rename `schaatsanalyse.spec` →
       `skate_analysis.spec`, `schaatsanalyse.ico` → `skateanalysis.ico`,
       `maak_versie.py` → `make_version.py` (which generates `_versie.py` →
@@ -1052,10 +1110,15 @@ document supersedes it for anything about actual progress and lessons learned).
 - [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
       self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
       exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
-      the renamed files, and **delete the `schaats_db.py`/`schaats_yolo.py`
-      compatibility shims** (and any leftover `_add_legacy_keys()`/`_alias()` calls
-      whose caller has by now been translated directly) — they're transitional, not
-      permanent design.
+      the renamed files, and **delete the `schaats_yolo.py` compatibility shim**
+      (`schaats_db.py`'s own shim — and the Dutch-alias block in `skate_db.py` it
+      depended on — was already deleted in Phase 9, once `schaats_schermtest.py`, its
+      last consumer, was translated) and any leftover `_add_legacy_keys()`/`_alias()`
+      calls whose caller has by now been translated directly — they're transitional,
+      not permanent design. `schaats_yolo.py` is already fully orphaned (nothing
+      imports it — `skate_gui.py` calls `skate_yolo` directly) but stays until Phase
+      10 updates `schaatsanalyse.spec`'s hidden-imports list and entry point, which
+      still reference it.
 
 ## Explicit exceptions — never rename these
 
@@ -1303,12 +1366,14 @@ a permanent dual-read instead (a single small per-user file, cheap to keep eithe
    with real-ish data and checks the output — not just that it imports. This is what
    caught the `PushEvent` construction bugs in Phase 4 and would have caught the dict-
    key bugs in Phase 5 faster than waiting for the full GUI test to fail.
-5. `.venv-yolo\Scripts\python.exe schaats_schermtest.py` (quick mode, ~2s) after any
-   phase touching something `schaats_gui.py` depends on — it exercises a large fraction
-   of the GUI end-to-end (opening the library, an analysis, several dialogs) and has
-   caught real bugs twice already (Phase 5's dict-key issue was confirmed fixed this
-   way). Run `--alles` (~1.5 min) specifically after Phase 8d, since English strings
-   changing length can push a dialog past its measured minimum size.
+5. `.venv-yolo\Scripts\python.exe skate_screentest.py` (quick mode, ~2s; was
+   `schaats_schermtest.py`/`--alles` before Phase 9 renamed the file and its flags to
+   `--all`/`--font-size`) after any phase touching something `skate_gui.py` depends
+   on — it exercises a large fraction of the GUI end-to-end (opening the library, an
+   analysis, several dialogs) and has caught real bugs twice already (Phase 5's
+   dict-key issue was confirmed fixed this way). Run `--all` (~1.5 min) specifically
+   after Phase 8d, since English strings changing length can push a dialog past its
+   measured minimum size.
 6. Commit only after all of the above pass. Write a commit message that states what
    was renamed, what compatibility pattern was applied and why, and what was verified —
    future sessions (including future you) will read these messages instead of

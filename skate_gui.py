@@ -4102,7 +4102,7 @@ class CompareSide(QWidget):
         # bound 440x180, not 320x200: at 320 wide the toggle bar breaks into three rows,
         # into two from ~435, and that row plus 20 px of picture is exactly what the
         # compare page (the tallest of the three) had too much of on a 1280x720 screen.
-        # Two 440-wide sides still fit comfortably on 1280 (see schaats_schermtest.py).
+        # Two 440-wide sides still fit comfortably on 1280 (see skate_screentest.py).
         self.player = VideoPlayer(min_size=(440, 180), show_speed=False)
         # The HUD is drawn at fixed full-frame positions and is unreadable in a half
         # panel; can be switched back on per side.
@@ -5818,7 +5818,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.table_recordings, stretch=1)
 
         # A wrapping bar: five buttons on one line demand ~900 px and pushed the start
-        # page's minimum width from 700 to 897 px (measured with schaats_schermtest);
+        # page's minimum width from 700 to 897 px (measured with skate_screentest);
         # wrapping costs at most one extra line per added button.
         rij = WrapBar()
         self.btn_view = QPushButton("👁 View (full screen)...")
