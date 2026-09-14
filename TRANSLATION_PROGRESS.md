@@ -1124,15 +1124,49 @@ document supersedes it for anything about actual progress and lessons learned).
       `.venv-yolo\Scripts\python.exe skate_screentest.py` (quick mode) — 16/16
       windows pass; repo-wide grep for the old filenames — zero hits outside the
       three markdown files Phase 11 will handle.
-- [ ] **Phase 11 — Documentation**. Translate `CLAUDE.md`, `ROADMAP.md`, `BUGS.md`,
-      `EXE.md`, `GPU.md`, `TODO_CRASH.md`, `INSTALLEREN.md`→`INSTALL.md`,
+- [ ] **Phase 11 — Documentation** (in progress). Translate `CLAUDE.md`, `ROADMAP.md`,
+      `BUGS.md`, `EXE.md`, `GPU.md`, `TODO_CRASH.md`, `INSTALLEREN.md`→`INSTALL.md`,
       `OPNAME.md`→`RECORDING.md`, `README.md`. Do this only once the actual names/
       paths they describe are final (i.e., after Phase 10), or you'll be translating
-      stale Dutch names into stale English ones and redoing it. **Note**: there is
-      currently an uncommitted, unrelated pending edit to `INSTALLEREN.md` on this
-      branch (predates this effort, carried along from `main`) — read it and fold its
-      *content* (about downloading the installer via the Drive app vs. a browser
-      download) into the translated `INSTALL.md`, don't discard it.
+      stale Dutch names into stale English ones and redoing it.
+
+      **Done so far** (one session, commits `e035fdb`, `6ec67d4`, `2fd89c2`):
+      - `README.md` — already English, no change needed.
+      - `OPNAME.md`→`RECORDING.md` — full translation; fixed its own 3 code-comment
+        pointers in `skate_analysis.py`/`skate_gui.py`/`skate_yolo.py`.
+      - `TODO_CRASH.md` — full translation (same filename). A historical incident
+        log; every code/file identifier it mentions updated to its current English
+        name (confirmed via grep against the real source, not guessed); verbatim
+        log/WER output left untouched as facts, not source text.
+      - `GPU.md` — full translation (same filename); same identifier-verification
+        discipline.
+      - `EXE.md` — full translation (same filename); six-step build/package
+        planning-and-verification log, every identifier across all six steps
+        updated. Dropped the doc's `#L123`-style line-number anchors throughout —
+        those were already an Aug-2026 snapshot and the file's been through 14+
+        translation sessions since, so a stale number would mislead; kept plain
+        file links instead.
+      - `INSTALLEREN.md`→`INSTALL.md` — full translation of the trainer-facing
+        guide, folding in the pre-existing uncommitted edit about the two
+        Drive-download paths (browser vs. "make available offline") that was
+        pending on this branch. Every quoted piece of *our own* app's UI text
+        updated to the actual current English button/tab/column labels (verified
+        via grep against `skate_gui.py`). Quoted text from software outside this
+        project's control — Windows SmartScreen, Windows Security, Google Drive's
+        own interface, Edge/Chrome's download warning, and Inno Setup's installer
+        wizard (kept on `Dutch.isl` in Phase 10, real Dutch-speaking trainers) —
+        left as the literal Dutch text that actually appears on screen, with an
+        English gloss in parentheses; translating Windows/Drive themselves is out
+        of scope.
+
+      **Still remaining**: `ROADMAP.md` (743 lines), `BUGS.md` (734 lines),
+      `CLAUDE.md` (344 lines, dense — do this one last, since it references
+      identifiers across every other file and needs everything else settled
+      first). All three are large enough to warrant their own session(s); pick up
+      with `ROADMAP.md` next. Same identifier-verification discipline applies:
+      grep the current source before asserting a rename, don't assume the Phase 6
+      glossary additions cover everything these two haven't been checked against
+      yet.
 - [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
       self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
       exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
