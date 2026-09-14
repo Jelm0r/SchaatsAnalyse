@@ -733,12 +733,45 @@ document supersedes it for anything about actual progress and lessons learned).
         `schaats_schermtest.py` quick run -- 16/16, including all five MainWindow
         states, which exercises the exact path the bug was in. Commit: `3a9bdc3`.
 
+      - **Session 10** -- 8b/8c (UI text only, no renames) for the first slice of
+        "everything before `MainWindow`": module-level tooltip constants
+        (`DEINT_TOOLTIP`, `CORNER_TOOLTIP`, `PERSPECTIVE_TOOLTIP`/`_BATCH`) plus every
+        class through `AnalysisInfoDialog` (`SplashScreen`, `TargetPicker`,
+        `HorizonPicker`, `CalibrationPicker`, `AnalysisWorker`/`BatchWorker`'s two
+        status strings, `SkaterDialog`, `NewAnalysisDialog`, `BatchAnalysisDialog`,
+        `AnalysisPicker`, `_duration_text`/`_yes_no`, `AnalysisInfoDialog`). Also did
+        the two splash-screen strings (Phase 8d's last untouched piece of that specific
+        item -- "SkateAnalysis" + "starting up..."/"Loading components...") since they
+        were trivial and risk-free, no coordination needed unlike the JSON-key rewrite.
+        Left alone on purpose, matching earlier sessions' scoping: `LANDMARK_NAMES`,
+        `DRAW_TOOLTIP`/`DRAW_MODES` (belong to `VideoPlayer`'s own future 8b/8c pass,
+        not this one -- they're only referenced there), `_calibration_rows`' row
+        labels and the `perspectief`/`doel_punt`/`doel_kader` JSON keys it reads
+        (explicitly deferred to Phase 8d's coordinated rewrite, see that section's own
+        docstring), `LOKAAL_WEERGAVE`/`VIDEO_KEYS_TOOLTIP`/the recordings-tab constants
+        (marked `OPNAME_`-scope, belong with the `VideoPlayer`/recordings-tab session).
+        No identifier renames anywhere in this session (8a for these classes was
+        already done in sessions 1-3) -- pure string content, so no Pattern C/D/G risk
+        the way earlier 8a sessions had; the one thing to double check per string was
+        that it matched the vocabulary `MainWindow` already settled on in session 8
+        (confirmed "pushes" for `afzetten`, `.1f`-with-period instead of the old
+        `.replace(".", ",")` decimal-comma formatting, "yes"/"no" for `_yes_no`).
+        **Verified**: `py_compile`; real `import skate_gui` under `.venv-yolo`
+        (`QT_QPA_PLATFORM=offscreen`); a repo-wide grep of the touched range for
+        leftover Dutch UI strings (found and fixed one miss on the first pass --
+        `TargetPicker._confirm_box`'s "Kader erg klein" `QMessageBox.question`, which
+        the first grep pass had skipped); `schaats_schermtest.py` quick mode -- 16/16
+        windows pass, including all three renamed pickers, all the analysis dialogs,
+        and both `AnalysisPicker`/`AnalysisInfoDialog`.
+
       - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
         first, don't trust these verbatim):
-        - **8b/8c for every class *before* `MainWindow`** (`SplashScreen` through
-          `CopyDialog`, i.e. everything sessions 1-7 only did the identifier pass on):
-          all their window titles, labels, tooltips and `QMessageBox` text are still
-          Dutch.
+        - **8b/8c for the rest of "everything before `MainWindow`"**: `VideoPlayer`
+          (incl. `LANDMARK_NAMES`/`DRAW_TOOLTIP`/`DRAW_MODES`/the `OPNAME_`-tab
+          constants), `PlayerKeys`, `MasterClock`, `CompareSide`, `FragmentBar`,
+          `FragmentPicker`, `PointsBar`, `ViewSide`, `ViewWindow`, `LocalProbe`,
+          `CopyWorker`, `CopyDialog` -- all their window titles, labels, tooltips and
+          `QMessageBox` text are still Dutch.
         - **8a for `CompareSide`/`ViewWindow`/`ViewSide`/`FragmentPicker`'s own
           remaining Dutch names** that session 9 deliberately left alone because they
           belong to those classes, not `MainWindow`: `speler`, `klok`, `toetsen`,

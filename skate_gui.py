@@ -92,10 +92,10 @@ class SplashScreen(QSplashScreen):
         p = QPainter(pm)
         p.setPen(QColor(255, 255, 255))
         p.setFont(QFont(p.font().family(), 22, QFont.Bold))
-        p.drawText(QRect(0, 40, cls.WIDTH, 44), Qt.AlignCenter, "Schaats Analyse")
+        p.drawText(QRect(0, 40, cls.WIDTH, 44), Qt.AlignCenter, "SkateAnalysis")
         p.setPen(QColor(150, 180, 220))
         p.setFont(QFont(p.font().family(), 9))
-        p.drawText(QRect(0, 84, cls.WIDTH, 22), Qt.AlignCenter, "bezig met opstarten...")
+        p.drawText(QRect(0, 84, cls.WIDTH, 22), Qt.AlignCenter, "starting up...")
         p.end()
         return pm
 
@@ -118,7 +118,7 @@ def _start_splash_screen():
     app = QApplication(sys.argv)
     scherm = SplashScreen()
     scherm.show()
-    scherm.melding("Onderdelen laden...")
+    scherm.melding("Loading components...")
     return app, scherm
 
 
@@ -234,14 +234,14 @@ from skate_analysis import (
 # filter both the trainer and the pose detector see the comb. See `deinterlace` in
 # skate_analysis for the measurement behind this.
 DEINT_TOOLTIP = (
-    "Camcorderbeeld (1080i) bestaat uit twee halve beelden van 1/50 s uit elkaar,\n"
-    "samengeweven tot één frame. Op een bewegend been staan die twee helften op een\n"
-    "andere plek — de kamtanden die je in beeld ziet.\n\n"
-    "Gemeten op dit soort materiaal liggen de twee helften op knieën en enkels 6 px\n"
-    "uit elkaar; met '2 px keypointfout = 2-4° hoekfout' is dat de grootste ruisbron\n"
-    "die er in zulke opnames zit. Het filter haalt ze eruit.\n\n"
-    "Wordt per video zelf vastgesteld; progressief materiaal (telefoon, GoPro) wordt\n"
-    "niet aangeraakt. Uitzetten alleen om een A/B te draaien.")
+    "Camcorder footage (1080i) consists of two half-frames 1/50 s apart, woven\n"
+    "together into one frame. On a moving leg those two halves sit in a different\n"
+    "spot — the combing you see in the image.\n\n"
+    "Measured on this kind of material, the two halves sit 6 px apart on knees and\n"
+    "ankles; with '2 px keypoint error = 2-4° angle error' that's the biggest source\n"
+    "of noise there is in such recordings. The filter removes it.\n\n"
+    "Determined per video automatically; progressive material (phone, GoPro) is\n"
+    "left untouched. Turn off only to run an A/B comparison.")
 
 # Skeleton editor (phase 3)
 # The handle/grab radius scales with the skater: a fixed fraction of the on-screen torso
@@ -342,41 +342,42 @@ def _drag_distance(punten):
 
 # Corner detection: explanation for the checkbox in both analysis dialogs (one text, two spots).
 CORNER_TOOLTIP = (
-    "Herkent aan de stand van de heupen wanneer de schaatser niet frontaal in beeld is\n"
-    "(in de bocht staan ze achter elkaar i.p.v. naast elkaar).\n"
+    "Recognizes from the position of the hips when the skater isn't frontal in frame\n"
+    "(in the corner they stand behind each other instead of side by side).\n"
     "\n"
-    "Die frames worden dan grotendeels niet meer door de detector gehaald — dat scheelt\n"
-    "flink in analysetijd — en ze leveren geen afzetmeting op. Elke ~0,3 s wordt gekeken\n"
-    "of het rechte stuk alweer begonnen is, dus een clip die ín de bocht begint pakt de\n"
-    "meting vanzelf op zodra de schaatser recht op de camera af komt.\n"
+    "Those frames then mostly no longer go through the detector — that saves a good\n"
+    "deal of analysis time — and they yield no push measurement. Every ~0.3 s it checks\n"
+    "whether the straight stretch has started again, so a clip that begins in the\n"
+    "corner picks up the measurement automatically once the skater comes straight at\n"
+    "the camera.\n"
     "\n"
-    "Uitzetten alleen om te zien wat er in de bocht gebeurt; die hoeken zijn niet bruikbaar.")
+    "Turn off only to see what happens in the corner; those angles aren't usable.")
 
 # Perspective correction (phase 7). Still experimental: the math and the pipeline hookup
 # are there and the calibration now gets saved, but the correction hasn't been validated
 # on real material yet (ROADMAP phase 7, step 3). Hence "experimental" and not "doesn't
 # work" -- it's only on when you deliberately measure with it.
 PERSPECTIVE_TOOLTIP = (
-    "Voor een vaste, schuin geplaatste camera. Trek vóór de analyse de baanlijnen na;\n"
-    "daaruit wordt de camerastand gekalibreerd en wordt de afzethoek per frame\n"
-    "teruggerekend naar het echte ijsvlak i.p.v. het vertekende beeldvlak.\n"
-    "Bijvangst: snelheid en slaglengte in de tabel.\n"
+    "For a fixed, angled camera. Trace the track lines before the analysis;\n"
+    "the camera pose is calibrated from them and the push angle is recomputed per\n"
+    "frame onto the real ice plane instead of the distorted image plane.\n"
+    "Bonus: speed and stroke length in the table.\n"
     "\n"
-    "Nodig: minstens 2 baanlijnen + 1 dwarslijn (2+1 alleen met opgegeven\n"
-    "brandpuntsafstand; anders 3+1 of 2+2), en een camera die niet beweegt.\n"
+    "Needed: at least 2 track lines + 1 cross line (2+1 only with a given\n"
+    "focal length; otherwise 3+1 or 2+2), and a camera that doesn't move.\n"
     "\n"
-    "De kalibratie wordt bij de analyse bewaard, dus heropenen herstelt de correctie\n"
-    "en een volgende clip uit dezelfde camerastand kan hem overnemen.\n"
+    "The calibration is saved with the analysis, so reopening restores the correction\n"
+    "and a following clip from the same camera pose can reuse it.\n"
     "\n"
-    "EXPERIMENTEEL: nog niet op echt materiaal gevalideerd. Wordt er frontaal met een\n"
-    "horizontale camera gefilmd, dan is de vertekening klein en heb je dit niet nodig.")
+    "EXPERIMENTAL: not yet validated on real material. If filmed frontally with a\n"
+    "horizontal camera, the distortion is small and you don't need this.")
 
 PERSPECTIVE_TOOLTIP_BATCH = (
     PERSPECTIVE_TOOLTIP + "\n"
     "\n"
-    "In een batch wordt de kalibratie ÉÉN keer gevraagd en op alle clips toegepast —\n"
-    "ze komen immers uit dezelfde camerastand. Dat is ook de voorwaarde om hun hoeken\n"
-    "onderling te mogen vergelijken.")
+    "In a batch the calibration is asked ONCE and applied to all clips — after all,\n"
+    "they come from the same camera pose. That's also the condition for comparing\n"
+    "their angles against each other.")
 
 
 def _calibration_rows(inst):
@@ -994,7 +995,7 @@ class TargetPicker(QDialog):
     """
     def __init__(self, frame_bgr, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Kies de schaatser om te volgen")
+        self.setWindowTitle("Choose the skater to follow")
         self.doel_punt = None
         self.doel_kader = None
         self._frame = frame_bgr
@@ -1008,11 +1009,11 @@ class TargetPicker(QDialog):
         self._pan_start = None                    # right-drag: (QPointF, pan at the press)
 
         v = QVBoxLayout(self)
-        uitleg = QLabel("Klik op de schaatser die je wilt volgen. Staat hij klein in "
-                        "beeld, sleep dan een kader om hem heen: dan wordt hij ook "
-                        "gevolgd waar de detectie hem nog niet ziet.\n"
-                        "Muiswiel = inzoomen rond de cursor, rechts-slepen = beeld "
-                        "verschuiven.")
+        uitleg = QLabel("Click the skater you want to follow. If they're small in "
+                        "frame, drag a box around them instead: that way they're also "
+                        "followed where detection doesn't see them yet.\n"
+                        "Mouse wheel = zoom around the cursor, right-drag = pan the "
+                        "image.")
         # Wrap it, otherwise the longest line claims the dialog width (855 px, and 1240 px
         # at a larger system font size — wider than a projector or a 1366 laptop at 125%).
         uitleg.setWordWrap(True)
@@ -1029,14 +1030,14 @@ class TargetPicker(QDialog):
         v.addWidget(self.label, 1)
 
         knoppen = QHBoxLayout()
-        self.lbl_zoom = QLabel("Zoom 1,0×")
+        self.lbl_zoom = QLabel("Zoom 1.0×")
         knoppen.addWidget(self.lbl_zoom)
         knoppen.addStretch(1)
-        self.btn_box = QPushButton("Volg dit kader")
+        self.btn_box = QPushButton("Follow this box")
         self.btn_box.setEnabled(False)
         self.btn_box.clicked.connect(self._confirm_box)
         knoppen.addWidget(self.btn_box)
-        btn_skip = QPushButton("Volg grootste schaatser")
+        btn_skip = QPushButton("Follow largest skater")
         btn_skip.clicked.connect(self.accept)     # doel_punt and doel_kader stay None
         knoppen.addWidget(btn_skip)
         v.addLayout(knoppen)
@@ -1075,7 +1076,7 @@ class TargetPicker(QDialog):
             painter.drawRect(QRect(QPoint(int(x0), int(y0)), QPoint(int(x1), int(y1))))
             painter.end()
         self.label.setPixmap(scaled)
-        self.lbl_zoom.setText(f"Zoom {z:.1f}×".replace(".", ","))
+        self.lbl_zoom.setText(f"Zoom {z:.1f}×")
 
     def resizeEvent(self, event):
         self._render()
@@ -1200,12 +1201,13 @@ class TargetPicker(QDialog):
             # Say so now, not after three minutes of computing: starting the fragment
             # later is the only remedy, and that means going back to the trim window.
             antwoord = QMessageBox.question(
-                self, "Kader erg klein",
-                f"Het kader is maar {hoogte_px:.0f} pixels hoog. Onder ongeveer "
-                f"{BOX_MIN_HEIGHT_PX} pixels zijn er geen benen meer om te meten — ook "
-                f"niet met het kijkglas — en levert de analyse vrijwel zeker niets op.\n\n"
-                f"Tip: begin het fragment later, op het moment dat de schaatser groter in "
-                f"beeld staat.\n\nToch doorgaan met dit kader?",
+                self, "Box very small",
+                f"The box is only {hoogte_px:.0f} pixels tall. Below about "
+                f"{BOX_MIN_HEIGHT_PX} pixels there are no legs left to measure — not "
+                f"even with the spyglass — and the analysis is almost certain to "
+                f"yield nothing.\n\n"
+                f"Tip: start the fragment later, at the moment the skater is bigger "
+                f"in frame.\n\nContinue with this box anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if antwoord != QMessageBox.Yes:
                 return
@@ -1223,7 +1225,7 @@ class HorizonPicker(QDialog):
     """
     def __init__(self, frame_bgr, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Stel de horizon / ijslijn in")
+        self.setWindowTitle("Set the horizon / ice line")
         self.horizon_deg = 0.0
         self.auto_per_frame = False
         self._frame = frame_bgr
@@ -1233,9 +1235,9 @@ class HorizonPicker(QDialog):
 
         v = QVBoxLayout(self)
         uitleg = QLabel(
-            "Klik twee punten langs het ijs (of de boarding/reclameband) om de\n"
-            "camerakanteling te bepalen, of laat hem automatisch detecteren.\n"
-            "Klik opnieuw om de lijn te hertekenen.")
+            "Click two points along the ice (or the boarding/ad board) to determine\n"
+            "the camera tilt, or have it detected automatically.\n"
+            "Click again to redraw the line.")
         uitleg.setWordWrap(True)      # see TargetPicker: no dialog width from one text line
         v.addWidget(uitleg)
         self.label = QLabel()
@@ -1244,28 +1246,28 @@ class HorizonPicker(QDialog):
         self.label.mousePressEvent = self._click
         v.addWidget(self.label, 1)
 
-        self.lbl_hoek = QLabel("Kanteling: 0.00°  (nog geen lijn getekend)")
+        self.lbl_hoek = QLabel("Tilt: 0.00°  (no line drawn yet)")
         self.lbl_hoek.setStyleSheet("font-weight: bold;")
         v.addWidget(self.lbl_hoek)
 
         self.chk_per_frame = QCheckBox(
-            "Automatisch per frame herkennen (voor een schommelende camera) (werkt niet)")
+            "Detect automatically per frame (for a wobbling camera) (doesn't work)")
         self.chk_per_frame.setToolTip(
-            "WERKT NIET / niet in gebruik: sinds juli 2026 staat de camera altijd\n"
-            "precies horizontaal, dus er is geen kanteling om per frame te volgen.\n"
-            "Laat deze optie uit.")
+            "DOESN'T WORK / not in use: since July 2026 the camera always stands\n"
+            "exactly horizontal, so there's no tilt to track per frame.\n"
+            "Leave this option off.")
         self.chk_per_frame.stateChanged.connect(self._toggle_per_frame)
         v.addWidget(self.chk_per_frame)
 
         knoppen = QHBoxLayout()
-        self.btn_auto = QPushButton("Detecteer (dit frame)")
+        self.btn_auto = QPushButton("Detect (this frame)")
         self.btn_auto.clicked.connect(self._detect)
         knoppen.addWidget(self.btn_auto)
-        btn_geen = QPushButton("Geen kanteling (0°)")
+        btn_geen = QPushButton("No tilt (0°)")
         btn_geen.clicked.connect(self._no_tilt)
         knoppen.addWidget(btn_geen)
         knoppen.addStretch(1)
-        self.btn_ok = QPushButton("Bevestig")
+        self.btn_ok = QPushButton("Confirm")
         self.btn_ok.clicked.connect(self._confirm)
         knoppen.addWidget(self.btn_ok)
         v.addLayout(knoppen)
@@ -1315,18 +1317,18 @@ class HorizonPicker(QDialog):
         self._points.append((ox, oy))
         if len(self._points) == 2:
             self.horizon_deg = horizon_angle_from_line(self._points[0], self._points[1])
-            self.lbl_hoek.setText(f"Kanteling: {self.horizon_deg:+.2f}°")
+            self.lbl_hoek.setText(f"Tilt: {self.horizon_deg:+.2f}°")
         else:
-            self.lbl_hoek.setText("Kanteling: klik het tweede punt …")
+            self.lbl_hoek.setText("Tilt: click the second point …")
         self._render()
 
     def _detect(self):
         degrees = detect_ice_line(self._frame)
         if degrees is None:
             QMessageBox.information(
-                self, "Geen ijslijn gevonden",
-                "Kon geen betrouwbare horizontale lijn detecteren. Teken de lijn "
-                "handmatig, of kies 'Geen kanteling'.")
+                self, "No ice line found",
+                "Could not detect a reliable horizontal line. Draw the line "
+                "manually, or choose 'No tilt'.")
             return
         # Synthesize a display line straight across the frame at the found angle.
         w, h = self._orig_w, self._orig_h
@@ -1334,7 +1336,7 @@ class HorizonPicker(QDialog):
         slope = np.tan(np.radians(degrees))            # y drops to the right at a positive angle
         self._points = [(0.0, cy + slope * cx), (float(w), cy - slope * (w - cx))]
         self.horizon_deg = degrees
-        self.lbl_hoek.setText(f"Kanteling: {degrees:+.2f}°  (automatisch — controleer de lijn)")
+        self.lbl_hoek.setText(f"Tilt: {degrees:+.2f}°  (automatic — check the line)")
         self._render()
 
     def _toggle_per_frame(self, _state):
@@ -1343,12 +1345,12 @@ class HorizonPicker(QDialog):
         self.label.setEnabled(not on)
         self.btn_auto.setEnabled(not on)
         if on:
-            self.lbl_hoek.setText("Kanteling: automatisch per frame — "
-                                  "wordt tijdens de analyse bepaald.")
+            self.lbl_hoek.setText("Tilt: automatic per frame — "
+                                  "determined during the analysis.")
         elif len(self._points) == 2:
-            self.lbl_hoek.setText(f"Kanteling: {self.horizon_deg:+.2f}°")
+            self.lbl_hoek.setText(f"Tilt: {self.horizon_deg:+.2f}°")
         else:
-            self.lbl_hoek.setText("Kanteling: 0.00°  (nog geen lijn getekend)")
+            self.lbl_hoek.setText("Tilt: 0.00°  (no line drawn yet)")
 
     def _confirm(self):
         self.auto_per_frame = self.chk_per_frame.isChecked()
@@ -1382,7 +1384,7 @@ class CalibrationPicker(QDialog):
         (reusing the same camera pose). The lines are then already drawn and can still
         be corrected — reusing and adjusting is one and the same action."""
         super().__init__(parent)
-        self.setWindowTitle("Perspectiefkalibratie: trek de baanlijnen na")
+        self.setWindowTitle("Perspective calibration: trace the track lines")
         self.perspectief = None
         self._frame = frame_bgr
         self._track_lines = []           # [((x,y),(x,y))] in original pixels
@@ -1397,9 +1399,10 @@ class CalibrationPicker(QDialog):
 
         links = QVBoxLayout()
         uitleg = QLabel(
-            "Trek elke lijn met twee klikken. Baanlijnen: evenwijdig in de rijrichting "
-            "(volgorde maakt niet uit).\nDwarslijnen: haaks erop (start-/finishlijn, "
-            "bochtmarkering). Trek zo lang mogelijke lijnen — dat is nauwkeuriger.")
+            "Trace each line with two clicks. Track lines: parallel to the direction "
+            "of travel\n(order doesn't matter). Cross lines: perpendicular to them "
+            "(start/finish line, corner marking). Trace lines as long as possible — "
+            "that's more accurate.")
         uitleg.setWordWrap(True)      # see TargetPicker: no dialog width from one text line
         links.addWidget(uitleg)
         self.label = QLabel()
@@ -1411,19 +1414,19 @@ class CalibrationPicker(QDialog):
 
         rechts = QVBoxLayout()
 
-        soort_groep = QGroupBox("Lijnsoort (voor de volgende lijn)")
+        soort_groep = QGroupBox("Line type (for the next line)")
         sv = QVBoxLayout(soort_groep)
-        self.radio_rij = QRadioButton("Baanlijn (rijrichting)")
-        self.radio_dwars = QRadioButton("Dwarslijn (haaks op de baan)")
+        self.radio_rij = QRadioButton("Track line (direction of travel)")
+        self.radio_dwars = QRadioButton("Cross line (perpendicular to the track)")
         self.radio_rij.setChecked(True)
         sv.addWidget(self.radio_rij)
         sv.addWidget(self.radio_dwars)
         rechts.addWidget(soort_groep)
 
         knoppen_lijn = QHBoxLayout()
-        btn_wis_laatste = QPushButton("Laatste lijn wissen")
+        btn_wis_laatste = QPushButton("Clear last line")
         btn_wis_laatste.clicked.connect(self._undo_last)
-        btn_wis_alles = QPushButton("Alles wissen")
+        btn_wis_alles = QPushButton("Clear all")
         btn_wis_alles.clicked.connect(self._clear_all)
         knoppen_lijn.addWidget(btn_wis_laatste)
         knoppen_lijn.addWidget(btn_wis_alles)
@@ -1435,15 +1438,17 @@ class CalibrationPicker(QDialog):
         # computes with a lower-leg length in real meters, so it can't work here (a made-up
         # distance gave 49° off there, silently). Hence the coupling below: angles-only ⇒
         # 'leg_plane', which uses no length at all.
-        self.chk_alleen_hoeken = QCheckBox("Alleen hoeken (geen snelheid/slaglengte)")
+        self.chk_alleen_hoeken = QCheckBox("Angles only (no speed/stroke length)")
         self.chk_alleen_hoeken.setChecked(True)
         self.chk_alleen_hoeken.setToolTip(
-            "De afzethoek is schaalvrij: hij komt alléén uit de richtingen van de lijnen,\n"
-            "niet uit hun afstand. Je hoeft dus geen enkele maat te weten of op te meten.\n"
+            "The push angle is scale-free: it comes only from the directions of the "
+            "lines,\nnot from their distance. So you don't need to know or measure "
+            "any distance at all.\n"
             "\n"
-            "Uitzetten alleen als je snelheid (m/s) en slaglengte (m) in de tabel wilt, óf\n"
-            "als je met de reconstructiemethode 'onderbeenlengte' wilt werken — die rekent\n"
-            "met een lengte in echte meters en heeft dus een echte lijnafstand nodig.")
+            "Turn off only if you want speed (m/s) and stroke length (m) in the "
+            "table, or\nif you want to use the 'lower-leg length' reconstruction "
+            "method — that one\ncomputes with a length in real meters and so needs a "
+            "real line distance.")
         self.chk_alleen_hoeken.toggled.connect(self._scale_changed)
         rechts.addWidget(self.chk_alleen_hoeken)
 
@@ -1454,63 +1459,64 @@ class CalibrationPicker(QDialog):
         self.spin_lijnafstand.setValue(skate_perspective.DEFAULT_LINE_DISTANCE)
         self.spin_lijnafstand.setSuffix(" m")
         self.spin_lijnafstand.valueChanged.connect(self._recalibrate)
-        self.lbl_lijnafstand = QLabel("Afstand tussen baanlijnen:")
+        self.lbl_lijnafstand = QLabel("Distance between track lines:")
         vorm.addRow(self.lbl_lijnafstand, self.spin_lijnafstand)
 
         self.spin_f = QSpinBox()
         self.spin_f.setRange(0, 100000)
         self.spin_f.setValue(0)
-        self.spin_f.setSpecialValueText("automatisch")
+        self.spin_f.setSpecialValueText("automatic")
         self.spin_f.setToolTip(
-            "Brandpuntsafstand in pixels. Normaal schat de kalibratie hem zelf uit de\n"
-            "lijnen; bij een (bijna) frontale camera kan dat principieel niet en moet\n"
-            "hij hier ingevuld worden (typisch 1–2× de beeldbreedte voor een telefoon).")
+            "Focal length in pixels. Normally the calibration estimates it itself "
+            "from the\nlines; with a (near-)frontal camera that's fundamentally not "
+            "possible and it\nmust be filled in here (typically 1-2x the image width "
+            "for a phone).")
         self.spin_f.valueChanged.connect(self._recalibrate)
-        vorm.addRow("Brandpuntsafstand (px):", self.spin_f)
+        vorm.addRow("Focal length (px):", self.spin_f)
 
         self.combo_methode = QComboBox()
-        self.combo_methode.addItem("Onderbeenlengte (bol-snijding)", "lower_leg")
-        self.combo_methode.addItem("Beenvlak (rijrichting)", "leg_plane")
+        self.combo_methode.addItem("Lower-leg length (sphere intersection)", "lower_leg")
+        self.combo_methode.addItem("Leg plane (direction of travel)", "leg_plane")
         self.combo_methode.setToolTip(
-            "Hoe de knie-diepte wordt gereconstrueerd. Beide zijn experimenteel te\n"
-            "vergelijken; 'onderbeenlengte' heeft de lengte hieronder nodig.")
+            "How the knee depth is reconstructed. Both are experimental to\n"
+            "compare; 'lower-leg length' needs the length below.")
         self.combo_methode.currentIndexChanged.connect(
             lambda _: self._scale_changed(self.chk_alleen_hoeken.isChecked()))
-        vorm.addRow("Reconstructie:", self.combo_methode)
+        vorm.addRow("Reconstruction:", self.combo_methode)
 
         self.spin_lengte = QDoubleSpinBox()
         self.spin_lengte.setRange(1.0, 2.30)
         self.spin_lengte.setSingleStep(0.01)
         self.spin_lengte.setValue(1.80)
         self.spin_lengte.setSuffix(" m")
-        vorm.addRow("Lichaamslengte schaatser:", self.spin_lengte)
+        vorm.addRow("Skater's body height:", self.spin_lengte)
 
         self.spin_onderbeen = QDoubleSpinBox()
         self.spin_onderbeen.setRange(0.0, 70.0)
         self.spin_onderbeen.setSingleStep(0.5)
         self.spin_onderbeen.setValue(0.0)
         self.spin_onderbeen.setSuffix(" cm")
-        self.spin_onderbeen.setSpecialValueText("uit lichaamslengte")
+        self.spin_onderbeen.setSpecialValueText("from body height")
         self.spin_onderbeen.setToolTip(
-            "Opgemeten onderbeenlengte (knieholte tot enkelknobbel). Laat op\n"
-            "'uit lichaamslengte' staan om hem te schatten als 0.246 × lichaamslengte.")
-        self.lbl_onderbeen = QLabel("Onderbeenlengte:")
+            "Measured lower-leg length (back of the knee to the ankle bone). Leave "
+            "on\n'from body height' to estimate it as 0.246 × body height.")
+        self.lbl_onderbeen = QLabel("Lower-leg length:")
         vorm.addRow(self.lbl_onderbeen, self.spin_onderbeen)
         self.lbl_lengte = vorm.labelForField(self.spin_lengte)
         rechts.addLayout(vorm)
 
-        self.lbl_status = QLabel("Nog geen lijnen getekend.")
+        self.lbl_status = QLabel("No lines drawn yet.")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("font-weight: bold;")
         rechts.addWidget(self.lbl_status)
         rechts.addStretch(1)
 
         knoppen = QHBoxLayout()
-        btn_annuleer = QPushButton("Annuleren")
+        btn_annuleer = QPushButton("Cancel")
         btn_annuleer.clicked.connect(self.reject)
         knoppen.addWidget(btn_annuleer)
         knoppen.addStretch(1)
-        self.btn_ok = QPushButton("Bevestig")
+        self.btn_ok = QPushButton("Confirm")
         self.btn_ok.setEnabled(False)
         self.btn_ok.clicked.connect(self._confirm)
         knoppen.addWidget(self.btn_ok)
@@ -1545,11 +1551,11 @@ class CalibrationPicker(QDialog):
         wrong place and produce a plausible but wrong calibration."""
         if not calibration_input.fits(self._orig_w, self._orig_h):
             QMessageBox.warning(
-                self, "Kalibratie past niet",
-                f"Die kalibratie is gemaakt op beeld van {calibration_input.image_w}×"
-                f"{calibration_input.image_h} en deze video is {self._orig_w}×"
-                f"{self._orig_h}. De lijnen staan in pixels, dus overnemen zou ze "
-                f"verkeerd neerleggen. Trek ze opnieuw na.")
+                self, "Calibration doesn't fit",
+                f"That calibration was made on a {calibration_input.image_w}×"
+                f"{calibration_input.image_h} image and this video is "
+                f"{self._orig_w}×{self._orig_h}. The lines are stored in pixels, so "
+                f"reusing them would place them wrong. Trace them again.")
             return
         self._track_lines = list(calibration_input.track_lines)
         self._cross_lines = list(calibration_input.cross_lines)
@@ -1627,7 +1633,7 @@ class CalibrationPicker(QDialog):
             lijn = (self._click_point, (ox, oy))
             self._click_point = None
             if np.hypot(lijn[1][0] - lijn[0][0], lijn[1][1] - lijn[0][1]) < 10:
-                self.lbl_status.setText("Lijn te kort — klik twee punten verder uit elkaar.")
+                self.lbl_status.setText("Line too short — click two points further apart.")
             elif self.radio_rij.isChecked():
                 self._track_lines.append(lijn)
             else:
@@ -1665,9 +1671,9 @@ class CalibrationPicker(QDialog):
         mutual distances = 0.00° off. So it never fails silently."""
         if n_track < 3:
             return ""
-        return ("\n\nTip: met 3+ baanlijnen wordt aangenomen dat ze GELIJKMATIG verdeeld "
-                "zijn. Zijn ze dat niet, gebruik dan precies 2 baanlijnen + 2 "
-                "dwarslijnen — dan doet hun onderlinge afstand niet meer mee.")
+        return ("\n\nTip: with 3+ track lines it's assumed they're EVENLY spaced. "
+                "If they're not, use exactly 2 track lines + 2 cross lines instead "
+                "— then their mutual distance no longer matters.")
 
     # ── scale on/off ───────────────────────────────────────────────────────
     def _scale_changed(self, alleen_hoeken):
@@ -1687,12 +1693,12 @@ class CalibrationPicker(QDialog):
                 self.combo_methode.setCurrentIndex(idx)
         self.combo_methode.setEnabled(not alleen_hoeken)
         self.combo_methode.setToolTip(
-            "Vastgezet op 'beenvlak' omdat die geen enkele lengte in meters gebruikt.\n"
-            "Zet 'Alleen hoeken' uit en vul de echte lijnafstand in om 'onderbeenlengte'\n"
-            "te kunnen kiezen (die heeft een echte schaal nodig)."
+            "Pinned to 'leg plane' because it doesn't use any length in meters.\n"
+            "Turn off 'Angles only' and fill in the real line distance to be able\n"
+            "to choose 'lower-leg length' (that one needs a real scale)."
             if alleen_hoeken else
-            "Hoe de knie-diepte wordt gereconstrueerd. Beide zijn experimenteel te\n"
-            "vergelijken; 'onderbeenlengte' heeft de lengte hieronder nodig.")
+            "How the knee depth is reconstructed. Both are experimental to\n"
+            "compare; 'lower-leg length' needs the length below.")
         # The length fields only belong with 'lower_leg'.
         lengte_nodig = (not alleen_hoeken
                         and self.combo_methode.currentData() == "lower_leg")
@@ -1727,9 +1733,9 @@ class CalibrationPicker(QDialog):
         n_rij, n_dwars = len(self._track_lines), len(self._cross_lines)
         if n_rij < 2 or n_dwars < 1:
             self.lbl_status.setText(
-                f"Getekend: {n_rij} baanlijn(en), {n_dwars} dwarslijn(en).\n"
-                f"Nodig: minstens 2 baanlijnen + 1 dwarslijn "
-                f"(2+1 alleen met opgegeven brandpuntsafstand; anders 3+1 of 2+2).")
+                f"Drawn: {n_rij} track line(s), {n_dwars} cross line(s).\n"
+                f"Needed: at least 2 track lines + 1 cross line "
+                f"(2+1 only with a given focal length; otherwise 3+1 or 2+2).")
             self.btn_ok.setEnabled(False)
             self._render()
             return
@@ -1747,30 +1753,30 @@ class CalibrationPicker(QDialog):
             self._calibration = calibration_input.calibrate()
             self._calibration_input = calibration_input
         except ValueError as e:
-            self.lbl_status.setText(f"Kalibratie lukt nog niet: {e}{self._line_hint(n_rij)}")
+            self.lbl_status.setText(f"Calibration not yet possible: {e}{self._line_hint(n_rij)}")
             self.btn_ok.setEnabled(False)
             self._render()
             return
         kal = self._calibration
         # Without a known scale, the camera height is in arbitrary units; showing that
         # in meters would suggest a precision that isn't there.
-        hoogte = (f"camerahoogte {kal.camera_height:.1f} m, " if kal.scale_known
+        hoogte = (f"camera height {kal.camera_height:.1f} m, " if kal.scale_known
                   else "")
         # With exactly 2 track lines + 2 cross lines the system is exactly determined:
         # the residual is then 0.00 px by construction and says nothing about quality —
         # showing it would read as "perfectly calibrated". A third cross line turns V2
         # into a least-squares fit and makes the residual actually informative.
         overbepaald = len(self._cross_lines) >= 3 or len(self._track_lines) >= 3
-        residu = (f", residu {kal.residual_px:.1f} px" if overbepaald else "")
-        tekst = (f"Kalibratie OK — f = {kal.f:.0f} px"
-                 f"{' (geschat)' if kal.f_estimated else ''}, {hoogte}"
+        residu = (f", residual {kal.residual_px:.1f} px" if overbepaald else "")
+        tekst = (f"Calibration OK — f = {kal.f:.0f} px"
+                 f"{' (estimated)' if kal.f_estimated else ''}, {hoogte}"
                  f"horizon {kal.horizon_deg:+.2f}°{residu}.")
         if not overbepaald:
-            tekst += ("\nPrecies genoeg lijnen: er is géén controle mogelijk. Teken een "
-                      "derde dwarslijn om te zien of de kalibratie klopt.")
+            tekst += ("\nExactly enough lines: no check is possible. Draw a third "
+                      "cross line to see whether the calibration checks out.")
         if not kal.scale_known:
-            tekst += ("\nAlleen hoeken: die zijn schaalvrij en dus exact; snelheid en "
-                      "slaglengte blijven leeg.")
+            tekst += ("\nAngles only: those are scale-free and thus exact; speed "
+                      "and stroke length stay empty.")
         if kal.warnings:
             tekst += "\n⚠ " + "\n⚠ ".join(kal.warnings)
         self.lbl_status.setText(tekst)
@@ -1878,7 +1884,7 @@ class AnalysisWorker(QThread):
         # results are still shown, just not kept.
         analyse_id = None
         if self.bieb is not None and self.schaatser_id is not None:
-            self.status.emit("Opslaan in bibliotheek...")
+            self.status.emit("Saving to the library...")
             try:
                 analyse_id = skate_db.save_analysis(
                     self.bieb, self.schaatser_id, self.titel, self.input_pad,
@@ -1952,11 +1958,11 @@ class BatchWorker(QThread):
                 if resultaten and all(r.bocht for r in resultaten):
                     # Otherwise this clip would show up as "0 pushes" in the list with no
                     # one knowing why.
-                    _warn("De schaatser staat nergens frontaal in beeld; de hele video "
-                          "is als bocht aangemerkt en er is niets gemeten.")
+                    _warn("The skater is never frontal in frame; the whole video "
+                          "was marked as a corner and nothing was measured.")
                 if self.cancelled:
                     break                        # don't start a long video copy anymore
-                self.status.emit("Opslaan in bibliotheek...")
+                self.status.emit("Saving to the library...")
                 analyse_id = skate_db.save_analysis(
                     self.bieb, taak["schaatser_id"], taak["titel"], taak["input_pad"],
                     info, resultaten, events,
@@ -1982,21 +1988,21 @@ class SkaterDialog(QDialog):
 
     def __init__(self, parent=None, naam="", geboortejaar=None, notities=""):
         super().__init__(parent)
-        self.setWindowTitle("Schaatser")
+        self.setWindowTitle("Skater")
         form = QFormLayout(self)
 
         self.veld_naam = QLineEdit(naam)
-        form.addRow("Naam:", self.veld_naam)
+        form.addRow("Name:", self.veld_naam)
 
         self.veld_jaar = QSpinBox()
         self.veld_jaar.setRange(0, 2100)
         self.veld_jaar.setSpecialValueText("—")   # 0 = not filled in
         self.veld_jaar.setValue(geboortejaar or 0)
-        form.addRow("Geboortejaar:", self.veld_jaar)
+        form.addRow("Birth year:", self.veld_jaar)
 
         self.veld_notities = QPlainTextEdit(notities or "")
         self.veld_notities.setFixedHeight(70)
-        form.addRow("Notities:", self.veld_notities)
+        form.addRow("Notes:", self.veld_notities)
 
         knoppen = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         knoppen.accepted.connect(self.accept)
@@ -2026,7 +2032,7 @@ class NewAnalysisDialog(QDialog):
 
     def __init__(self, schaatsers, voorkeur_id=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Nieuwe analyse")
+        self.setWindowTitle("New analysis")
         self.video_pad = None
         v = QVBoxLayout(self)
 
@@ -2039,22 +2045,22 @@ class NewAnalysisDialog(QDialog):
             idx = self.combo_schaatser.findData(voorkeur_id)
             if idx >= 0:
                 self.combo_schaatser.setCurrentIndex(idx)
-        form.addRow("Schaatser:", self.combo_schaatser)
+        form.addRow("Skater:", self.combo_schaatser)
 
         rij_video = QHBoxLayout()
-        knop_video = QPushButton("Video kiezen...")
+        knop_video = QPushButton("Choose video...")
         knop_video.clicked.connect(self._choose_video)
-        self.lbl_video = QLabel("Geen video gekozen")
+        self.lbl_video = QLabel("No video chosen")
         rij_video.addWidget(knop_video)
         rij_video.addWidget(self.lbl_video, stretch=1)
         form.addRow("Video:", rij_video)
 
         self.veld_titel = QLineEdit()
-        self.veld_titel.setPlaceholderText("standaard: naam van het videobestand")
-        form.addRow("Titel:", self.veld_titel)
+        self.veld_titel.setPlaceholderText("default: video file name")
+        form.addRow("Title:", self.veld_titel)
         v.addLayout(form)
 
-        instellingen = QGroupBox("Instellingen")
+        instellingen = QGroupBox("Settings")
         fv = QVBoxLayout(instellingen)
 
         rij_smooth = QHBoxLayout()
@@ -2067,7 +2073,7 @@ class NewAnalysisDialog(QDialog):
         fv.addLayout(rij_smooth)
 
         rij_threshold = QHBoxLayout()
-        rij_threshold.addWidget(QLabel("Gewicht-drempel:"))
+        rij_threshold.addWidget(QLabel("Weight threshold:"))
         self.spin_threshold = QDoubleSpinBox()
         self.spin_threshold.setRange(0.001, 0.2)
         self.spin_threshold.setSingleStep(0.001)
@@ -2077,30 +2083,30 @@ class NewAnalysisDialog(QDialog):
         rij_threshold.addWidget(self.spin_threshold)
         fv.addLayout(rij_threshold)
 
-        self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
+        self.chk_heavy = QCheckBox("Heavy model (more accurate, slower)")
         self.chk_heavy.setVisible(not IS_YOLO)   # only relevant for the MediaPipe backend
         fv.addWidget(self.chk_heavy)
 
-        self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
+        self.chk_bocht = QCheckBox("Skip corner (faster)")
         self.chk_bocht.setChecked(True)
         self.chk_bocht.setToolTip(CORNER_TOOLTIP)
         fv.addWidget(self.chk_bocht)
 
-        self.chk_deint = QCheckBox("Interlacing wegfilteren (kamtanden)")
+        self.chk_deint = QCheckBox("Filter out interlacing (combing)")
         self.chk_deint.setToolTip(DEINT_TOOLTIP)
         self.chk_deint.setEnabled(False)         # only usable once a video is chosen
         fv.addWidget(self.chk_deint)
 
-        self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (experimenteel)")
+        self.chk_perspectief = QCheckBox("Perspective correction via track lines (experimental)")
         self.chk_perspectief.setToolTip(PERSPECTIVE_TOOLTIP)
         fv.addWidget(self.chk_perspectief)
 
-        self.chk_geen_smoothing = QCheckBox("Geen landmark-smoothing (ruwe detecties)")
+        self.chk_geen_smoothing = QCheckBox("No landmark smoothing (raw detections)")
         self.chk_geen_smoothing.setToolTip(
-            "Slaat het opschonen + Savitzky–Golay-smoothen van de landmark-trajecten\n"
-            "over: het skelet volgt de detecties exact (kan trillen), maar kan nooit\n"
-            "achterlopen door interpolatie. Handig om te zien of een achterlopend\n"
-            "skelet uit de smoothing komt of uit de detectie zelf.")
+            "Skips cleaning up + Savitzky-Golay-smoothing the landmark tracks: the\n"
+            "skeleton follows the detections exactly (may jitter), but can never lag\n"
+            "behind through interpolation. Useful to see whether a lagging skeleton\n"
+            "comes from the smoothing or from the detection itself.")
         fv.addWidget(self.chk_geen_smoothing)
 
         v.addWidget(instellingen)
@@ -2110,12 +2116,12 @@ class NewAnalysisDialog(QDialog):
         knoppen.rejected.connect(self.reject)
         v.addWidget(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
-        self._ok.setText("Start analyse")
+        self._ok.setText("Start analysis")
         self._ok.setEnabled(False)               # only enabled once a video is chosen
 
     def _choose_video(self):
         pad, _ = QFileDialog.getOpenFileName(
-            self, "Kies video", "", VIDEO_FILTER)
+            self, "Choose video", "", VIDEO_FILTER)
         if not pad:
             return
         self.video_pad = pad
@@ -2164,17 +2170,17 @@ class BatchAnalysisDialog(QDialog):
 
     def __init__(self, schaatsers, voorkeur_id=None, voorgevuld=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Fragmenten analyseren" if voorgevuld else "Batch-analyse")
+        self.setWindowTitle("Analyze fragments" if voorgevuld else "Batch analysis")
         self.resize(760, 500)
         self._schaatsers = schaatsers
         v = QVBoxLayout(self)
 
         # Choose videos + the default skater you apply to all rows at once.
         rij_top = QHBoxLayout()
-        knop_videos = QPushButton("Video's kiezen...")
+        knop_videos = QPushButton("Choose videos...")
         knop_videos.clicked.connect(self._choose_videos)
         rij_top.addWidget(knop_videos)
-        rij_top.addWidget(QLabel("Standaard schaatser:"))
+        rij_top.addWidget(QLabel("Default skater:"))
         self.combo_standaard = QComboBox()
         for s in schaatsers:
             tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
@@ -2184,26 +2190,26 @@ class BatchAnalysisDialog(QDialog):
             if idx >= 0:
                 self.combo_standaard.setCurrentIndex(idx)
         rij_top.addWidget(self.combo_standaard, stretch=1)
-        knop_toepassen = QPushButton("Toepassen op alle rijen")
+        knop_toepassen = QPushButton("Apply to all rows")
         knop_toepassen.clicked.connect(self._apply_default)
         rij_top.addWidget(knop_toepassen)
         v.addLayout(rij_top)
 
         # Videos + a skater (combobox) and an editable titel per row.
         self.tabel = QTableWidget(0, 3)
-        self.tabel.setHorizontalHeaderLabels(["Video", "Schaatser", "Titel"])
+        self.tabel.setHorizontalHeaderLabels(["Video", "Skater", "Title"])
         self.tabel.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.tabel.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.tabel.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
         v.addWidget(self.tabel, stretch=1)
 
-        knop_verwijder = QPushButton("Geselecteerde rij verwijderen")
+        knop_verwijder = QPushButton("Remove selected row")
         knop_verwijder.clicked.connect(self._remove_row)
         v.addWidget(knop_verwijder)
 
         # Gedeelde instellingen (dezelfde widgets/waarden als NewAnalysisDialog).
-        instellingen = QGroupBox("Instellingen (gelden voor de hele batch)")
+        instellingen = QGroupBox("Settings (apply to the whole batch)")
         fv = QVBoxLayout(instellingen)
 
         rij_smooth = QHBoxLayout()
@@ -2216,7 +2222,7 @@ class BatchAnalysisDialog(QDialog):
         fv.addLayout(rij_smooth)
 
         rij_threshold = QHBoxLayout()
-        rij_threshold.addWidget(QLabel("Gewicht-drempel:"))
+        rij_threshold.addWidget(QLabel("Weight threshold:"))
         self.spin_threshold = QDoubleSpinBox()
         self.spin_threshold.setRange(0.001, 0.2)
         self.spin_threshold.setSingleStep(0.001)
@@ -2226,27 +2232,27 @@ class BatchAnalysisDialog(QDialog):
         rij_threshold.addWidget(self.spin_threshold)
         fv.addLayout(rij_threshold)
 
-        self.chk_heavy = QCheckBox("Heavy-model (nauwkeuriger, trager)")
+        self.chk_heavy = QCheckBox("Heavy model (more accurate, slower)")
         self.chk_heavy.setVisible(not IS_YOLO)   # only relevant for the MediaPipe backend
         fv.addWidget(self.chk_heavy)
 
-        self.chk_bocht = QCheckBox("Bocht overslaan (sneller)")
+        self.chk_bocht = QCheckBox("Skip corner (faster)")
         self.chk_bocht.setChecked(True)
         self.chk_bocht.setToolTip(CORNER_TOOLTIP)
         fv.addWidget(self.chk_bocht)
 
         # Determined per clip, not once for the whole batch: a batch can hold clips from
         # different cameras, and the answer is cheap per file.
-        self.chk_deint = QCheckBox("Interlacing automatisch wegfilteren (kamtanden)")
+        self.chk_deint = QCheckBox("Filter out interlacing automatically (combing)")
         self.chk_deint.setToolTip(DEINT_TOOLTIP)
         self.chk_deint.setChecked(True)
         fv.addWidget(self.chk_deint)
 
-        self.chk_perspectief = QCheckBox("Perspectiefcorrectie via baanlijnen (experimenteel)")
+        self.chk_perspectief = QCheckBox("Perspective correction via track lines (experimental)")
         self.chk_perspectief.setToolTip(PERSPECTIVE_TOOLTIP_BATCH)
         fv.addWidget(self.chk_perspectief)
 
-        self.chk_geen_smoothing = QCheckBox("Geen landmark-smoothing (ruwe detecties)")
+        self.chk_geen_smoothing = QCheckBox("No landmark smoothing (raw detections)")
         fv.addWidget(self.chk_geen_smoothing)
         v.addWidget(instellingen)
 
@@ -2296,7 +2302,7 @@ class BatchAnalysisDialog(QDialog):
 
     def _choose_videos(self):
         paden, _ = QFileDialog.getOpenFileNames(
-            self, "Kies video's", "", VIDEO_FILTER)
+            self, "Choose videos", "", VIDEO_FILTER)
         for pad in paden:
             self._add_row(pad)
         self._ok.setEnabled(self.tabel.rowCount() > 0)
@@ -2357,7 +2363,7 @@ class AnalysisPicker(QDialog):
     row to set up a comparison, and after that per side to switch analyses.
     """
 
-    def __init__(self, bieb, titel="Kies analyse", voorkeur_schaatser_id=None, parent=None):
+    def __init__(self, bieb, titel="Choose analysis", voorkeur_schaatser_id=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(titel)
         self.bieb = bieb
@@ -2375,18 +2381,18 @@ class AnalysisPicker(QDialog):
             if idx >= 0:
                 self.combo_schaatser.setCurrentIndex(idx)
         self.combo_schaatser.currentIndexChanged.connect(self._fill_analyses)
-        form.addRow("Schaatser:", self.combo_schaatser)
+        form.addRow("Skater:", self.combo_schaatser)
 
         self.combo_analyse = QComboBox()
         self.combo_analyse.setMinimumWidth(380)
-        form.addRow("Analyse:", self.combo_analyse)
+        form.addRow("Analysis:", self.combo_analyse)
 
         knoppen = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         knoppen.accepted.connect(self.accept)
         knoppen.rejected.connect(self.reject)
         form.addRow(knoppen)
         self._ok = knoppen.button(QDialogButtonBox.Ok)
-        self._ok.setText("Kiezen")
+        self._ok.setText("Choose")
 
         self._fill_analyses()
 
@@ -2398,7 +2404,7 @@ class AnalysisPicker(QDialog):
                 gem = f"{a['gem_hoek']:.1f}°" if a["gem_hoek"] is not None else "—"
                 self.combo_analyse.addItem(
                     f"{a['datum']} — {a['titel']}  "
-                    f"({a['aantal_afzetten']} afzetten, gem {gem})", a["id"])
+                    f"({a['aantal_afzetten']} pushes, avg {gem})", a["id"])
         self._ok.setEnabled(self.combo_analyse.count() > 0)
 
     @property
@@ -2417,7 +2423,7 @@ class AnalysisPicker(QDialog):
 
 
 def _yes_no(waarde):
-    return "ja" if waarde else "nee"
+    return "yes" if waarde else "no"
 
 
 def _duration_text(a):
@@ -2431,12 +2437,12 @@ def _duration_text(a):
     frames = a.get("totaal_frames") or 0
     if fps > 0 and frames > 0:
         sec = frames / fps
-        duur = (f"{sec:.1f}s".replace(".", ",") if sec < 60
+        duur = (f"{sec:.1f}s" if sec < 60
                 else f"{int(sec) // 60}:{int(sec) % 60:02d}")
     else:
         duur = "—"
     n = a.get("aantal_afzetten") or 0
-    return f"{duur} ({n} afzet{'ten' if n != 1 else ''})"
+    return f"{duur} ({n} push{'es' if n != 1 else ''})"
 
 
 class AnalysisInfoDialog(QDialog):
@@ -2450,32 +2456,32 @@ class AnalysisInfoDialog(QDialog):
     can be copied.
     """
 
-    APPVERSIE_TIP = ("Git-commit waarmee deze analyse gedraaid is (commitdatum · hash).\n"
-                     "Een '+' betekent: er stonden op dat moment ongecommitte wijzigingen\n"
-                     "in de code, dus de hash beschrijft de analyse niet volledig.")
+    APPVERSIE_TIP = ("Git commit this analysis was run with (commit date · hash).\n"
+                     "A '+' means: there were uncommitted changes to the code at that\n"
+                     "time, so the hash doesn't fully describe the analysis.")
 
     def __init__(self, meta, schaatser_naam="", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Info over deze analyse")
+        self.setWindowTitle("Info about this analysis")
         inst = meta.get("instellingen") or {}
         form = QFormLayout(self)
 
         gemaakt = meta.get("aangemaakt_op") or ""
         datum = meta.get("datum") or "—"
         if gemaakt:
-            datum += f"   (opgeslagen {gemaakt})"
+            datum += f"   (saved {gemaakt})"
 
         # Smoothing off = the diagnostic mode (raw detections, CLI --no-smooth).
         smoothing = (f"{inst.get('smooth_n', '?')} frames"
-                     if inst.get("smooth_landmarks", True) else "uit (ruwe detecties)")
-        horizon = ("automatisch per frame" if inst.get("auto_horizon")
-                   else f"vast {inst.get('horizon_deg', 0.0):.1f}°")
+                     if inst.get("smooth_landmarks", True) else "off (raw detections)")
+        horizon = ("automatic per frame" if inst.get("auto_horizon")
+                   else f"fixed {inst.get('horizon_deg', 0.0):.1f}°")
         # `heavy` chooses between pose_landmarker_heavy and _full and so only exists for
         # the MediaPipe backend; YOLO has one model and ignores the flag -- there the row
         # ("no") would only suggest a heavier model could have been chosen.
         heavy_rij = ([] if meta.get("backend") == "yolo" else
-                     [("Heavy-model:", _yes_no(inst.get("heavy")),
-                       "MediaPipe: pose_landmarker_heavy.task i.p.v. _full.task.")])
+                     [("Heavy model:", _yes_no(inst.get("heavy")),
+                       "MediaPipe: pose_landmarker_heavy.task instead of _full.task.")])
 
         # Origin (phase 8): only for a fragment cut from a recording. A loose clip has no
         # source, and then an empty row says nothing.
@@ -2484,29 +2490,29 @@ class AnalysisInfoDialog(QDialog):
             fps = meta.get("fps") or 0
             plek = (f" ({_time_text(meta['bron_start_frame'], fps)}–"
                     f"{_time_text(meta['bron_eind_frame'], fps)})" if fps else "")
-            herkomst_rij = [("Uit opname:",
-                             f"{meta.get('bron_naam') or 'onbekend'}{plek}",
-                             "Dit fragment is met het knipvenster uit een langere "
-                             "trainingsopname geknipt.")]
+            herkomst_rij = [("From recording:",
+                             f"{meta.get('bron_naam') or 'unknown'}{plek}",
+                             "This fragment was trimmed from a longer training "
+                             "recording with the trim window.")]
 
         # How the target skater was pointed out. A box switches on the spyglass in the
         # YOLO backend (the skater is followed from the box wherever the detection
         # doesn't see them), so that's a measurement-relevant difference from a click.
         if inst.get("doel_kader"):
-            doel = "kader getekend (kijkglas aan)"
+            doel = "box drawn (spyglass on)"
         elif "doel_punt" not in inst:
-            doel = "onbekend (van vóór deze functie)"
+            doel = "unknown (from before this feature)"
         elif inst.get("doel_punt"):
-            doel = "aangeklikt"
+            doel = "clicked"
         else:
-            doel = "grootste beweger"
+            doel = "largest mover"
 
         rijen = [
-            ("Titel:", meta.get("titel") or "—", None),
-            ("Schaatser:", schaatser_naam or "—", None),
-            ("Analysedatum:", datum, None),
-            ("Aangemaakt door:", meta.get("aangemaakt_door") or "—", None),
-            ("Appversie:", inst.get("app_versie") or "onbekend (van vóór deze functie)",
+            ("Title:", meta.get("titel") or "—", None),
+            ("Skater:", schaatser_naam or "—", None),
+            ("Analysis date:", datum, None),
+            ("Created by:", meta.get("aangemaakt_door") or "—", None),
+            ("App version:", inst.get("app_versie") or "unknown (from before this feature)",
              self.APPVERSIE_TIP),
             ("Backend:", inst.get("backend_naam") or meta.get("backend") or "—", None),
             ("Video:", f"{os.path.basename(meta.get('video_bestand') or '')}  —  "
@@ -2514,23 +2520,23 @@ class AnalysisInfoDialog(QDialog):
                        f"{(meta.get('fps') or 0):.1f} fps, "
                        f"{meta.get('totaal_frames')} frames", None),
         ] + herkomst_rij + [
-            ("Handmatig bewerkt:", _yes_no(meta.get("bewerkt")),
-             "Zijn er met de skelet-editor punten verplaatst of skeletten geplaatst?"),
+            ("Manually edited:", _yes_no(meta.get("bewerkt")),
+             "Were any points moved or skeletons placed with the skeleton editor?"),
             ("Smoothing:", smoothing, None),
-            ("Drempel:", f"{inst.get('threshold', '?')}", None),
+            ("Threshold:", f"{inst.get('threshold', '?')}", None),
         ] + heavy_rij + [
-            ("Doelschaatser:", doel,
-             "Klik = de detectiepass zoekt de schaatser op die plek. Kader = daarbovenop\n"
-             "volgt het kijkglas hem vanaf het kader waar de detectie hem (nog) niet ziet,\n"
-             "bv. omdat hij klein in beeld staat."),
-            ("Bocht overslaan:", _yes_no(inst.get("bocht_overslaan")), None),
-            ("Interlacing gefilterd:",
+            ("Target skater:", doel,
+             "Click = the detection pass looks for the skater at that spot. Box = on top\n"
+             "of that, the spyglass follows them from the box wherever detection doesn't\n"
+             "see them (yet), e.g. because they're small in frame."),
+            ("Skip corner:", _yes_no(inst.get("bocht_overslaan")), None),
+            ("Interlacing filtered:",
              _yes_no(inst.get("deinterlaced")) if "deinterlaced" in inst
-             else "onbekend (van vóór deze functie)",
-             "Camcorderbeeld (1080i) weeft twee momenten van 1/50 s uit elkaar in één\n"
-             "frame. Stond dit aan, dan zijn die kamtanden vóór de detectie weggefilterd."),
+             else "unknown (from before this feature)",
+             "Camcorder footage (1080i) weaves two moments 1/50 s apart into one\n"
+             "frame. If this was on, that combing was filtered out before detection."),
             ("Horizon:", horizon, None),
-            ("Perspectiefcorrectie:", _yes_no(inst.get("perspectief_gebruikt")), None),
+            ("Perspective correction:", _yes_no(inst.get("perspectief_gebruikt")), None),
         ] + _calibration_rows(inst)
         for label, waarde, tip in rijen:
             w = QLabel(str(waarde))
