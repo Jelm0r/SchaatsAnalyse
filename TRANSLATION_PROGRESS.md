@@ -203,7 +203,7 @@ document supersedes it for anything about actual progress and lessons learned).
       and precise stages plus a redo) since it needs a real display otherwise,
       confirming it writes valid English-keyed JSON with no leftover Dutch
       identifiers; grepped the finished file for common Dutch words — no hits.
-- [ ] **Phase 8 — `schaats_gui.py` → `skate_gui.py`** (8,839 lines — bigger than every
+- [x] **Phase 8 — `schaats_gui.py` → `skate_gui.py`** (8,839 lines — bigger than every
       phase so far *combined*). Do this in the sub-steps from the original plan:
       - 8a. Rename file, translate identifiers/comments/docstrings only (structural
         pass; UI text still Dutch after this step). **In progress, spans several
@@ -956,24 +956,76 @@ document supersedes it for anything about actual progress and lessons learned).
         `bocht_overslaan` fixture key to `skip_corner`) -- all 16 windows pass,
         including `CalibrationPicker` and `AnalysisInfoDialog`.
 
-      - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
-        first, don't trust these verbatim):
-        - A few identifiers deliberately left Dutch this session for being one step
-          removed from the assigned list or genuinely shared with an untranslated
-          class, should a future session want them: `kant`/`kanten` (ViewWindow's list
-          of `ViewSide`s, and the same word in `MainWindow`'s own compare-page code --
-          a much bigger, separate rename), `lbl_punten`/`lbl_geen_punten`/
-          `punten_aan`/`_punt_kant` (siblings of `_punten`, not renamed), `lopend`/
-          `selectie` (`FragmentBar`'s other two `zet()` keywords, siblings of
-          `fragments`/`analyzed`, not renamed since they weren't on the assigned list
-          and `cursor` there is already English).
-        - `save_analysis`'s own still-Dutch `bron_id`/`bron_start_frame`/
-          `bron_eind_frame` parameters (noted in session 12's Pattern G finding) --
-          not touched by session 13, still open.
-        - `main()` is fully translated (part of session 8, and session 9 confirmed
-          nothing in it needed a rename) -- nothing left there.
-        Re-`grep -n "^class \|^def "` at the start of each session rather than trusting
-        line numbers from old entries.
+      - **Session 14** -- closed out the small leftovers session 13's "Next up" list
+        flagged as optional, finishing `ViewWindow`/`ViewSide`'s own 8a (identifiers
+        only; its 8b/8c text was already done in session 11): `kanten`->`sides`, the
+        bare `kant` local var (only within `ViewSide`/`ViewWindow`'s own methods, not
+        touching `MainWindow`'s separate compare-page `kant` loop vars or the unrelated
+        `_apply_edit(edit, kant)` -- that `kant` holds the string `'oud'`/`'nieuw'`, a
+        different concept entirely, left alone), `_punt_kant`->`_points_side`,
+        `lbl_punten`/`lbl_geen_punten`->`lbl_points`/`lbl_no_points`,
+        `punten_aan`->`points_enabled`, the constructor param `paren`->`pairs`,
+        `_voeg_kant`/`_verwijder_kant`/`_voeg_tweede_toe`/`_zet_modus`/
+        `_koppel_punten`/`_toetsen_afspelen`/`_bouw_puntenpaneel`/`_vernieuw_punten`/
+        `_zet_punt`/`_verwijder_punt`/`_punt_hernoemd`/`_ga_naar_punt`/
+        `_toggle_paneel`/`_toggle_volledig_scherm`/`_minimaliseer` -> their English
+        equivalents (`_add_side`, `_remove_side`, `_add_second`, `_set_mode`,
+        `_attach_points`, `_keys_play`, `_build_points_panel`, `_refresh_points`,
+        `_set_point`, `_remove_point`, `_point_renamed`, `_go_to_point`,
+        `_toggle_panel`, `_toggle_fullscreen`, `_minimize`). Also renamed
+        `kies_tweede`->`choose_second` (the callable `MainWindow` passes into
+        `ViewWindow`'s constructor) after confirming via grep it has exactly one
+        external keyword call site (`skate_gui.py:6216`, `MainWindow`'s own
+        `_bekijk_...` method), and `FragmentBar`/`FragmentPicker`/`PointsBar`'s
+        `lopend`/`selectie` `zet()` keywords -> `running`/`selection` (confirmed via
+        grep these two words appear nowhere outside those three classes' own bodies,
+        so a whole-file word-boundary regex was safe). Fixed four stale docstring/
+        comment mentions of the old "Start alles" button label (the button itself was
+        already translated to "Start all" in an earlier session) and two stale
+        docstring quotes of the old "Tweede video ernaast..." button label (already
+        "Second video alongside..." in the actual `QPushButton` text).
+        All renames were scoped by 1-indexed line range to `ViewSide`+`ViewWindow`
+        only (4690-5266) via a scripted regex, not a bare file-wide pass, specifically
+        *because* `kant`/`selectie`-family words are reused with different meaning
+        elsewhere in the file (verified per-name with a grep before touching anything,
+        same discipline as sessions 5/9/12).
+        **No new bugs found** -- this was pure mechanical identifier renaming with no
+        constructor-keyword or dict-shape change crossing a module boundary, except
+        `choose_second`, which was grepped and confirmed to have only the one call
+        site (already updated in the same pass).
+        **Verified**: `py_compile`; real `import skate_gui` under both venvs
+        (`QT_QPA_PLATFORM=offscreen`); a repo-wide grep for every old identifier in
+        this session's rename table -- the only survivors are `MainWindow`'s own
+        separate `kant`/`kanten` compare-page code and `_apply_edit`'s unrelated
+        `kant` parameter, exactly as intended; a throwaway script building a real
+        recording via `skate_db` (not a hand-built dict) and driving `ViewWindow`
+        end-to-end under both the one-side and two-side paths -- `points_enabled`,
+        `_points_side` attaching/detaching across `_add_side`/`_remove_side`/
+        `_set_mode`, `_set_point`/`_go_to_point`/`_remove_point` actually
+        reading/writing `bron_markering` rows, `_toggle_panel`/`_toggle_fullscreen`/
+        `_minimize`/`done` -- all pass; `.venv-yolo\Scripts\python.exe
+        schaats_schermtest.py` quick mode -- 16/16 windows pass; **`--alles`** (the
+        Phase 8e full re-run, not done since session 8's baseline) -- 22 failing
+        window/scenario combinations, matching session 8's post-translation baseline
+        exactly (same already-documented small-screen/large-font edge cases in
+        `CLAUDE.md`'s "Passen op elk scherm" section, not a new regression from
+        anything in Phases 8a-8d's accumulated string-length changes).
+
+        **Phase 8 is now considered done.** What's deliberately still Dutch and
+        accepted as staying that way, at the same "lower bar" tier as `resultaten`/
+        `_pad`/`bieb`/`schaatser_id`/`naam` elsewhere in this file (plain
+        parameter/attribute names shared with an untranslated function signature,
+        not user-facing text): `save_analysis`'s `bron_id`/`bron_start_frame`/
+        `bron_eind_frame` keyword parameters (would require also changing
+        `skate_db.save_analysis`'s signature -- a `skate_db.py`-side change, out of
+        this file's scope); `doel_punt`/`doel_kader`/`perspectief` as the literal
+        keyword arguments of `skate_analysis`/`skate_yolo`'s `analyze()` (permanently
+        settled, see the Phase 6 glossary note and session 13); `bieb`,
+        `schaatser_id`, `schaatser_naam`, `analyse_id`... and the rest of the
+        session-3/5/9 "shared vocabulary spanning `MainWindow`" list. None of these
+        are user-facing strings, so they don't affect the trainers `INSTALLEREN.md`
+        describes -- only a future developer reading the source, same trade-off the
+        rest of the already-"finished" modules already made.
 - [ ] **Phase 9 — `schaats_schermtest.py` → `skate_screentest.py`** (342 lines). Do
       this *last* among the code files — it imports gui+db+analysis and is the best
       regression canary once everything else is renamed.

@@ -4063,7 +4063,7 @@ class MasterClock(QObject):
 class CompareSide(QWidget):
     """
     One side of the compare page: a header with the chosen analysis, its own VideoPlayer,
-    a sync point (start frame for 'Start alles') and a minimal push table.
+    a sync point (start frame for 'Start all') and a minimal push table.
 
     The table deliberately shows little -- number, leg and angle -- but does mark
     incomplete pushes: putting two analyses side by side invites comparing two angles, and
@@ -4268,12 +4268,12 @@ class FragmentBar(QWidget):
         self.totaal = 1
         self.fragments = []      # [(start, eind)] — just marked
         self.analyzed = []          # [(start, eind, label)] — from an earlier session
-        self.lopend = None        # start frame of the not-yet-stopped fragment
+        self.running = None        # start frame of the not-yet-stopped fragment
         self.cursor = 0
-        self.selectie = -1
+        self.selection = -1
 
-    def zet(self, totaal=None, fragments=None, analyzed=None, lopend=..., cursor=None,
-            selectie=None):
+    def zet(self, totaal=None, fragments=None, analyzed=None, running=..., cursor=None,
+            selection=None):
         """Update everything the bar shows in one call (and redraw)."""
         if totaal is not None:
             self.totaal = max(1, int(totaal))
@@ -4281,12 +4281,12 @@ class FragmentBar(QWidget):
             self.fragments = list(fragments)
         if analyzed is not None:
             self.analyzed = list(analyzed)
-        if lopend is not ...:
-            self.lopend = lopend
+        if running is not ...:
+            self.running = running
         if cursor is not None:
             self.cursor = int(cursor)
-        if selectie is not None:
-            self.selectie = int(selectie)
+        if selection is not None:
+            self.selection = int(selection)
         self.update()
 
     def _x(self, frame):
@@ -4301,7 +4301,7 @@ class FragmentBar(QWidget):
             self._blok(p, start, eind, self.COLOR_DONE, 4, h - 8)
         for i, (start, eind) in enumerate(self.fragments):
             self._blok(p, start, eind, self.COLOR_NEW, 2, h - 4)
-            if i == self.selectie:
+            if i == self.selection:
                 p.setPen(QPen(self.COLOR_SELECTION, 2))
                 p.setBrush(Qt.NoBrush)
                 x0, x1 = self._x(start), self._x(eind)
@@ -4312,8 +4312,8 @@ class FragmentBar(QWidget):
                 s, e = max(a0, b0), min(a1, b1)
                 if s <= e:
                     self._blok(p, s, e, self.COLOR_OVERLAP, 2, h - 4)
-        if self.lopend is not None:
-            self._blok(p, self.lopend, max(self.lopend, self.cursor),
+        if self.running is not None:
+            self._blok(p, self.running, max(self.running, self.cursor),
                        self.COLOR_RUNNING, 2, h - 4)
 
         p.setPen(QPen(self.COLOR_CURSOR, 1))
@@ -4507,7 +4507,7 @@ class FragmentPicker(QDialog):
             return
         self._fragments.append((self._start_open, eind))
         self._start_open = None
-        self._refresh(selectie=len(self._fragments) - 1)
+        self._refresh(selection=len(self._fragments) - 1)
 
     def _delete_selection(self):
         rij = self.tabel.currentRow()
@@ -4518,7 +4518,7 @@ class FragmentPicker(QDialog):
     def _click_row(self, rij, _kolom=0):
         if 0 <= rij < len(self._fragments):
             self.player.go_to(self._fragments[rij][0])
-            self.balk.zet(selectie=rij)
+            self.balk.zet(selection=rij)
 
     def _click_bar(self, index):
         if index < 0:
@@ -4538,14 +4538,14 @@ class FragmentPicker(QDialog):
         self.player.go_to(frame)
 
     def _frame_shown(self, idx):
-        self.balk.zet(cursor=idx, lopend=self._start_open)
+        self.balk.zet(cursor=idx, running=self._start_open)
         if self._start_open is not None:
             self.lbl_lopend.setText(
                 f"Running from {_time_text(self._start_open, self.fps)} — "
                 f"now {_time_text(idx, self.fps)}")
 
     # ── Refreshing the view ──────────────────────────────────────────────
-    def _refresh(self, selectie=None):
+    def _refresh(self, selection=None):
         self.btn_start.setEnabled(self._start_open is None)
         self.btn_stop.setEnabled(self._start_open is not None)
         self.lbl_lopend.setText(
@@ -4567,11 +4567,11 @@ class FragmentPicker(QDialog):
             knop.setToolTip("Remove this fragment")
             knop.clicked.connect(lambda _=False, r=i: self._remove(r))
             self.tabel.setCellWidget(i, 3, knop)
-        if selectie is not None and 0 <= selectie < len(self._fragments):
-            self.tabel.selectRow(selectie)
+        if selection is not None and 0 <= selection < len(self._fragments):
+            self.tabel.selectRow(selection)
 
-        self.balk.zet(fragments=self._fragments, lopend=self._start_open,
-                      selectie=selectie if selectie is not None else -1)
+        self.balk.zet(fragments=self._fragments, running=self._start_open,
+                      selection=selection if selection is not None else -1)
         n = len(self._fragments)
         self._ok.setText(f"Done — analyze {n} fragment{'s' if n != 1 else ''}"
                          if n else "Done")
@@ -4642,9 +4642,9 @@ class PointsBar(QWidget):
         self.totaal = 1
         self.points = []          # [(frame, label)] sorted by frame number
         self.cursor = 0
-        self.selectie = -1
+        self.selection = -1
 
-    def zet(self, totaal=None, points=None, cursor=None, selectie=None):
+    def zet(self, totaal=None, points=None, cursor=None, selection=None):
         """Update everything the bar shows in one call (and redraw)."""
         if totaal is not None:
             self.totaal = max(1, int(totaal))
@@ -4652,8 +4652,8 @@ class PointsBar(QWidget):
             self.points = list(points)
         if cursor is not None:
             self.cursor = int(cursor)
-        if selectie is not None:
-            self.selectie = int(selectie)
+        if selection is not None:
+            self.selection = int(selection)
         self.update()
 
     def _x(self, frame):
@@ -4665,7 +4665,7 @@ class PointsBar(QWidget):
         h = self.height()
         for i, (frame, _label) in enumerate(self.points):
             x = self._x(frame)
-            kleur = self.COLOR_SELECTION if i == self.selectie else self.COLOR_POINT
+            kleur = self.COLOR_SELECTION if i == self.selection else self.COLOR_POINT
             p.fillRect(QRect(max(0, x - 1), 3, 3, h - 6), kleur)
             # The number goes with it as long as it's one of the first nine: that's also
             # the key you press to jump there, so it's not there just for decoration.
@@ -4690,11 +4690,11 @@ class PointsBar(QWidget):
 class ViewSide(QWidget):
     """
     One video in the viewing window: a header with the name (and a ✕ once there are two),
-    its own `VideoPlayer` with the `PointsBar` under it, and a sync row for "Start alles".
+    its own `VideoPlayer` with the `PointsBar` under it, and a sync row for "Start all".
 
     The counterpart of `CompareSide`, without analysis and without a table: nothing is
     measured here. The header and sync row are only visible when there are two sides (see
-    `ViewWindow._zet_modus`) -- with one video the name is already in the window title,
+    `ViewWindow._set_mode`) -- with one video the name is already in the window title,
     and there's nothing to sync.
     """
 
@@ -4704,7 +4704,7 @@ class ViewSide(QWidget):
         self.info = info
         self.fps = info.fps or 30.0
         self.sync_frame = 0
-        self.punten_aan = source.get("id") is not None
+        self.points_enabled = source.get("id") is not None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -4716,7 +4716,7 @@ class ViewSide(QWidget):
         self.lbl_titel = ElideLabel(source["naam"])   # long file name: shorten, don't widen
         self.lbl_titel.setStyleSheet("font-weight: bold;")
         kop.addWidget(self.lbl_titel, stretch=1)
-        # Closing is wired up from outside (see ViewWindow._voeg_kant): the clock must
+        # Closing is wired up from outside (see ViewWindow._add_side): the clock must
         # let go first, and it doesn't know this side the other way around.
         self.btn_clear = QPushButton("✕")
         self.btn_clear.setToolTip("Close this video; the other one stays.")
@@ -4792,14 +4792,14 @@ class ViewWindow(QDialog):
         colleague too.
 
     **Two videos side by side.** The window shows one or two `ViewSide`s; the second comes
-    from the recordings list (two rows selected) or via "➕ Tweede video ernaast..."
-    (`kies_tweede`, a callable from MainWindow that does the file picker, the registration
+    from the recordings list (two rows selected) or via "➕ Second video alongside..."
+    (`choose_second`, a callable from MainWindow that does the file picker, the registration
     as a loose video, and the availability check -- those don't belong in this window).
     With two sides, playback runs on the same `MasterClock` as the compare page, with a
     sync point per side and one shared speed; space then drives the clock. The **points
     only exist with one video** -- with two, each video has exactly one sync point (per
     session, not saved), and as soon as a side closes with ✕ the points of the remaining
-    video come back. `_zet_modus` is the one place that handles that difference.
+    video come back. `_set_mode` is the one place that handles that difference.
 
     `source` is a row from `skate_db` -- a recording from `opnames/` or a loose video from
     this pc (`bronvideo_voor_pad`); the window doesn't care which. Only when there's no
@@ -4808,14 +4808,14 @@ class ViewWindow(QDialog):
 
     PANEL_WIDTH = 260
 
-    def __init__(self, paren, trainer_naam="", kies_tweede=None, parent=None):
-        """`paren` = one or two `(source, info)`; `kies_tweede` supplies one more (or None)
-        on request, for the "Tweede video ernaast" button."""
+    def __init__(self, pairs, trainer_naam="", choose_second=None, parent=None):
+        """`pairs` = one or two `(source, info)`; `choose_second` supplies one more (or None)
+        on request, for the "Second video alongside" button."""
         super().__init__(parent)
         self.trainer_naam = trainer_naam
-        self.kies_tweede = kies_tweede
-        self.kanten = []
-        self._punt_kant = None      # the side the points panel is attached to
+        self.choose_second = choose_second
+        self.sides = []
+        self._points_side = None      # the side the points panel is attached to
         self._points = []           # rows from bron_markering, sorted by frame number
         self._vullen = False        # suppresses itemChanged while building
 
@@ -4830,26 +4830,26 @@ class ViewWindow(QDialog):
         self.lbl_scrub.setStyleSheet("color: #5aaaf0;")
         kop.addWidget(self.lbl_scrub)
         kop.addStretch(1)
-        self.lbl_geen_punten = QLabel("points aren't saved")
-        self.lbl_geen_punten.setStyleSheet("color: #888;")
-        kop.addWidget(self.lbl_geen_punten)
+        self.lbl_no_points = QLabel("points aren't saved")
+        self.lbl_no_points.setStyleSheet("color: #888;")
+        kop.addWidget(self.lbl_no_points)
         self.btn_tweede = QPushButton("➕ Second video alongside...")
         self.btn_tweede.setToolTip(
             "Put a second video next to this one, to view them in sync. The video then\n"
             "ends up as a 'loose video' in the recordings list. With two videos there\n"
             "are no points, but there is a sync point per video.")
-        self.btn_tweede.clicked.connect(self._voeg_tweede_toe)
+        self.btn_tweede.clicked.connect(self._add_second)
         kop.addWidget(self.btn_tweede)
         self.btn_paneel = QPushButton("Hide points")
-        self.btn_paneel.clicked.connect(self._toggle_paneel)
+        self.btn_paneel.clicked.connect(self._toggle_panel)
         kop.addWidget(self.btn_paneel)
         btn_venster = QPushButton("Window mode (F11)")
-        btn_venster.clicked.connect(self._toggle_volledig_scherm)
+        btn_venster.clicked.connect(self._toggle_fullscreen)
         kop.addWidget(btn_venster)
         # Full screen has no title bar, so no Windows minimize button either.
         btn_min = QPushButton("Minimize")
         btn_min.setToolTip("Send the window to the taskbar for a moment; the videos keep running.")
-        btn_min.clicked.connect(self._minimaliseer)
+        btn_min.clicked.connect(self._minimize)
         kop.addWidget(btn_min)
         btn_sluit = QPushButton("Close (Esc)")
         btn_sluit.clicked.connect(self.accept)
@@ -4859,7 +4859,7 @@ class ViewWindow(QDialog):
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter_kanten = QSplitter(Qt.Horizontal)      # the videos
         self.splitter.addWidget(self.splitter_kanten)
-        self.splitter.addWidget(self._bouw_puntenpaneel())
+        self.splitter.addWidget(self._build_points_panel())
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 0)
         v.addWidget(self.splitter, stretch=1)
@@ -4909,21 +4909,21 @@ class ViewWindow(QDialog):
             self, factor=lambda: self.combo_all_speed.currentData() or 1.0,
             on_done=self._stop_all)
 
-        for source, info in paren:
-            self._voeg_kant(source, info)
+        for source, info in pairs:
+            self._add_side(source, info)
 
         # The default keys, plus the points keys that only exist here. The latter do
-        # nothing as long as there are two videos (see _zet_punt etc.).
-        extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
+        # nothing as long as there are two videos (see _set_point etc.).
+        extra = {Qt.Key_P: self._set_point, Qt.Key_Delete: self._remove_point}
         for n in range(9):
-            extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
+            extra[Qt.Key_1 + n] = lambda i=n: self._go_to_point(i)
         self.keys = PlayerKeys(
-            self, lambda: [k.player for k in self.kanten], extra=extra,
-            on_play=self._toetsen_afspelen,
-            is_playing=lambda: self.clock.is_running() or any(k.player.is_playing() for k in self.kanten),
+            self, lambda: [k.player for k in self.sides], extra=extra,
+            on_play=self._keys_play,
+            is_playing=lambda: self.clock.is_running() or any(k.player.is_playing() for k in self.sides),
             on_scrub=self.lbl_scrub.setText)
 
-        self._zet_modus()
+        self._set_mode()
 
         # First set a normal size, only then full screen: otherwise F11 has no sensible
         # geometry to fall back to.
@@ -4931,108 +4931,108 @@ class ViewWindow(QDialog):
         self.setWindowState(self.windowState() | Qt.WindowFullScreen)
 
     # ── Sides ────────────────────────────────────────────────────────────
-    def _voeg_kant(self, source, info):
-        kant = ViewSide(source, info)
-        kant.btn_clear.clicked.connect(lambda _=False, k=kant: self._verwijder_kant(k))
+    def _add_side(self, source, info):
+        side = ViewSide(source, info)
+        side.btn_clear.clicked.connect(lambda _=False, k=side: self._remove_side(k))
         # Pressing ▶ yourself = taking over manual control: let the clock go.
-        kant.player.btn_play.clicked.connect(self._stop_all)
-        kant.balk.CLICKED.connect(self._click_bar)   # the bar is only visible with points
-        self.kanten.append(kant)
-        self.splitter_kanten.addWidget(kant)
-        kant.player.go_to(0)
-        return kant
+        side.player.btn_play.clicked.connect(self._stop_all)
+        side.balk.CLICKED.connect(self._click_bar)   # the bar is only visible with points
+        self.sides.append(side)
+        self.splitter_kanten.addWidget(side)
+        side.player.go_to(0)
+        return side
 
-    def _verwijder_kant(self, kant):
+    def _remove_side(self, side):
         """✕ on a side: release that video and carry on with the other -- keeping points."""
-        if len(self.kanten) < 2 or kant not in self.kanten:
+        if len(self.sides) < 2 or side not in self.sides:
             return
         self._pause_all()
-        self.kanten.remove(kant)
-        kant.release()
-        kant.setParent(None)
-        kant.deleteLater()
-        self._zet_modus()
+        self.sides.remove(side)
+        side.release()
+        side.setParent(None)
+        side.deleteLater()
+        self._set_mode()
 
-    def _voeg_tweede_toe(self):
-        if self.kies_tweede is None or len(self.kanten) != 1:
+    def _add_second(self):
+        if self.choose_second is None or len(self.sides) != 1:
             return
         self._pause_all()
-        paar = self.kies_tweede()
+        paar = self.choose_second()
         if not paar:
             return
-        self._voeg_kant(*paar)
-        self._zet_modus()
+        self._add_side(*paar)
+        self._set_mode()
 
-    def _zet_modus(self):
+    def _set_mode(self):
         """One video or two -- the one place that handles the difference.
 
         One video: the points panel and points bar (if the video has a row in the
         library), the player's own speed control, and the button for a second video. Two
         videos: per side a header (name + ✕) and sync row, the shared bottom bar with
-        "Start alles" and one speed, and no points -- the handlers stay attached to the
+        "Start all" and one speed, and no points -- the handlers stay attached to the
         keys but do nothing then."""
-        twee = len(self.kanten) > 1
-        self.lbl_naam.setText("  |  ".join(f"<b>{k.source['naam']}</b>" for k in self.kanten))
-        self.setWindowTitle("Viewing — " + " | ".join(k.source["naam"] for k in self.kanten))
+        twee = len(self.sides) > 1
+        self.lbl_naam.setText("  |  ".join(f"<b>{k.source['naam']}</b>" for k in self.sides))
+        self.setWindowTitle("Viewing — " + " | ".join(k.source["naam"] for k in self.sides))
 
-        for kant in self.kanten:
-            kant.kop.setVisible(twee)
-            kant.rij_sync.setVisible(twee)
-            kant.player.lbl_speed.setVisible(not twee)
-            kant.player.combo_speed.setVisible(not twee)
+        for side in self.sides:
+            side.kop.setVisible(twee)
+            side.rij_sync.setVisible(twee)
+            side.player.lbl_speed.setVisible(not twee)
+            side.player.combo_speed.setVisible(not twee)
         self.balk_alles.setVisible(twee)
-        self.btn_tweede.setVisible(not twee and self.kies_tweede is not None)
+        self.btn_tweede.setVisible(not twee and self.choose_second is not None)
 
-        self._koppel_punten(None if twee else self.kanten[0])
-        for kant in self.kanten:
-            kant.balk.setVisible(kant is self._punt_kant)
+        self._attach_points(None if twee else self.sides[0])
+        for side in self.sides:
+            side.balk.setVisible(side is self._points_side)
         if twee:
             self._set_all_speed()
             self.hulp.setText(keys_help("both videos at once",
                                            "<b>Esc</b> close"))
         else:
             punt_toetsen = (("<b>P</b> set point", "<b>1&ndash;9</b> to point",
-                             "<b>Del</b> remove point") if self._punt_kant is not None else ())
+                             "<b>Del</b> remove point") if self._points_side is not None else ())
             self.hulp.setText(keys_help(*punt_toetsen, "<b>Esc</b> close"))
 
-    def _koppel_punten(self, kant):
+    def _attach_points(self, side):
         """Attaches the points panel to this side (or to none: `None`)."""
-        if kant is not None and not kant.punten_aan:
-            kant = None
-        vorige, self._punt_kant = self._punt_kant, kant
-        if vorige is not None and vorige in self.kanten:
+        if side is not None and not side.points_enabled:
+            side = None
+        vorige, self._points_side = self._points_side, side
+        if vorige is not None and vorige in self.sides:
             vorige.player.on_frame_shown = None
-        aan = kant is not None
+        aan = side is not None
         self.paneel.setVisible(aan and (self.btn_paneel.text() == "Hide points"))
         self.btn_paneel.setVisible(aan)
         # "points aren't saved" only with one video without a row: with two videos
         # there are no points anyway, and the help line already says so.
-        self.lbl_geen_punten.setVisible(len(self.kanten) == 1 and not aan)
+        self.lbl_no_points.setVisible(len(self.sides) == 1 and not aan)
         if not aan:
             self._points = []
             return
-        kant.player.on_frame_shown = self._frame_shown
-        self._vernieuw_punten()
-        kant.balk.zet(cursor=max(0, kant.player.huidige_idx))
+        side.player.on_frame_shown = self._frame_shown
+        self._refresh_points()
+        side.balk.zet(cursor=max(0, side.player.huidige_idx))
 
     # ── Playing together (two sides, MasterClock) ─────────────────────────
-    def _toetsen_afspelen(self, play):
+    def _keys_play(self, play):
         """Space: the clock with two videos, just the player with one. Space is
-        play/pause and so **resumes wherever the videos are**; only the "Start alles"
+        play/pause and so **resumes wherever the videos are**; only the "Start all"
         button first jumps to the sync points."""
         if not play:
             self._pause_all()
-        elif len(self.kanten) > 1:
+        elif len(self.sides) > 1:
             self._start_all(vanaf_sync=False)
         else:
-            self.kanten[0].player.play()
+            self.sides[0].player.play()
 
     def _start_all(self, vanaf_sync=None):
         """`vanaf_sync`: None = what the checkbox says (the button), False = resume
         (space)."""
-        if len(self.kanten) < 2:
-            if self.kanten:
-                self.kanten[0].player.play()
+        if len(self.sides) < 2:
+            if self.sides:
+                self.sides[0].player.play()
             return
         self._pause_all()
         if vanaf_sync is None:
@@ -5042,11 +5042,11 @@ class ViewWindow(QDialog):
             # of in the first tick.
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                for kant in self.kanten:
-                    kant.to_sync()
+                for side in self.sides:
+                    side.to_sync()
             finally:
                 QApplication.restoreOverrideCursor()
-        self.clock.start([k.player for k in self.kanten])
+        self.clock.start([k.player for k in self.sides])
 
     def _stop_all(self):
         self.clock.stop()      # pauses the players that were running under it itself
@@ -5055,15 +5055,15 @@ class ViewWindow(QDialog):
         """Everything still: clock, scrubbing, and each player released. Idempotent."""
         self.clock.stop()
         self.keys.stop_scrubbing()
-        for kant in self.kanten:
-            kant.player.pause()
+        for side in self.sides:
+            side.player.pause()
 
     def _both_to_sync(self):
         self._pause_all()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            for kant in self.kanten:
-                kant.to_sync()
+            for side in self.sides:
+                side.to_sync()
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -5071,12 +5071,12 @@ class ViewWindow(QDialog):
         """Sets the shared speed on both players -- also for playing one alone, since two
         videos at a different tempo next to each other can't be compared."""
         idx = self.combo_all_speed.currentIndex()
-        for kant in self.kanten:
-            kant.player.combo_speed.setCurrentIndex(idx)   # restarts a running timer
+        for side in self.sides:
+            side.player.combo_speed.setCurrentIndex(idx)   # restarts a running timer
         self.clock.recalibrate()
 
     # ── Points panel ─────────────────────────────────────────────────────
-    def _bouw_puntenpaneel(self):
+    def _build_points_panel(self):
         self.paneel = QWidget()
         p = QVBoxLayout(self.paneel)
         p.setContentsMargins(6, 0, 0, 0)
@@ -5091,49 +5091,49 @@ class ViewWindow(QDialog):
         self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabel.cellClicked.connect(self._click_row)
         # Only the name column is editable (the flags are set per item in
-        # _vernieuw_punten); _vullen suppresses itemChanged while building.
-        self.tabel.itemChanged.connect(self._punt_hernoemd)
+        # _refresh_points); _vullen suppresses itemChanged while building.
+        self.tabel.itemChanged.connect(self._point_renamed)
         p.addWidget(self.tabel, stretch=1)
 
         btn_zet = QPushButton("➕ Set point  (P)")
         btn_zet.setToolTip("Remembers the frame currently in view. The point stays saved "
                            "with this recording, even after closing this window.")
-        btn_zet.clicked.connect(self._zet_punt)
+        btn_zet.clicked.connect(self._set_point)
         p.addWidget(btn_zet)
         btn_weg = QPushButton("✕ Remove point  (Del)")
-        btn_weg.clicked.connect(self._verwijder_punt)
+        btn_weg.clicked.connect(self._remove_point)
         p.addWidget(btn_weg)
 
-        self.lbl_punten = QLabel("")
-        self.lbl_punten.setStyleSheet("color: #888;")
-        self.lbl_punten.setWordWrap(True)
-        p.addWidget(self.lbl_punten)
+        self.lbl_points = QLabel("")
+        self.lbl_points.setStyleSheet("color: #888;")
+        self.lbl_points.setWordWrap(True)
+        p.addWidget(self.lbl_points)
 
         self.paneel.setMinimumWidth(self.PANEL_WIDTH)
         return self.paneel
 
     # ── Points (saved in the library) ────────────────────────────────────
-    # Every handler below operates on `_punt_kant` and does nothing if it's absent -- with
+    # Every handler below operates on `_points_side` and does nothing if it's absent -- with
     # two videos, or with a loose video that couldn't be registered.
     @property
     def library(self):
-        return self._punt_kant.source.get("library") if self._punt_kant else None
+        return self._points_side.source.get("library") if self._points_side else None
 
     @property
     def source(self):
-        return self._punt_kant.source if self._punt_kant else None
+        return self._points_side.source if self._points_side else None
 
-    def _vernieuw_punten(self, selectie=None):
+    def _refresh_points(self, selection=None):
         """Re-reads the points from the database and fills the table + bar. The database
         is the truth: that way a point is never shown that isn't saved."""
-        kant = self._punt_kant
-        if kant is None:
+        side = self._points_side
+        if side is None:
             return
         try:
             self._points = skate_db.list_markings(self.library, self.source["id"])
         except Exception as e:
             self._points = []
-            self.lbl_punten.setText(f"Points could not be read: {e}")
+            self.lbl_points.setText(f"Points could not be read: {e}")
             return
         self._vullen = True
         try:
@@ -5143,7 +5143,7 @@ class ViewWindow(QDialog):
                 nr.setFlags(nr.flags() & ~Qt.ItemIsEditable)
                 self.tabel.setItem(rij, 0, nr)
 
-                tijd = QTableWidgetItem(_time_text(punt["frame"], kant.fps))
+                tijd = QTableWidgetItem(_time_text(punt["frame"], side.fps))
                 tijd.setFlags(tijd.flags() & ~Qt.ItemIsEditable)
                 tijd.setToolTip(f"frame {punt['frame']}")
                 self.tabel.setItem(rij, 1, tijd)
@@ -5157,24 +5157,24 @@ class ViewWindow(QDialog):
         finally:
             self._vullen = False
 
-        kant.balk.zet(points=[(p["frame"], p["label"]) for p in self._points],
-                      selectie=selectie if selectie is not None else -1)
+        side.balk.zet(points=[(p["frame"], p["label"]) for p in self._points],
+                      selection=selection if selection is not None else -1)
         n = len(self._points)
-        self.lbl_punten.setText(
+        self.lbl_points.setText(
             "No points set yet." if not n
             else f"{n} point{'s' if n != 1 else ''} saved with this recording.")
-        if selectie is not None and 0 <= selectie < n:
-            self.tabel.selectRow(selectie)
+        if selection is not None and 0 <= selection < n:
+            self.tabel.selectRow(selection)
 
-    def _zet_punt(self):
-        kant = self._punt_kant
-        if kant is None:
+    def _set_point(self):
+        side = self._points_side
+        if side is None:
             return
-        frame = kant.player.huidige_idx
+        frame = side.player.huidige_idx
         if frame < 0:
             return
         if any(p["frame"] == frame for p in self._points):
-            self.lbl_punten.setText("There's already a point on this frame.")
+            self.lbl_points.setText("There's already a point on this frame.")
             return
         try:
             skate_db.add_marking(self.library, self.source["id"], frame,
@@ -5185,15 +5185,15 @@ class ViewWindow(QDialog):
             return
         # Re-read and only then select: the list is ordered by frame number, so a point
         # you set halfway back doesn't end up at the bottom.
-        self._vernieuw_punten()
+        self._refresh_points()
         index = next((i for i, punt in enumerate(self._points)
                       if punt["frame"] == frame), None)
         if index is not None:
             self.tabel.selectRow(index)
-            kant.balk.zet(selectie=index)
+            side.balk.zet(selection=index)
 
-    def _verwijder_punt(self):
-        if self._punt_kant is None:
+    def _remove_point(self):
+        if self._points_side is None:
             return
         rij = self.tabel.currentRow()
         if not 0 <= rij < len(self._points):
@@ -5203,45 +5203,45 @@ class ViewWindow(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "Point", f"The point could not be removed:\n{e}")
             return
-        self._vernieuw_punten()
+        self._refresh_points()
 
-    def _punt_hernoemd(self, item):
-        if self._vullen or item.column() != 2 or self._punt_kant is None:
+    def _point_renamed(self, item):
+        if self._vullen or item.column() != 2 or self._points_side is None:
             return
         try:
             skate_db.edit_marking(self.library, item.data(Qt.UserRole), label=item.text())
         except Exception as e:
             QMessageBox.warning(self, "Point", f"The name could not be saved:\n{e}")
 
-    def _ga_naar_punt(self, index):
-        kant = self._punt_kant
-        if kant is not None and 0 <= index < len(self._points):
-            kant.player.go_to(self._points[index]["frame"])
+    def _go_to_point(self, index):
+        side = self._points_side
+        if side is not None and 0 <= index < len(self._points):
+            side.player.go_to(self._points[index]["frame"])
             self.tabel.selectRow(index)
-            kant.balk.zet(selectie=index)
+            side.balk.zet(selection=index)
 
     def _click_row(self, rij, _kolom=0):
-        self._ga_naar_punt(rij)
+        self._go_to_point(rij)
 
     def _click_bar(self, index):
         if index >= 0:
             self.tabel.selectRow(index)
-            self._ga_naar_punt(index)
+            self._go_to_point(index)
 
     # ── Display ──────────────────────────────────────────────────────────
     def _frame_shown(self, idx):
-        if self._punt_kant is not None:
-            self._punt_kant.balk.zet(cursor=idx)
+        if self._points_side is not None:
+            self._points_side.balk.zet(cursor=idx)
 
-    def _toggle_paneel(self):
+    def _toggle_panel(self):
         zichtbaar = not self.paneel.isVisible()
         self.paneel.setVisible(zichtbaar)
         self.btn_paneel.setText("Hide points" if zichtbaar else "Show points")
 
-    def _toggle_volledig_scherm(self):
+    def _toggle_fullscreen(self):
         toggle_fullscreen(self)
 
-    def _minimaliseer(self):
+    def _minimize(self):
         # Everything still first: a video running on in the taskbar decodes for nothing.
         self._pause_all()
         self.showMinimized()
@@ -5259,8 +5259,8 @@ class ViewWindow(QDialog):
         # The video files must be released, or Windows keeps holding the recording.
         self.keys.detach()
         self.clock.stop()
-        for kant in self.kanten:
-            kant.release()
+        for side in self.sides:
+            side.release()
         super().done(resultaat)
 
 
@@ -6213,7 +6213,7 @@ class MainWindow(QMainWindow):
             paren.append(paar)
         self._loose_added = False
         dlg = ViewWindow(paren, self.trainer_naam,
-                            kies_tweede=self._choose_second_video, parent=self)
+                            choose_second=self._choose_second_video, parent=self)
         show_dialog(dlg)
         if self._loose_added:
             self._refresh_recordings()  # the video added in the window, into the list
