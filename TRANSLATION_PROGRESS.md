@@ -764,14 +764,42 @@ document supersedes it for anything about actual progress and lessons learned).
         windows pass, including all three renamed pickers, all the analysis dialogs,
         and both `AnalysisPicker`/`AnalysisInfoDialog`.
 
+      - **Session 11** -- 8b/8c (UI text only, no renames) for the rest of "everything
+        before `MainWindow`": `VideoPlayer` (incl. `LANDMARK_NAMES`, `DRAW_TOOLTIP`/
+        `DRAW_MODES`, `VIDEO_KEYS_HELP`/`VIDEO_KEYS_TOOLTIP`, and the splash screen's
+        two remaining strings), `PlayerKeys`/`MasterClock` (no UI text -- none found),
+        `CompareSide`, `_time_text`/`_read_time` docstrings, `FragmentBar`,
+        `FragmentPicker`, `PointsBar`, `ViewSide`, `ViewWindow` (the largest single
+        piece -- header buttons, the "Start all"/sync-point bar, the whole points
+        panel), `LocalProbe` (no UI text), `CopyWorker` (no UI text), `CopyDialog` +
+        its `_bytes_text`/`_remaining_text` helpers. Also translated `LOKAAL_WEERGAVE`
+        (the "on this pc" column's text/tooltips in the recordings table) even though
+        it's read from `MainWindow`, not from any class touched this session --
+        session 8's UI-text pass over `MainWindow` covered `MainWindow`'s own string
+        literals, not a module-level dict `MainWindow` merely reads from, so this had
+        been missed until now.
+        One deliberate wording decision: `_bytes_text`'s decimal separator changed
+        from comma (`"4,3 GB"`, the original Dutch-locale convention, `docstring` said
+        "like the rest of the app") to a plain period -- matching what `MainWindow`
+        already settled on in session 8 for every other decimal number in the file
+        (`.1f`/`.2f` with no `.replace(".", ",")`); the old comment was simply stale by
+        the time this session got to it. Confirmed no other `.replace(".", ",")` call
+        survives anywhere in the file.
+        No identifier renames anywhere in this session (matches session 10's scope
+        rule) -- `ev.been.capitalize()`/`resultaat.been.upper()`-style displays of the
+        still-Dutch `been` field VALUE (`'links'`/`'rechts'`) were deliberately left
+        as-is, matching the precedent already set in `MainWindow` itself (Pattern F:
+        the stored value isn't translated until the writer is).
+        **Verified**: `py_compile`; real `import skate_gui` under `.venv-yolo`
+        (`QT_QPA_PLATFORM=offscreen`); a repo-wide grep of the touched range (now all
+        of `SplashScreen` through `CopyDialog`, lines ~73-5428) for leftover Dutch UI
+        strings -- clean outside the two spots deliberately left for Phase 8d
+        (`_calibration_rows`' row labels and the `perspectief` JSON key it reads);
+        `schaats_schermtest.py` quick mode -- 16/16 windows pass, including both
+        `ViewWindow` variants (1 and 2 videos) and `FragmentPicker`.
+
       - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
         first, don't trust these verbatim):
-        - **8b/8c for the rest of "everything before `MainWindow`"**: `VideoPlayer`
-          (incl. `LANDMARK_NAMES`/`DRAW_TOOLTIP`/`DRAW_MODES`/the `OPNAME_`-tab
-          constants), `PlayerKeys`, `MasterClock`, `CompareSide`, `FragmentBar`,
-          `FragmentPicker`, `PointsBar`, `ViewSide`, `ViewWindow`, `LocalProbe`,
-          `CopyWorker`, `CopyDialog` -- all their window titles, labels, tooltips and
-          `QMessageBox` text are still Dutch.
         - **8a for `CompareSide`/`ViewWindow`/`ViewSide`/`FragmentPicker`'s own
           remaining Dutch names** that session 9 deliberately left alone because they
           belong to those classes, not `MainWindow`: `speler`, `klok`, `toetsen`,

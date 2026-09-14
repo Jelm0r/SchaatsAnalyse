@@ -257,21 +257,21 @@ HANDLE_MIN_VIS = 0.2    # below this visibility, no draggable handle (same as dr
 # "left"/"right" is anatomical (the skater's own left/right side), same as in the
 # detection/L-R fixer. Indices that don't occur get a generic fallback.
 LANDMARK_NAMES = {
-    0: "neus",
-    1: "linkeroog (binnen)", 2: "linkeroog", 3: "linkeroog (buiten)",
-    4: "rechteroog (binnen)", 5: "rechteroog", 6: "rechteroog (buiten)",
-    7: "linkeroor", 8: "rechteroor", 9: "mond links", 10: "mond rechts",
-    11: "linkerschouder", 12: "rechterschouder",
-    13: "linkerelleboog", 14: "rechterelleboog",
-    15: "linkerpols", 16: "rechterpols",
-    17: "linkerpink", 18: "rechterpink",
-    19: "linkerwijsvinger", 20: "rechterwijsvinger",
-    21: "linkerduim", 22: "rechterduim",
-    23: "linkerheup", 24: "rechterheup",
-    25: "linkerknie", 26: "rechterknie",
-    27: "linkerenkel", 28: "rechterenkel",
-    29: "linkerhiel", 30: "rechterhiel",
-    31: "linkerteen", 32: "rechterteen",
+    0: "nose",
+    1: "left eye (inner)", 2: "left eye", 3: "left eye (outer)",
+    4: "right eye (inner)", 5: "right eye", 6: "right eye (outer)",
+    7: "left ear", 8: "right ear", 9: "mouth left", 10: "mouth right",
+    11: "left shoulder", 12: "right shoulder",
+    13: "left elbow", 14: "right elbow",
+    15: "left wrist", 16: "right wrist",
+    17: "left pinky", 18: "right pinky",
+    19: "left index", 20: "right index",
+    21: "left thumb", 22: "right thumb",
+    23: "left hip", 24: "right hip",
+    25: "left knee", 26: "right knee",
+    27: "left ankle", 28: "right ankle",
+    29: "left heel", 30: "right heel",
+    31: "left toe", 32: "right toe",
 }
 
 # Manually placing a skeleton on a frame with no pose. The order runs top to bottom and
@@ -312,18 +312,18 @@ BOX_MARGIN = 0.15
 # glued to their spot on the image when zooming and panning; in widget coordinates they'd
 # end up next to the skater after the very first zoom step.
 DRAW_PAN, DRAW_SKETCH, DRAW_LINE = "pan", "sketch", "line"
-DRAW_MODES = (("✋ Schuiven", DRAW_PAN),
-              ("✏ Schetsen", DRAW_SKETCH),
-              ("📏 Lijn", DRAW_LINE))
+DRAW_MODES = (("✋ Pan", DRAW_PAN),
+              ("✏ Sketch", DRAW_SKETCH),
+              ("📏 Line", DRAW_LINE))
 DRAW_TOOLTIP = (
-    "Wat de linkermuisknop op het beeld doet:\n"
-    "  ✋ Schuiven — het ingezoomde beeld verslepen (en in de bewerk-modus punten slepen)\n"
-    "  ✏ Schetsen — vrij tekenen zolang je de knop ingedrukt houdt\n"
-    "  📏 Lijn — een rechte lijn van indrukken tot loslaten\n"
+    "What the left mouse button does on the image:\n"
+    "  ✋ Pan — drag the zoomed-in image (and, in edit mode, drag points)\n"
+    "  ✏ Sketch — draw freehand for as long as you hold the button down\n"
+    "  📏 Line — a straight line from press to release\n"
     "\n"
-    "Rechts slepen schuift het beeld altijd, ook midden in het tekenen.\n"
-    "Een tekening hoort bij de clip en niet bij één frame: hij blijft staan terwijl de\n"
-    "video doorloopt, en schuift mee met zoomen en pannen.")
+    "Right-drag always pans the image, even in the middle of drawing.\n"
+    "A drawing belongs to the clip, not to one frame: it stays put while the\n"
+    "video keeps playing, and moves along with zooming and panning.")
 # Magenta doesn't clash with the overlay (white skeleton, green/red push leg, yellow
 # handles) and stays visible on both white ice and a dark suit.
 DRAW_COLOR = (255, 45, 210)
@@ -465,19 +465,19 @@ def _opname_sleutel(bron):
 # after all, it just comes in agonizingly slowly. See `_recording_available` for why these
 # numbers.
 LOKAAL_WEERGAVE = {
-    "lokaal": ("✓ ja", QColor(60, 140, 60),
-               "Deze opname staat op deze pc: doorbladeren en knippen gaan op volle "
-               "snelheid."),
-    "deels":  ("⏳ deels", QColor(190, 130, 0),
-               "Een deel staat lokaal, de rest nog niet — waarschijnlijk is de cloudmap nog "
-               "aan het downloaden. Wacht daarop, anders blijft doorbladeren traag."),
-    "cloud":  ("☁ nee — nog in de cloud", QColor(190, 60, 60),
-               "Deze opname staat niet offline op deze pc; elk stuk beeld moet eerst "
-               "gedownload worden.\n"
-               "Gemeten: 5 tot 20 seconden per sprong in het knipvenster, tegen "
-               "0,1 seconde als hij lokaal staat.\n\n"
-               "Oplossing: rechtsklik de map 'opnames' in Verkenner → Google Drive "
-               "→ 'Offline beschikbaar maken'."),
+    "lokaal": ("✓ yes", QColor(60, 140, 60),
+               "This recording is on this pc: browsing and trimming run at full "
+               "speed."),
+    "deels":  ("⏳ partly", QColor(190, 130, 0),
+               "Part of it is local, the rest isn't yet — probably the cloud folder is "
+               "still downloading. Wait for that, otherwise browsing stays slow."),
+    "cloud":  ("☁ no — still in the cloud", QColor(190, 60, 60),
+               "This recording isn't available offline on this pc; every piece of "
+               "footage must be downloaded first.\n"
+               "Measured: 5 to 20 seconds per jump in the trim window, versus "
+               "0.1 second when it's local.\n\n"
+               "Fix: right-click the 'opnames' folder in Explorer → Google Drive "
+               "→ 'Make available offline'."),
 }
 
 # Trim window (phase 8): above this jump, a `fast_seek` ("fast seek") player seeks
@@ -534,14 +534,14 @@ SCRUB_TICK_MS = 40
 # no window grows its own (and thus, over time, diverging) list. A window's extras get
 # appended with `keys_help()`.
 VIDEO_KEYS_HELP = (
-    "<b>Spatie</b> afspelen/pauze · <b>.</b> doorspoelen 6× · <b>,</b> terugspoelen 6× · "
-    "<b>&larr;/&rarr;</b> één frame · <b>Home/End</b> begin/eind · muiswiel zoomt · "
-    "<b>F11</b> volledig scherm")
+    "<b>Space</b> play/pause · <b>.</b> scrub forward 6× · <b>,</b> scrub backward 6× · "
+    "<b>&larr;/&rarr;</b> one frame · <b>Home/End</b> start/end · mouse wheel zooms · "
+    "<b>F11</b> full screen")
 
 # The same list as plain text, for a tooltip (which doesn't understand HTML markup).
 VIDEO_KEYS_TOOLTIP = (
-    "Toetsen: spatie = afspelen/pauze, ← → = één frame, . en , = spoelen op 6×\n"
-    "zolang je de toets ingedrukt houdt, Home/End = begin/eind, F11 = volledig scherm.")
+    "Keys: space = play/pause, ← → = one frame, . and , = scrub at 6×\n"
+    "for as long as you hold the key, Home/End = start/end, F11 = full screen.")
 
 
 def keys_help(*extra):
@@ -2760,7 +2760,7 @@ class VideoPlayer(QWidget):
     def _build_ui(self, min_size, show_speed=True, show_overlay=True):
         self._main = QVBoxLayout(self)
 
-        self.label = QLabel("Geen video geladen")
+        self.label = QLabel("No video loaded")
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("background-color: #111; color: #888;")
         # The explicit minimumSize is what the layout uses as the lower bound (it wins over
@@ -2785,11 +2785,11 @@ class VideoPlayer(QWidget):
 
         # Putting the keyboard shortcut on the button is the one place everyone runs into
         # it: this bar sits in all four places where a video is shown.
-        for button, tip in ((self.btn_start, "Naar het begin (Home)"),
-                          (self.btn_frame_back, "Eén frame terug (←)"),
-                          (self.btn_play, "Afspelen / pauze (spatie)"),
-                          (self.btn_frame_forward, "Eén frame verder (→)"),
-                          (self.btn_end, "Naar het eind (End)")):
+        for button, tip in ((self.btn_start, "To the start (Home)"),
+                          (self.btn_frame_back, "One frame back (←)"),
+                          (self.btn_play, "Play / pause (space)"),
+                          (self.btn_frame_forward, "One frame forward (→)"),
+                          (self.btn_end, "To the end (End)")):
             button.setToolTip(f"{tip}\n\n{VIDEO_KEYS_TOOLTIP}")
 
         for w in (self.btn_start, self.btn_frame_back, self.btn_play,
@@ -2804,10 +2804,10 @@ class VideoPlayer(QWidget):
         # always exists (it's the source for `_play_interval_ms`), but doesn't have to be
         # visible: on the compare page a single shared control drives both sides, so the
         # videos always run at the same speed.
-        self.lbl_speed = QLabel("Snelheid")
+        self.lbl_speed = QLabel("Speed")
         buttons.addWidget(self.lbl_speed)
         self.combo_speed = QComboBox()
-        self.combo_speed.setToolTip("Afspeelsnelheid — kies een lagere factor voor slow motion.")
+        self.combo_speed.setToolTip("Playback speed — pick a lower factor for slow motion.")
         for label, factor in SPEEDS:
             self.combo_speed.addItem(label, factor)
         self.combo_speed.setCurrentIndex(SPEED_DEFAULT_IDX)
@@ -2821,7 +2821,7 @@ class VideoPlayer(QWidget):
 
         self.slider = QSlider(Qt.Horizontal)
         self.slider.setRange(0, 0)
-        self.slider.setToolTip(f"Sleep om door de video te scrubben.\n\n{VIDEO_KEYS_TOOLTIP}")
+        self.slider.setToolTip(f"Drag to scrub through the video.\n\n{VIDEO_KEYS_TOOLTIP}")
         # On a long recording, one jump costs ~80 ms (seek) + drawing, while a drag across
         # the timeline fires hundreds of valueChanged signals. Those pile up and the GUI
         # seems to lock up. `_scrub_requested` only stores the last requested frame and
@@ -2838,8 +2838,8 @@ class VideoPlayer(QWidget):
         # collapse.
         self._toggles_bar = WrapBar()
         self._toggles_row = self._toggles_bar
-        self.chk_skeleton = QCheckBox("Skelet")
-        self.chk_push_leg = QCheckBox("Afzetbeen")
+        self.chk_skeleton = QCheckBox("Skeleton")
+        self.chk_push_leg = QCheckBox("Push leg")
         self.chk_hud = QCheckBox("HUD")
         for chk in (self.chk_skeleton, self.chk_push_leg, self.chk_hud):
             chk.setChecked(True)
@@ -2848,17 +2848,17 @@ class VideoPlayer(QWidget):
             self._toggles_row.addWidget(chk)
 
         # Zooming in on the skater (the mouse wheel over the video also works -- see below).
-        self.chk_follow = QCheckBox("Volg schaatser")
+        self.chk_follow = QCheckBox("Follow skater")
         self.chk_follow.setChecked(True)
-        self.chk_follow.setToolTip("Houd de schaatser gecentreerd in beeld tijdens het inzoomen.")
+        self.chk_follow.setToolTip("Keep the skater centered in frame while zoomed in.")
         self.chk_follow.toggled.connect(self._set_zoom_follow)
         self._toggles_row.addWidget(self.chk_follow)
-        self.chk_auto = QCheckBox("Automatische zoom")
+        self.chk_auto = QCheckBox("Automatic zoom")
         self.chk_auto.setToolTip(
-            "Het programma kiest de zoom: de schaatser staat helemaal in beeld met wat ruimte "
-            "eromheen, de hele clip lang. Rijdt hij naar de camera toe, dan zoomt het beeld "
-            "vanzelf uit.\nZolang dit aan staat is de zoomregelaar buiten werking; aan het "
-            "muiswiel draaien neemt de zoom weer over.")
+            "The program picks the zoom: the skater stays fully in frame with some room "
+            "around them, the whole clip long. If they skate toward the camera, the image "
+            "zooms out automatically.\nWhile this is on the zoom slider is disabled; turning "
+            "the mouse wheel takes over the zoom again.")
         self.chk_auto.toggled.connect(self._set_zoom_auto)
         self._toggles_row.addWidget(self.chk_auto)
         # Follow and automatic zoom live off the detected pose; without an analysis
@@ -2876,14 +2876,14 @@ class VideoPlayer(QWidget):
         self.slider_zoom.setRange(100, int(ZOOM_MAX * 100))   # 100 = 1.0×
         self.slider_zoom.setValue(100)
         self.slider_zoom.setFixedWidth(120)
-        self.slider_zoom.setToolTip("Zoomniveau. Muiswiel boven de video werkt ook.")
+        self.slider_zoom.setToolTip("Zoom level. The mouse wheel over the video also works.")
         self.slider_zoom.valueChanged.connect(lambda v: self._set_zoom(v / 100.0))
         zoom_row.addWidget(self.slider_zoom)
         self.lbl_zoom = QLabel("1.0×")
         self.lbl_zoom.setFixedWidth(38)
         zoom_row.addWidget(self.lbl_zoom)
-        self.btn_zoom_reset = QPushButton("Passend")
-        self.btn_zoom_reset.setToolTip("Zoom herstellen naar passend beeld.")
+        self.btn_zoom_reset = QPushButton("Fit")
+        self.btn_zoom_reset.setToolTip("Reset zoom to fit the frame.")
         self.btn_zoom_reset.clicked.connect(self._reset_zoom)
         # Only with an analysis: there it also turns auto-follow back on. Without an
         # analysis (viewing/trim window) the slider at 1x is the same thing, and the
@@ -2901,7 +2901,7 @@ class VideoPlayer(QWidget):
             draw_block = QWidget()
             draw_row = QHBoxLayout(draw_block)
             draw_row.setContentsMargins(0, 0, 0, 0)
-            draw_row.addWidget(QLabel("Muis"))
+            draw_row.addWidget(QLabel("Mouse"))
             self.combo_draw = QComboBox()
             for label, mode in DRAW_MODES:
                 self.combo_draw.addItem(label, mode)
@@ -2910,12 +2910,12 @@ class VideoPlayer(QWidget):
             draw_row.addWidget(self.combo_draw)
             self.btn_draw_undo = QPushButton("↶")
             self.btn_draw_undo.setMaximumWidth(TRANSPORT_BUTTON_WIDTH)
-            self.btn_draw_undo.setToolTip("Laatst getekende streek weghalen.")
+            self.btn_draw_undo.setToolTip("Remove the last stroke drawn.")
             self.btn_draw_undo.clicked.connect(self.clear_last_stroke)
             draw_row.addWidget(self.btn_draw_undo)
             self.btn_draw_clear = QPushButton("🧹")
             self.btn_draw_clear.setMaximumWidth(TRANSPORT_BUTTON_WIDTH)
-            self.btn_draw_clear.setToolTip("Alle aantekeningen van het beeld halen.")
+            self.btn_draw_clear.setToolTip("Remove all annotations from the image.")
             # lambda: otherwise clicked() passes its `checked=False` through as
             # `redraw`, which does clear the drawing but leaves it on screen.
             self.btn_draw_clear.clicked.connect(lambda: self.clear_drawing())
@@ -3043,7 +3043,7 @@ class VideoPlayer(QWidget):
         self.resultaten = []
         self.huidige_idx = -1
         self.video_pad = None
-        self.label.setText("Geen video geladen")
+        self.label.setText("No video loaded")
         self.slider.blockSignals(True)
         self.slider.setRange(0, 0)
         self.slider.blockSignals(False)
@@ -3192,9 +3192,9 @@ class VideoPlayer(QWidget):
         if self.huidige_idx >= 0 and self._last_frame is not None:
             self._show_frame(self.huidige_idx)       # put the slider/table back in step
             self.lbl_time.setText(
-                f"Frame {idx} kon niet gelezen worden — beeld staat nog op {self.huidige_idx}")
+                f"Frame {idx} could not be read — still showing {self.huidige_idx}")
         else:
-            self.lbl_time.setText(f"Frame {idx} kon niet gelezen worden")
+            self.lbl_time.setText(f"Frame {idx} could not be read")
 
     def _show_frame(self, idx, frame=None):
         if frame is not None:                       # ready-made from the read-ahead reader
@@ -4077,16 +4077,16 @@ class CompareSide(QWidget):
         kop = QHBoxLayout()
         # ElideLabel: a long name + title must not make this side (and so the main window)
         # wider than the screen -- see the class.
-        self.lbl_titel = ElideLabel(f"{naam} — nog geen analyse gekozen")
+        self.lbl_titel = ElideLabel(f"{naam} — no analysis chosen yet")
         self.lbl_titel.setStyleSheet("font-weight: bold; padding: 2px;")
         kop.addWidget(self.lbl_titel, stretch=1)
-        self.btn_kies = QPushButton("Kies analyse...")
+        self.btn_kies = QPushButton("Choose analysis...")
         self.btn_kies.clicked.connect(kies_callback)
         kop.addWidget(self.btn_kies)
         # Clearing is wired up from outside (see _build_compare_page): the master clock
         # must let go first, and it doesn't know this side the other way around.
         self.btn_leeg = QPushButton("✕")
-        self.btn_leeg.setToolTip("Deze kant leegmaken.")
+        self.btn_leeg.setToolTip("Clear this side.")
         self.btn_leeg.setEnabled(False)
         kop.addWidget(self.btn_leeg)
         v.addLayout(kop)
@@ -4104,11 +4104,11 @@ class CompareSide(QWidget):
         v.addWidget(self.speler, stretch=1)
 
         rij_sync = QHBoxLayout()
-        self.btn_sync = QPushButton("⚑ Zet sync hier")
+        self.btn_sync = QPushButton("⚑ Set sync here")
         self.btn_sync.setToolTip(
-            "Legt het huidige frame vast als startpunt voor 'Start alles', zodat beide\n"
-            "video's op dezelfde fase van de slag beginnen.\n"
-            "Let op: sync-punten gelden voor deze sessie en worden niet opgeslagen.")
+            "Fixes the current frame as the start point for 'Start all', so both\n"
+            "videos begin at the same phase of the stroke.\n"
+            "Note: sync points apply to this session and aren't saved.")
         self.btn_sync.clicked.connect(self._set_sync)
         rij_sync.addWidget(self.btn_sync)
         self.lbl_sync = QLabel("sync: frame 0")
@@ -4118,7 +4118,7 @@ class CompareSide(QWidget):
         v.addLayout(rij_sync)
 
         self.tabel = QTableWidget(0, 3)
-        self.tabel.setHorizontalHeaderLabels(["#", "Been", "Hoek (°)"])
+        self.tabel.setHorizontalHeaderLabels(["#", "Leg", "Angle (°)"])
         self.tabel.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tabel.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tabel.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -4144,7 +4144,7 @@ class CompareSide(QWidget):
         self.speler.load(data["info"], data["resultaten"], data["video_pad"],
                          data.get("deinterlaced", False))
         self._fill_table()
-        self.btn_kies.setText("Wisselen...")
+        self.btn_kies.setText("Switch...")
         self.btn_sync.setEnabled(True)
         self.btn_leeg.setEnabled(True)
         self.speler.go_to(self.sync_frame)
@@ -4157,9 +4157,9 @@ class CompareSide(QWidget):
         self.events = []
         self.sync_frame = 0
         self.tabel.setRowCount(0)
-        self.lbl_titel.setText(f"{self.naam} — nog geen analyse gekozen")
+        self.lbl_titel.setText(f"{self.naam} — no analysis chosen yet")
         self.lbl_sync.setText("sync: frame 0")
-        self.btn_kies.setText("Kies analyse...")
+        self.btn_kies.setText("Choose analysis...")
         self.btn_sync.setEnabled(False)
         self.btn_leeg.setEnabled(False)
 
@@ -4196,8 +4196,8 @@ class CompareSide(QWidget):
                 if ev.onvolledig:
                     item.setBackground(incomplete_color)
                     item.setToolTip(
-                        f"Onvolledige afzet ({ev.onvolledig}) — de push is niet "
-                        "afgemaakt, dus deze hoek is te steil en niet vergelijkbaar.")
+                        f"Incomplete push ({ev.onvolledig}) — the push wasn't "
+                        "finished, so this angle is too steep and not comparable.")
                 self.tabel.setItem(i, kolom, item)
 
     def _click_row(self, rij, _kolom):
@@ -4205,10 +4205,10 @@ class CompareSide(QWidget):
             self.speler.go_to(self.events[rij].start_frame)
 
 
-# ── Fragmenten knippen uit een lange opname (fase 8) ───────────────────────────
+# ── Trimming fragments from a long recording (phase 8) ─────────────────────────
 
 def _time_text(frames, fps):
-    """Framenummer → "m:ss" (of "h:mm:ss" op een lange opname)."""
+    """Frame number → "m:ss" (or "h:mm:ss" on a long recording)."""
     sec = int(round(frames / (fps or 30.0)))
     if sec >= 3600:
         return f"{sec // 3600}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
@@ -4216,7 +4216,7 @@ def _time_text(frames, fps):
 
 
 def _read_time(tekst, fps):
-    """"m:ss", "h:mm:ss" of een aantal seconden → framenummer; None als het niet leest."""
+    """"m:ss", "h:mm:ss" or a number of seconds → frame number; None if it doesn't parse."""
     delen = (tekst or "").strip().replace(",", ".").split(":")
     try:
         waarden = [float(d) for d in delen if d != ""]
@@ -4256,9 +4256,9 @@ class FragmentBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(self.HEIGHT)
         self.setToolTip(
-            "Gemarkeerde stukken van deze opname.\n"
-            "Groen = zojuist gemarkeerd · grijs = al geanalyseerd · oranje = loopt nog · "
-            "rood = overlap.\nKlik op een blok om erheen te springen.")
+            "Marked stretches of this recording.\n"
+            "Green = just marked · gray = already analyzed · orange = still running · "
+            "red = overlap.\nClick a block to jump to it.")
         self.totaal = 1
         self.fragmenten = []      # [(start, eind)] — zojuist gemarkeerd
         self.gedaan = []          # [(start, eind, label)] — uit een eerdere sessie
@@ -4347,7 +4347,7 @@ class FragmentPicker(QDialog):
 
     def __init__(self, bron_pad, info, gedaan=(), deinterlacen=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Fragmenten knippen — {os.path.basename(bron_pad)}")
+        self.setWindowTitle(f"Trim fragments — {os.path.basename(bron_pad)}")
         self.info = info
         self.fps = info.fps or 30.0
         self._fragmenten = []          # [(start, eind)] in markeervolgorde
@@ -4362,8 +4362,8 @@ class FragmentPicker(QDialog):
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
 
-        uitleg = QLabel("Markeer de bruikbare stukken: <b>Start</b> (S) — <b>Stop</b> (E). "
-                        "Er wordt exact op die frames geknipt.")
+        uitleg = QLabel("Mark the usable stretches: <b>Start</b> (S) — <b>Stop</b> (E). "
+                        "The trim happens exactly on those frames.")
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
@@ -4390,13 +4390,13 @@ class FragmentPicker(QDialog):
             knop.setMaximumWidth(72)
             knop.clicked.connect(lambda _=False, s=sec: self._spring(s))
             rij_nav.addWidget(knop)
-        rij_nav.addWidget(QLabel("Ga naar"))
+        rij_nav.addWidget(QLabel("Go to"))
         self.veld_tijd = QLineEdit()
         self.veld_tijd.setPlaceholderText("m:ss")
         self.veld_tijd.setFixedWidth(80)
         self.veld_tijd.returnPressed.connect(self._ga_naar_tijd)
         rij_nav.addWidget(self.veld_tijd)
-        knop_ga = QPushButton("Ga")
+        knop_ga = QPushButton("Go")
         knop_ga.setMaximumWidth(48)
         knop_ga.clicked.connect(self._ga_naar_tijd)
         rij_nav.addWidget(knop_ga)
@@ -4407,10 +4407,10 @@ class FragmentPicker(QDialog):
         # Marking buttons + the list of marked stretches.
         onder = QHBoxLayout()
         links = QVBoxLayout()
-        self.btn_start = QPushButton("● Start bruikbaar beeld  (S)")
+        self.btn_start = QPushButton("● Start usable footage  (S)")
         self.btn_start.clicked.connect(self._start_fragment)
         links.addWidget(self.btn_start)
-        self.btn_stop = QPushButton("■ Stop bruikbaar beeld  (E)")
+        self.btn_stop = QPushButton("■ Stop usable footage  (E)")
         self.btn_stop.clicked.connect(self._stop_fragment)
         links.addWidget(self.btn_stop)
         self.lbl_lopend = QLabel("")
@@ -4420,9 +4420,9 @@ class FragmentPicker(QDialog):
         onder.addLayout(links)
 
         rechts = QVBoxLayout()
-        rechts.addWidget(QLabel("Gemarkeerde fragmenten  (klik = erheen springen)"))
+        rechts.addWidget(QLabel("Marked fragments  (click = jump to it)"))
         self.tabel = QTableWidget(0, 4)
-        self.tabel.setHorizontalHeaderLabels(["#", "Van – tot", "Duur", ""])
+        self.tabel.setHorizontalHeaderLabels(["#", "From – to", "Duration", ""])
         kop = self.tabel.horizontalHeader()
         kop.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         kop.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -4438,8 +4438,8 @@ class FragmentPicker(QDialog):
 
         if gedaan:
             info_gedaan = QLabel(
-                f"Grijs in de balk: {len(gedaan)} stuk(ken) van deze opname zijn al "
-                f"geanalyseerd.")
+                f"Gray in the bar: {len(gedaan)} stretch(es) of this recording are "
+                f"already analyzed.")
             info_gedaan.setStyleSheet("color: #888;")
             v.addWidget(info_gedaan)
 
@@ -4450,7 +4450,7 @@ class FragmentPicker(QDialog):
         self._ok = knoppen.button(QDialogButtonBox.Ok)
 
         hulp = QLabel(keys_help("<b>S</b> start fragment", "<b>E</b> stop fragment",
-                                   "<b>Del</b> fragment weg"))
+                                   "<b>Del</b> remove fragment"))
         hulp.setWordWrap(True)
         hulp.setStyleSheet("color: #888;")
         v.addWidget(hulp)
@@ -4495,9 +4495,9 @@ class FragmentPicker(QDialog):
         eind = self.speler.huidige_idx
         if eind < self._start_open:
             QMessageBox.information(
-                self, "Stop ligt vóór de start",
-                "Het eind van een fragment ligt vóór het begin. Spoel verder door en druk "
-                "opnieuw op Stop, of begin dit fragment opnieuw.")
+                self, "Stop is before the start",
+                "The end of a fragment lies before its start. Scrub further ahead and "
+                "press Stop again, or start this fragment over.")
             return
         self._fragmenten.append((self._start_open, eind))
         self._start_open = None
@@ -4527,7 +4527,7 @@ class FragmentPicker(QDialog):
     def _ga_naar_tijd(self):
         frame = _read_time(self.veld_tijd.text(), self.fps)
         if frame is None:
-            QMessageBox.information(self, "Tijd", "Gebruik m:ss (bijvoorbeeld 12:30).")
+            QMessageBox.information(self, "Time", "Use m:ss (for example 12:30).")
             return
         self.speler.go_to(frame)
 
@@ -4535,8 +4535,8 @@ class FragmentPicker(QDialog):
         self.balk.zet(cursor=idx, lopend=self._start_open)
         if self._start_open is not None:
             self.lbl_lopend.setText(
-                f"Loopt vanaf {_time_text(self._start_open, self.fps)} — "
-                f"nu {_time_text(idx, self.fps)}")
+                f"Running from {_time_text(self._start_open, self.fps)} — "
+                f"now {_time_text(idx, self.fps)}")
 
     # ── Refreshing the view ──────────────────────────────────────────────
     def _refresh(self, selectie=None):
@@ -4544,21 +4544,21 @@ class FragmentPicker(QDialog):
         self.btn_stop.setEnabled(self._start_open is not None)
         self.lbl_lopend.setText(
             "" if self._start_open is None
-            else f"Loopt vanaf {_time_text(self._start_open, self.fps)}")
+            else f"Running from {_time_text(self._start_open, self.fps)}")
 
         self.tabel.setRowCount(len(self._fragmenten))
         for i, (start, eind) in enumerate(self._fragmenten):
             duur = (eind - start + 1) / self.fps
             waarden = [str(i + 1),
                        f"{_time_text(start, self.fps)} – {_time_text(eind, self.fps)}",
-                       f"{duur:.1f}s".replace(".", ",")]
+                       f"{duur:.1f}s"]
             for kolom, waarde in enumerate(waarden):
                 item = QTableWidgetItem(waarde)
                 item.setToolTip(f"frame {start}–{eind}")
                 self.tabel.setItem(i, kolom, item)
             knop = QPushButton("✕")
             knop.setMaximumWidth(30)
-            knop.setToolTip("Dit fragment verwijderen")
+            knop.setToolTip("Remove this fragment")
             knop.clicked.connect(lambda _=False, r=i: self._verwijder(r))
             self.tabel.setCellWidget(i, 3, knop)
         if selectie is not None and 0 <= selectie < len(self._fragmenten):
@@ -4567,8 +4567,8 @@ class FragmentPicker(QDialog):
         self.balk.zet(fragmenten=self._fragmenten, lopend=self._start_open,
                       selectie=selectie if selectie is not None else -1)
         n = len(self._fragmenten)
-        self._ok.setText(f"Klaar — analyseer {n} fragment{'en' if n != 1 else ''}"
-                         if n else "Klaar")
+        self._ok.setText(f"Done — analyze {n} fragment{'s' if n != 1 else ''}"
+                         if n else "Done")
         self._ok.setEnabled(n > 0)
 
     def _verwijder(self, rij):
@@ -4580,9 +4580,9 @@ class FragmentPicker(QDialog):
     def _confirm(self):
         if self._start_open is not None:
             antwoord = QMessageBox.question(
-                self, "Fragment loopt nog",
-                "Er staat nog een fragment open (wel Start, geen Stop). Dat stuk wordt niet "
-                "geknipt.\n\nToch doorgaan met de fragmenten die er staan?",
+                self, "Fragment still running",
+                "There's still a fragment open (Start pressed, no Stop). That stretch "
+                "won't be trimmed.\n\nContinue anyway with the fragments already listed?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if antwoord != QMessageBox.Yes:
                 return
@@ -4632,8 +4632,7 @@ class PointsBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(self.HEIGHT)
-        self.setToolTip("Bewaarde punten in deze opname. Klik op een streepje om erheen "
-                        "te springen.")
+        self.setToolTip("Saved points in this recording. Click a tick to jump to it.")
         self.totaal = 1
         self.punten = []          # [(frame, label)] op framenummer gesorteerd
         self.cursor = 0
@@ -4714,7 +4713,7 @@ class ViewSide(QWidget):
         # Closing is wired up from outside (see ViewWindow._voeg_kant): the clock must
         # let go first, and it doesn't know this side the other way around.
         self.btn_leeg = QPushButton("✕")
-        self.btn_leeg.setToolTip("Deze video sluiten; de andere blijft staan.")
+        self.btn_leeg.setToolTip("Close this video; the other one stays.")
         kop.addWidget(self.btn_leeg)
         v.addWidget(self.kop)
 
@@ -4732,11 +4731,11 @@ class ViewSide(QWidget):
         self.rij_sync = QWidget()
         rij = QHBoxLayout(self.rij_sync)
         rij.setContentsMargins(0, 0, 0, 0)
-        self.btn_sync = QPushButton("⚑ Zet sync hier")
+        self.btn_sync = QPushButton("⚑ Set sync here")
         self.btn_sync.setToolTip(
-            "Legt het huidige frame vast als startpunt voor 'Start alles', zodat beide\n"
-            "video's op dezelfde fase van de slag beginnen.\n"
-            "Let op: sync-punten gelden voor deze sessie en worden niet opgeslagen.")
+            "Fixes the current frame as the start point for 'Start all', so both\n"
+            "videos begin at the same phase of the stroke.\n"
+            "Note: sync points apply to this session and aren't saved.")
         self.btn_sync.clicked.connect(self._set_sync)
         rij.addWidget(self.btn_sync)
         self.lbl_sync = QLabel("")
@@ -4825,28 +4824,28 @@ class ViewWindow(QDialog):
         self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
         kop.addWidget(self.lbl_spoel)
         kop.addStretch(1)
-        self.lbl_geen_punten = QLabel("punten worden niet bewaard")
+        self.lbl_geen_punten = QLabel("points aren't saved")
         self.lbl_geen_punten.setStyleSheet("color: #888;")
         kop.addWidget(self.lbl_geen_punten)
-        self.btn_tweede = QPushButton("➕ Tweede video ernaast...")
+        self.btn_tweede = QPushButton("➕ Second video alongside...")
         self.btn_tweede.setToolTip(
-            "Zet een tweede video naast deze, om ze synchroon te bekijken. De video komt\n"
-            "daarna als 'losse video' in de opnamelijst. Met twee video's zijn er geen\n"
-            "punten, wel een sync-punt per video.")
+            "Put a second video next to this one, to view them in sync. The video then\n"
+            "ends up as a 'loose video' in the recordings list. With two videos there\n"
+            "are no points, but there is a sync point per video.")
         self.btn_tweede.clicked.connect(self._voeg_tweede_toe)
         kop.addWidget(self.btn_tweede)
-        self.btn_paneel = QPushButton("Punten verbergen")
+        self.btn_paneel = QPushButton("Hide points")
         self.btn_paneel.clicked.connect(self._toggle_paneel)
         kop.addWidget(self.btn_paneel)
-        btn_venster = QPushButton("Venstermodus (F11)")
+        btn_venster = QPushButton("Window mode (F11)")
         btn_venster.clicked.connect(self._toggle_volledig_scherm)
         kop.addWidget(btn_venster)
         # Full screen has no title bar, so no Windows minimize button either.
-        btn_min = QPushButton("Minimaliseren")
-        btn_min.setToolTip("Zet het venster even in de taakbalk; de video's blijven staan.")
+        btn_min = QPushButton("Minimize")
+        btn_min.setToolTip("Send the window to the taskbar for a moment; the videos keep running.")
         btn_min.clicked.connect(self._minimaliseer)
         kop.addWidget(btn_min)
-        btn_sluit = QPushButton("Sluiten (Esc)")
+        btn_sluit = QPushButton("Close (Esc)")
         btn_sluit.clicked.connect(self.accept)
         kop.addWidget(btn_sluit)
         v.addLayout(kop)
@@ -4863,30 +4862,30 @@ class ViewWindow(QDialog):
         self.balk_alles = QWidget()
         balk = QHBoxLayout(self.balk_alles)
         balk.setContentsMargins(0, 0, 0, 0)
-        self.btn_start_alles = QPushButton("▶ Start alles")
+        self.btn_start_alles = QPushButton("▶ Start all")
         self.btn_start_alles.setToolTip(
-            "Speelt beide video's tegelijk af vanaf hun sync-punt, elk op z'n eigen fps.\n"
-            "Spatie speelt ook beide tegelijk, maar hervat waar ze nu staan.")
+            "Plays both videos at once from their sync point, each at its own fps.\n"
+            "Space also plays both at once, but resumes where they currently are.")
         # lambda: clicked() would otherwise pass `checked=False` as vanaf_sync.
         self.btn_start_alles.clicked.connect(lambda: self._start_alles())
         balk.addWidget(self.btn_start_alles)
-        self.btn_pauzeer_alles = QPushButton("⏸ Pauzeer alles")
+        self.btn_pauzeer_alles = QPushButton("⏸ Pause all")
         self.btn_pauzeer_alles.clicked.connect(self._pauzeer_alles)
         balk.addWidget(self.btn_pauzeer_alles)
-        self.btn_naar_sync = QPushButton("⏮ Beide naar sync")
+        self.btn_naar_sync = QPushButton("⏮ Both to sync")
         self.btn_naar_sync.clicked.connect(self._beide_naar_sync)
         balk.addWidget(self.btn_naar_sync)
-        self.chk_vanaf_sync = QCheckBox("vanaf sync-punt")
+        self.chk_vanaf_sync = QCheckBox("from sync point")
         self.chk_vanaf_sync.setChecked(True)
         self.chk_vanaf_sync.setToolTip(
-            "Uit: 'Start alles' hervat waar beide video's nu staan, zonder terug te springen\n"
-            "(spatie doet dat altijd).")
+            "Off: 'Start all' resumes where both videos currently are, without jumping\n"
+            "back (space always does that).")
         balk.addWidget(self.chk_vanaf_sync)
-        balk.addWidget(QLabel("Snelheid"))
+        balk.addWidget(QLabel("Speed"))
         self.combo_alles_snelheid = QComboBox()
         self.combo_alles_snelheid.setToolTip(
-            "Afspeelsnelheid voor beide video's — ook als je er één los afspeelt, zodat ze "
-            "altijd even snel lopen.")
+            "Playback speed for both videos — even if you play just one on its own, so "
+            "they always run at the same speed.")
         for label, factor in SPEEDS:
             self.combo_alles_snelheid.addItem(label, factor)
         self.combo_alles_snelheid.setCurrentIndex(ALL_SPEED_IDX)
@@ -4968,7 +4967,7 @@ class ViewWindow(QDialog):
         keys but do nothing then."""
         twee = len(self.kanten) > 1
         self.lbl_naam.setText("  |  ".join(f"<b>{k.bron['naam']}</b>" for k in self.kanten))
-        self.setWindowTitle("Bekijken — " + " | ".join(k.bron["naam"] for k in self.kanten))
+        self.setWindowTitle("Viewing — " + " | ".join(k.bron["naam"] for k in self.kanten))
 
         for kant in self.kanten:
             kant.kop.setVisible(twee)
@@ -4983,12 +4982,12 @@ class ViewWindow(QDialog):
             kant.balk.setVisible(kant is self._punt_kant)
         if twee:
             self._zet_alles_snelheid()
-            self.hulp.setText(keys_help("beide video's tegelijk",
-                                           "<b>Esc</b> sluiten"))
+            self.hulp.setText(keys_help("both videos at once",
+                                           "<b>Esc</b> close"))
         else:
-            punt_toetsen = (("<b>P</b> punt zetten", "<b>1&ndash;9</b> naar punt",
-                             "<b>Del</b> punt weg") if self._punt_kant is not None else ())
-            self.hulp.setText(keys_help(*punt_toetsen, "<b>Esc</b> sluiten"))
+            punt_toetsen = (("<b>P</b> set point", "<b>1&ndash;9</b> to point",
+                             "<b>Del</b> remove point") if self._punt_kant is not None else ())
+            self.hulp.setText(keys_help(*punt_toetsen, "<b>Esc</b> close"))
 
     def _koppel_punten(self, kant):
         """Attaches the points panel to this side (or to none: `None`)."""
@@ -4998,9 +4997,9 @@ class ViewWindow(QDialog):
         if vorige is not None and vorige in self.kanten:
             vorige.speler.on_frame_shown = None
         aan = kant is not None
-        self.paneel.setVisible(aan and (self.btn_paneel.text() == "Punten verbergen"))
+        self.paneel.setVisible(aan and (self.btn_paneel.text() == "Hide points"))
         self.btn_paneel.setVisible(aan)
-        # "Punten worden niet bewaard" only with one video without a row: with two videos
+        # "points aren't saved" only with one video without a row: with two videos
         # there are no points anyway, and the help line already says so.
         self.lbl_geen_punten.setVisible(len(self.kanten) == 1 and not aan)
         if not aan:
@@ -5075,10 +5074,10 @@ class ViewWindow(QDialog):
         self.paneel = QWidget()
         p = QVBoxLayout(self.paneel)
         p.setContentsMargins(6, 0, 0, 0)
-        p.addWidget(QLabel("<b>Punten</b>  (klik = erheen springen)"))
+        p.addWidget(QLabel("<b>Points</b>  (click = jump to it)"))
 
         self.tabel = QTableWidget(0, 3)
-        self.tabel.setHorizontalHeaderLabels(["#", "Tijd", "Naam"])
+        self.tabel.setHorizontalHeaderLabels(["#", "Time", "Name"])
         kop = self.tabel.horizontalHeader()
         kop.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         kop.setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -5090,12 +5089,12 @@ class ViewWindow(QDialog):
         self.tabel.itemChanged.connect(self._punt_hernoemd)
         p.addWidget(self.tabel, stretch=1)
 
-        btn_zet = QPushButton("➕ Punt zetten  (P)")
-        btn_zet.setToolTip("Onthoudt het frame dat nu in beeld staat. Het punt blijft bij "
-                           "deze opname bewaard, ook na het sluiten van dit venster.")
+        btn_zet = QPushButton("➕ Set point  (P)")
+        btn_zet.setToolTip("Remembers the frame currently in view. The point stays saved "
+                           "with this recording, even after closing this window.")
         btn_zet.clicked.connect(self._zet_punt)
         p.addWidget(btn_zet)
-        btn_weg = QPushButton("✕ Punt verwijderen  (Del)")
+        btn_weg = QPushButton("✕ Remove point  (Del)")
         btn_weg.clicked.connect(self._verwijder_punt)
         p.addWidget(btn_weg)
 
@@ -5128,7 +5127,7 @@ class ViewWindow(QDialog):
             self._punten = skate_db.list_markings(self.bieb, self.bron["id"])
         except Exception as e:
             self._punten = []
-            self.lbl_punten.setText(f"Punten konden niet gelezen worden: {e}")
+            self.lbl_punten.setText(f"Points could not be read: {e}")
             return
         self._vullen = True
         try:
@@ -5145,8 +5144,8 @@ class ViewWindow(QDialog):
 
                 naam = QTableWidgetItem(punt["label"] or "")
                 naam.setData(Qt.UserRole, punt["id"])
-                naam.setToolTip("Dubbelklik om te hernoemen"
-                                + (f" · gezet door {punt['aangemaakt_door']}"
+                naam.setToolTip("Double-click to rename"
+                                + (f" · set by {punt['aangemaakt_door']}"
                                    if punt["aangemaakt_door"] else ""))
                 self.tabel.setItem(rij, 2, naam)
         finally:
@@ -5156,8 +5155,8 @@ class ViewWindow(QDialog):
                       selectie=selectie if selectie is not None else -1)
         n = len(self._punten)
         self.lbl_punten.setText(
-            "Nog geen punten gezet." if not n
-            else f"{n} punt{'en' if n != 1 else ''} bewaard bij deze opname.")
+            "No points set yet." if not n
+            else f"{n} point{'s' if n != 1 else ''} saved with this recording.")
         if selectie is not None and 0 <= selectie < n:
             self.tabel.selectRow(selectie)
 
@@ -5169,14 +5168,14 @@ class ViewWindow(QDialog):
         if frame < 0:
             return
         if any(p["frame"] == frame for p in self._punten):
-            self.lbl_punten.setText("Op dit frame staat al een punt.")
+            self.lbl_punten.setText("There's already a point on this frame.")
             return
         try:
             skate_db.add_marking(self.bieb, self.bron["id"], frame,
-                                          f"Punt {len(self._punten) + 1}",
+                                          f"Point {len(self._punten) + 1}",
                                           self.trainer_naam)
         except Exception as e:
-            QMessageBox.warning(self, "Punt", f"Het punt kon niet bewaard worden:\n{e}")
+            QMessageBox.warning(self, "Point", f"The point could not be saved:\n{e}")
             return
         # Re-read and only then select: the list is ordered by frame number, so a point
         # you set halfway back doesn't end up at the bottom.
@@ -5196,7 +5195,7 @@ class ViewWindow(QDialog):
         try:
             skate_db.delete_marking(self.bieb, self._punten[rij]["id"])
         except Exception as e:
-            QMessageBox.warning(self, "Punt", f"Het punt kon niet verwijderd worden:\n{e}")
+            QMessageBox.warning(self, "Point", f"The point could not be removed:\n{e}")
             return
         self._vernieuw_punten()
 
@@ -5206,7 +5205,7 @@ class ViewWindow(QDialog):
         try:
             skate_db.edit_marking(self.bieb, item.data(Qt.UserRole), label=item.text())
         except Exception as e:
-            QMessageBox.warning(self, "Punt", f"De naam kon niet bewaard worden:\n{e}")
+            QMessageBox.warning(self, "Point", f"The name could not be saved:\n{e}")
 
     def _ga_naar_punt(self, index):
         kant = self._punt_kant
@@ -5231,7 +5230,7 @@ class ViewWindow(QDialog):
     def _toggle_paneel(self):
         zichtbaar = not self.paneel.isVisible()
         self.paneel.setVisible(zichtbaar)
-        self.btn_paneel.setText("Punten verbergen" if zichtbaar else "Punten tonen")
+        self.btn_paneel.setText("Hide points" if zichtbaar else "Show points")
 
     def _toggle_volledig_scherm(self):
         toggle_fullscreen(self)
@@ -5328,7 +5327,7 @@ class CopyDialog(QDialog):
 
     def __init__(self, worker, aantal, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Opnames naar de bibliotheek kopiëren")
+        self.setWindowTitle("Copy recordings to the library")
         self.setWindowModality(Qt.WindowModal)
         self.setMinimumWidth(520)
         self._worker = worker
@@ -5337,7 +5336,7 @@ class CopyDialog(QDialog):
         self.paden, self.afgebroken, self.fout = [], False, None   # set by _on_done
 
         v = QVBoxLayout(self)
-        self.lbl_bestand = QLabel("Voorbereiden...")
+        self.lbl_bestand = QLabel("Preparing...")
         self.lbl_bestand.setWordWrap(True)
         v.addWidget(self.lbl_bestand)
         self.balk = QProgressBar()
@@ -5349,9 +5348,9 @@ class CopyDialog(QDialog):
         v.addWidget(self.lbl_detail)
         rij = QHBoxLayout()
         rij.addStretch(1)
-        self.btn_stop = QPushButton("Stoppen")
-        self.btn_stop.setToolTip("Breekt het kopiëren af. Wat al helemaal gekopieerd is "
-                                 "blijft staan; het half gekopieerde bestand wordt weggehaald.")
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setToolTip("Aborts the copy. Anything already fully copied stays; "
+                                 "the half-copied file is removed.")
         self.btn_stop.clicked.connect(self._stop)
         rij.addWidget(self.btn_stop)
         v.addLayout(rij)
@@ -5364,9 +5363,9 @@ class CopyDialog(QDialog):
         self._monsters.append((nu, gedaan))
         while len(self._monsters) > 1 and nu - self._monsters[0][0] > COPY_WINDOW_S:
             self._monsters.pop(0)
-        self.lbl_bestand.setText(f"Bestand {idx + 1} van {self._aantal}: <b>{naam}</b>")
+        self.lbl_bestand.setText(f"File {idx + 1} of {self._aantal}: <b>{naam}</b>")
         self.balk.setValue(int(gedaan / max(1, totaal) * 1000))
-        delen = [f"{_bytes_text(gedaan)} van {_bytes_text(totaal)}"]
+        delen = [f"{_bytes_text(gedaan)} of {_bytes_text(totaal)}"]
         t0, b0 = self._monsters[0]
         if nu - t0 >= 1.5:
             snelheid = (gedaan - b0) / (nu - t0)
@@ -5374,12 +5373,12 @@ class CopyDialog(QDialog):
                 delen.append(f"{_bytes_text(snelheid)}/s")
                 delen.append(_remaining_text((totaal - gedaan) / snelheid))
         else:
-            delen.append("snelheid meten...")
+            delen.append("measuring speed...")
         self.lbl_detail.setText(" · ".join(delen))
 
     def _stop(self):
         self.btn_stop.setEnabled(False)
-        self.lbl_detail.setText("Stoppen... (het lopende blok wordt afgemaakt)")
+        self.lbl_detail.setText("Stopping... (the current block is being finished)")
         self._worker.requestInterruption()
 
     def _on_done(self, paden, afgebroken, fout):
@@ -5401,7 +5400,7 @@ COPY_WINDOW_S = 8.0     # speed for the remaining time: over the last 8 s
 
 
 def _bytes_text(n):
-    """4,3 GB / 820 MB / 12 kB -- with a comma, like the rest of the app."""
+    """4.3 GB / 820 MB / 12 kB."""
     n = float(n)
     for eenheid in ("B", "kB", "MB", "GB", "TB"):
         if n < 1000 or eenheid == "TB":
@@ -5410,20 +5409,20 @@ def _bytes_text(n):
     if eenheid == "B":
         return f"{int(n)} B"
     tekst = f"{n:.1f}" if n < 10 else f"{n:.0f}"
-    return f"{tekst.replace('.', ',')} {eenheid}"
+    return f"{tekst} {eenheid}"
 
 
 def _remaining_text(seconden):
-    """"nog ongeveer 3 min" -- roughly rounded, so the estimate doesn't jump on every tick."""
+    """"about 3 min left" -- roughly rounded, so the estimate doesn't jump on every tick."""
     if seconden < 10:
-        return "bijna klaar"
+        return "almost done"
     if seconden < 60:
-        return f"nog ongeveer {int(round(seconden / 5.0) * 5)} s"
+        return f"about {int(round(seconden / 5.0) * 5)} s left"
     minuten = int(math.ceil(seconden / 60.0))
     if minuten < 60:
-        return f"nog ongeveer {minuten} min"
+        return f"about {minuten} min left"
     uren, rest = divmod(minuten, 60)
-    return f"nog ongeveer {uren} u {rest} min" if rest else f"nog ongeveer {uren} u"
+    return f"about {uren} h {rest} min left" if rest else f"about {uren} h left"
 
 
 class MainWindow(QMainWindow):
