@@ -1,279 +1,301 @@
-# GPU.md — de analyse op de videokaart laten rekenen
+# GPU.md — running the analysis on the graphics card
 
-Stand: 13 augustus 2026. Dit bestand beschrijft **wat er in de code zit** en **wat er per laptop
-geïnstalleerd moet worden** — voor een NVIDIA-machine (CUDA) én voor een machine met een
+Status: 13 August 2026. This file describes **what's in the code** and **what needs to
+be installed per laptop** — for an NVIDIA machine (CUDA) and for a machine with an
 integrated GPU (DirectML).
 
-De aanleiding: de analyse duurde ~2 s/frame en dat bleek volledig op de CPU te draaien. In
-`.venv-yolo` stond `torch 2.13.0+cpu` — de CPU-only build, die principieel geen CUDA kan
-aanspreken, hoe goed de videokaart ook is. Op de laptop met een **RTX 3050** is dat opgelost met
-CUDA (~10× sneller); op de laptop met een **AMD Radeon integrated GPU** loopt het via DirectML
-(~2,2× sneller, hoofdstuk 4).
+Background: the analysis took ~2 s/frame and turned out to be running entirely on the
+CPU. `.venv-yolo` had `torch 2.13.0+cpu` — the CPU-only build, which in principle can
+never talk to CUDA, no matter how good the graphics card is. On the laptop with an
+**RTX 3050** this was fixed with CUDA (~10× faster); on the laptop with an **AMD
+Radeon integrated GPU** it runs via DirectML (~2.2× faster, chapter 4).
 
 ---
 
-## 1. Wat er in de code zit (op elke machine hetzelfde)
+## 1. What's in the code (the same on every machine)
 
-Alles staat in [`schaats_yolo.py`](schaats_yolo.py) — de MediaPipe-backend is niet aangeraakt en
-draait onveranderd op de CPU. **Er valt niets in te stellen**: de code kiest zelf, per pass.
+Everything lives in [`skate_yolo.py`](skate_yolo.py) — the MediaPipe backend is
+untouched and runs unchanged on the CPU. **There's nothing to configure**: the code
+decides for itself, per pass.
 
-| Onderdeel | Wat het doet |
+| Piece | What it does |
 |---|---|
-| `yolo_device()` | `'cuda'` als torch een bruikbare GPU ziet, anders `'cpu'`. Voor de detectiepass (ultralytics). |
-| `yolo_dml()` | True als de detectiepass via **DirectML** kan — de route zonder NVIDIA-kaart. CUDA gaat vóór. |
-| `rtmpose_device()` | `'cuda'` / `'dml'` / `'cpu'` voor de verfijningspass, naar wat ONNXRuntime aan providers heeft. |
-| `_laad_yolo(...)` | Laadt het `.pt`-model (CPU/CUDA) óf, op de DirectML-route, een ONNX-export van dezelfde gewichten. Exporteert die één keer per model (~15 s) naar `<model>-dml.onnx`. |
-| `_dml_sessies()` | Contextmanager die ONNXRuntime-sessies binnen het blok op DirectML zet. Nodig omdat ultralytics maar drie providers kent (CUDA, CoreML, CPU) en er geen knop voor DirectML heeft. |
-| `_DmlYolo` | Schil om het ONNX-model: bouwt de sessie ín de patch op (ultralytics doet dat pas bij de eerste inferentie) en valt terug op het `.pt`-model op de CPU als DirectML halverwege afhaakt. |
-| `_infereer(aanroep, ...)` | Voert een ultralytics-aanroep uit op het gekozen apparaat en zet bij een **CUDA-OOM** de rest van de run blijvend op de CPU voort, i.p.v. de analyse te laten sneuvelen. |
-| `_maak_rtmpose(...)` | Valt terug op de CPU als de GPU-sessie niet opbouwt. Nodig omdat `get_available_providers()` zegt dat CUDA/DirectML *meegecompileerd* is — niet dat de DLL's ook laden. |
-| `SCHAATSANALYSE_CPU=1` | Dwingt beide passes naar de CPU. Voor A/B-metingen zonder de omgeving te slopen. |
+| `yolo_device()` | `'cuda'` if torch sees a usable GPU, otherwise `'cpu'`. For the detection pass (ultralytics). |
+| `yolo_dml()` | True if the detection pass can run via **DirectML** — the route without an NVIDIA card. CUDA takes priority. |
+| `rtmpose_device()` | `'cuda'` / `'dml'` / `'cpu'` for the refinement pass, based on what ONNXRuntime has as providers. |
+| `_load_yolo(...)` | Loads the `.pt` model (CPU/CUDA) or, on the DirectML route, an ONNX export of the same weights. Exports that once per model (~15 s) to `<model>-dml.onnx`. |
+| `_dml_sessions()` | Context manager that puts ONNXRuntime sessions created within the block on DirectML. Needed because ultralytics only knows three providers (CUDA, CoreML, CPU) and has no switch for DirectML. |
+| `_DmlYolo` | Shell around the ONNX model: builds the session inside the patch (ultralytics only does that on the first inference) and falls back to the `.pt` model on the CPU if DirectML drops out partway. |
+| `_infer(call, ...)` | Runs an ultralytics call on the chosen device and, on a **CUDA OOM**, permanently moves the rest of the run to the CPU instead of letting the analysis fail. |
+| `_make_rtmpose(...)` | Falls back to the CPU if the GPU session fails to build. Needed because `get_available_providers()` says CUDA/DirectML is *compiled in* — not that the DLLs actually load. |
+| `SKATEANALYSIS_CPU=1` | Forces both passes to the CPU. For A/B measurements without tearing down the environment. |
 
-**Waarom de twee passes apart worden vastgesteld:** ze draaien op verschillende motoren. De
-detectiepass gaat via torch/CUDA (of via ONNX/DirectML), de RTMPose-verfijning via ONNXRuntime —
-en die haalt zijn GPU-ondersteuning uit een ánder pakket. Een machine kan dus prima de ene wél en
-de andere niet hebben, en dan moet elke pass los van de andere kunnen terugvallen.
+**Why the two passes are determined separately:** they run on different engines. The
+detection pass goes through torch/CUDA (or through ONNX/DirectML), the RTMPose
+refinement through ONNXRuntime — which gets its GPU support from a different package.
+So a machine can perfectly well have one but not the other, and each pass needs to be
+able to fall back independently of the other.
 
-**`YOLO_AUTOINSTALL=false`** staat bovenin `schaats_yolo.py`, vóór de ultralytics-import. De
-ONNX-backend van ultralytics doet namelijk `check_requirements("onnxruntime")` en installeert dat
-pakket ongevraagd — dwars over `onnxruntime-directml` heen, waarmee de GPU-route stilzwijgend
-verdwijnt. Dat is tijdens het bouwen van deze route één keer echt gebeurd (de meting werd ineens
-2× trager en de logregel meldde een ander ONNXRuntime-versienummer).
+**`YOLO_AUTOINSTALL=false`** sits at the top of `skate_yolo.py`, before the ultralytics
+import. That's because ultralytics's ONNX backend does `check_requirements("onnxruntime")`
+and installs that package unasked — right over `onnxruntime-directml`, silently
+erasing the GPU route. That actually happened once while building this route (the
+measurement suddenly became 2× slower and the log line reported a different
+ONNXRuntime version number).
 
 ---
 
-## 2. Installatie is **per laptop** — dit reist niet mee via git
+## 2. Installation is **per laptop** — this doesn't travel via git
 
-`.venv-yolo/` staat in `.gitignore`. Wat je uit GitHub haalt is dus alleen de code; de
-CUDA-pakketten moet je op elke machine apart installeren. Op een machine zonder NVIDIA-GPU sla je
-dit hele hoofdstuk over — de code valt vanzelf terug op de CPU.
+`.venv-yolo/` is in `.gitignore`. So what you pull from GitHub is only the code; the
+CUDA packages need to be installed separately on every machine. On a machine with no
+NVIDIA GPU, skip this whole chapter — the code falls back to the CPU on its own.
 
-**Op een NVIDIA-machine** (uitgevoerd op de RTX 3050-laptop):
+**On an NVIDIA machine** (done on the RTX 3050 laptop):
 
 ```bash
-# 1. Welke CUDA-versie kan de driver aan? Staat rechtsboven in de uitvoer.
+# 1. Which CUDA version can the driver handle? Shown top-right in the output.
 nvidia-smi
 
-# 2. Vervang de CPU-build van torch door de CUDA-build. Houd de torch-VERSIE gelijk
-#    (hier 2.13.0), alleen het +cuXXX-deel verandert — dan kan ultralytics er niet
-#    over struikelen. Kies een cuXXX-index op of onder wat nvidia-smi meldde.
+# 2. Replace the CPU build of torch with the CUDA build. Keep the torch VERSION the
+#    same (here 2.13.0), only the +cuXXX part changes -- that way ultralytics can't
+#    trip over it. Pick a cuXXX index at or below what nvidia-smi reported.
 .venv-yolo\Scripts\python.exe -m pip install "torch==2.13.0+cu130" "torchvision==0.28.0+cu130" --index-url https://download.pytorch.org/whl/cu130
 
-# 3. ONNXRuntime apart, voor de RTMPose-verfijning. Dit is echt een losse stap:
-#    een CUDA-torch zegt niets over wat ONNXRuntime kan.
+# 3. ONNXRuntime separately, for the RTMPose refinement. This really is a separate
+#    step: a CUDA torch says nothing about what ONNXRuntime can do.
 .venv-yolo\Scripts\python.exe -m pip uninstall -y onnxruntime
 .venv-yolo\Scripts\python.exe -m pip install onnxruntime-gpu
 ```
 
-**Op een machine zonder NVIDIA-GPU** (uitgevoerd op de laptop met AMD Radeon Graphics) — hier
-loopt alles via DirectML, dus torch blijft ongemoeid:
+**On a machine with no NVIDIA GPU** (done on the laptop with AMD Radeon Graphics) —
+here everything runs via DirectML, so torch is left untouched:
 
 ```bash
-# 1. Wat zit erin? CUDA heeft alleen zin bij een NVIDIA-kaart.
+# 1. What's in there? CUDA is only useful with an NVIDIA card.
 powershell -c "Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion"
 
-# 2. Vervang ONNXRuntime door de DirectML-build. Eerst de oude weg: beide pakketten
-#    leveren dezelfde `onnxruntime`-module en kunnen niet naast elkaar staan.
+# 2. Replace ONNXRuntime with the DirectML build. Remove the old one first: both
+#    packages provide the same `onnxruntime` module and can't coexist.
 .venv-yolo\Scripts\python.exe -m pip uninstall -y onnxruntime
 .venv-yolo\Scripts\python.exe -m pip install onnxruntime-directml
 
-# 3. Gereedschap voor de eenmalige ONNX-export van het YOLO-model.
+# 3. Tooling for the one-time ONNX export of the YOLO model.
 .venv-yolo\Scripts\python.exe -m pip install onnx onnxslim
 ```
 
-Bij de eerste analyse daarna exporteert de code zelf `yolo26x-pose-dml.onnx` (~15 s, 220 MB,
-blijft naast het `.pt`-bestand staan; staat in `.gitignore`).
+On the first analysis after that, the code exports `yolo26x-pose-dml.onnx` itself
+(~15 s, 220 MB, stays next to the `.pt` file; is in `.gitignore`).
 
-**Controleren waar je op draait:**
+**Checking what you're running on:**
 
 ```bash
-.venv-yolo\Scripts\python.exe -c "import schaats_yolo as s; print('yolo:', s.yolo_device(), '| dml:', s.yolo_dml(), '| rtmpose:', s.rtmpose_device())"
+.venv-yolo\Scripts\python.exe -c "import skate_yolo as s; print('yolo:', s.yolo_device(), '| dml:', s.yolo_dml(), '| rtmpose:', s.rtmpose_device())"
 ```
 
-Op een NVIDIA-machine hoort er twee keer `cuda` te staan; staat er `cpu` terwijl er wél een
-NVIDIA-kaart in zit, controleer dan eerst `torch.__version__` — eindigt die op `+cpu`, dan is
-stap 2 niet gelukt. Op een machine met integrated GPU hoort er `yolo: cpu | dml: True |
-rtmpose: dml` te staan: torch blijft daar op de CPU (dat klopt), het rekenwerk gaat via ONNX.
+On an NVIDIA machine it should print `cuda` twice; if it says `cpu` while there is an
+NVIDIA card, check `torch.__version__` first — if it ends in `+cpu`, step 2 didn't
+succeed. On a machine with an integrated GPU it should say `yolo: cpu | dml: True |
+rtmpose: dml`: torch stays on the CPU there (that's correct), the compute goes
+through ONNX.
 
 ---
 
-## 3. Referentiemeting (RTX 3050 Laptop, 4 GB)
+## 3. Reference measurement (RTX 3050 Laptop, 4 GB)
 
-"Schaats frontaal.MOV", 103 frames, mét doelklik, `bocht=False`, dezelfde machine op CPU vs. GPU:
+"Schaats frontaal.MOV", 103 frames, with a target click, `corner=False`, same machine
+on CPU vs. GPU:
 
 | | CPU | GPU |
 |---|---|---|
-| Analysetijd | 194,0 s | **19,5 s** |
-| Per frame | 1,88 s | 0,19 s |
-| Dekking | 100/103 | 100/103 |
-| Afzetten | 8 | 8 |
+| Analysis time | 194.0 s | **19.5 s** |
+| Per frame | 1.88 s | 0.19 s |
+| Coverage | 100/103 | 100/103 |
+| Pushes | 8 | 8 |
 
-**9,9× sneller, en de meting is identiek**: dezelfde 8 afzetten, dezelfde benen, dezelfde
-framegrenzen, dezelfde hoeken tot op 0,00°. Landmarks verschillen subpixel (mediaan 0,048 px,
-p95 0,23 px); de enige uitschieters tot ~3,6 px zitten op de **polsen** en de schouder — punten
-die geen enkele meting voedt. GPU-versnelling is hier dus puur tijdwinst, geen stille
-meetwijziging, en oude analyses blijven vergelijkbaar met nieuwe.
+**9.9× faster, and the measurement is identical**: the same 8 pushes, the same legs,
+the same event boundaries, the same angles down to 0.00°. Landmarks differ by
+sub-pixel amounts (median 0.048 px, p95 0.23 px); the only outliers up to ~3.6 px sit
+on the **wrists** and shoulder — points that feed into no measurement at all. GPU
+acceleration here is therefore purely a time saving, not a silent measurement change,
+and old analyses stay comparable with new ones.
 
 ---
 
-## 4. De laptop met integrated GPU: DirectML (gedaan, 13 augustus 2026)
+## 4. The laptop with an integrated GPU: DirectML (done, 13 August 2026)
 
-**CUDA is NVIDIA-only.** Op een Intel Iris Xe/UHD of AMD Radeon Graphics geeft
-`torch.cuda.is_available()` gewoon `False`. Torch praat sowieso niet met een iGPU, dus de weg
-loopt niet via `device=` maar via een **geëxporteerd ONNX-model** dat door ONNXRuntime met de
-**DirectML**-provider wordt uitgevoerd (merkonafhankelijk: elke DirectX-12-GPU, dus ook AMD).
-OpenVINO — het alternatief — viel af: de GPU-plugin daarvan is Intel-only.
+**CUDA is NVIDIA-only.** On an Intel Iris Xe/UHD or AMD Radeon Graphics,
+`torch.cuda.is_available()` simply returns `False`. Torch never talks to an iGPU at
+all, so the route doesn't go through `device=` but through an **exported ONNX model**
+run by ONNXRuntime with the **DirectML** provider (brand-agnostic: any DirectX-12
+GPU, so AMD too). OpenVINO — the alternative — was ruled out: its GPU plugin is
+Intel-only.
 
-### Meting (AMD Radeon Graphics, integrated; zelfde clip en protocol als hoofdstuk 3)
+### Measurement (AMD Radeon Graphics, integrated; same clip and protocol as chapter 3)
 
 | | CPU | DirectML |
 |---|---|---|
-| Analysetijd | 220,6 s | **98,4 s** |
-| Per frame | 2,14 s | 0,96 s |
-| Dekking | 100/103 | 100/103 |
-| Afzetten | 8 | 8 |
+| Analysis time | 220.6 s | **98.4 s** |
+| Per frame | 2.14 s | 0.96 s |
+| Coverage | 100/103 | 100/103 |
+| Pushes | 8 | 8 |
 
-**2,2× sneller bij een identieke meting**: dezelfde acht afzetten, dezelfde benen en
-framegrenzen, dezelfde hoeken, en 0,0 px mediaan verschil op knieën en enkels (p95 0,1 px). De
-RTMPose-verfijning op DirectML is zelfs **bit-identiek** aan diezelfde pass op de CPU.
+**2.2× faster with an identical measurement**: the same eight pushes, the same legs
+and event boundaries, the same angles, and 0.0 px median difference on knees and
+ankles (p95 0.1 px). The RTMPose refinement on DirectML is even **bit-identical** to
+the same pass on the CPU.
 
-Vooraf gemeten op het kale model (1280×1280, ONNXRuntime zonder de rest van de pijplijn):
-detectiepass 3,26 s → 0,60 s per frame, RTMPose 0,098 s → 0,035 s. Dat de hele analyse "maar"
-2,2× sneller wordt, komt doordat de CPU-referentie via torch draait (2,14 s/frame) en niet via
-ONNXRuntime-CPU, en doordat het lezen/decoderen en de kleurmachinerie op de CPU blijven.
+Measured beforehand on the bare model (1280×1280, ONNXRuntime without the rest of the
+pipeline): detection pass 3.26 s → 0.60 s per frame, RTMPose 0.098 s → 0.035 s. That
+the whole analysis is "only" 2.2× faster is because the CPU reference runs through
+torch (2.14 s/frame) rather than ONNXRuntime-CPU, and because reading/decoding and the
+color machinery stay on the CPU.
 
-### De valkuil die het bijna stilzwijgend fout liet gaan: **exporteer met `dynamic=True`**
+### The pitfall that almost broke this silently: **export with `dynamic=True`**
 
-Ultralytics letterboxt een `.pt`-model **rechthoekig** (alleen tot een veelvoud van de stride),
-maar een ONNX-model met een **vaste** invoervorm krijgt het beeld in een **vierkant** geplakt,
-met een brede grijze rand erbij. Het net ziet dan een ander plaatje. Gemeten op deze clip met een
-statische export:
+Ultralytics letterboxes a `.pt` model to a **rectangle** (only up to a multiple of the
+stride), but an ONNX model with a **fixed** input shape gets the image pasted into a
+**square**, with a wide gray border added. The network then sees a different picture.
+Measured on this clip with a static export:
 
-- dekking **89/103** in plaats van 100/103,
-- eventgrenzen verschoven, twee afzethoeken **18° anders** (58,9° → 40,4° en 53,9° → 64,7°),
-- en dat terwijl de detecties zelf per frame vrijwel gelijk waren — het verschil liep via de
-  gat-opvulling en de kleurpoort in de verfijningspass.
+- coverage **89/103** instead of 100/103,
+- event boundaries shifted, two push angles **18° different** (58.9° → 40.4° and
+  53.9° → 64.7°),
+- and that while the raw per-frame detections themselves were nearly identical — the
+  difference traveled through the gap-filling and the color gate in the refinement
+  pass.
 
-Met `dynamic=True` valt ultralytics terug op precies dezelfde rechthoekige letterbox als bij het
-`.pt`-model en is de meting weer gelijk. Het kost **geen snelheid**: alle frames van één video
-hebben dezelfde vorm, dus DirectML bouwt zijn graaf één keer op (98,4 s dynamisch tegen 124,4 s
-statisch — dynamisch was zelfs sneller).
+With `dynamic=True`, ultralytics falls back to exactly the same rectangular letterbox
+as the `.pt` model, and the measurement matches again. It costs **no speed**: every
+frame of one video has the same shape, so DirectML builds its graph once (98.4 s
+dynamic against 124.4 s static — dynamic was even faster).
 
-Dat dit aan de export lag en niet aan de rekenkunde van DirectML is met een bisect vastgesteld:
-hetzelfde statische ONNX-model op de **CPU**-provider gaf óók 89/103. Dat is het gereedschap dat
-hoofdstuk 5 beschrijft, en het is precies waarvoor het bedoeld is.
+That this was about the export and not DirectML's arithmetic was established with a
+bisect: the same static ONNX model on the **CPU** provider also gave 89/103. That's
+the tool chapter 5 describes, and it's exactly what it's for.
 
-### Wat er nog te winnen valt
+### What's still on the table
 
-Een iGPU deelt zijn geheugenbandbreedte met de CPU, dus de 10× van de RTX 3050 zit er niet in.
-Wil je hier écht sneller, dan is een kleiner model (`yolo26m-pose.pt`, zie
-`STANDAARD_YOLO_MODEL`) waarschijnlijk een grotere winst dan verdere GPU-tuning — maar dát is wél
-een meetwijziging en hoort dus langs het protocol hieronder.
-
----
-
-## 5. Meetprotocol — hoe je bewijst dat een versnelling geen meetwijziging is
-
-De regel voor dit project: **snelheid mag veranderen, de uitkomst niet.** Een versnelling die de
-hoeken een halve graad verschuift is geen versnelling maar een stille regressie.
-
-1. Draai dezelfde video twee keer: één keer met de nieuwe route, één keer met
-   `SCHAATSANALYSE_CPU=1` als referentie. Wijkt het af, **bisect dan**: draai het nieuwe *model*
-   op de oude *provider* (of andersom). Zo bleek de afwijking van de DirectML-route in de
-   ONNX-export te zitten en niet in de GPU (hoofdstuk 4).
-2. Gebruik **dezelfde instellingen**, inclusief het `doel_punt` van de oorspronkelijke analyse
-   (te vinden in `analyse.instellingen_json` in de bibliotheek-DB).
-3. Vergelijk met de bestaande tooling: `python schaats_eval.py vergelijk cpu.npz nieuw.npz`.
-   **Lees altijd het standbeen-getal** — zie de `schaats_eval.py`-paragraaf in CLAUDE.md voor
-   waarom het gemengde getal misleidt.
-4. Geslaagd = dezelfde dekking, hetzelfde aantal afzetten met dezelfde benen en framegrenzen, en
-   hoeken die tot op ~0,0° gelijk zijn.
-
-**Twee valkuilen die bij het opzetten van deze meting daadwerkelijk zijn misgegaan** — beide
-kosten je een run van vier minuten voordat je doorhebt dat je eigen testscript fout was:
-
-- `segmenteer_afzetten(resultaten, min_lengte=3)` — de tweede parameter is **`min_lengte`, geen
-  fps**. Geef je er per ongeluk `info.fps` (30) aan mee, dan wordt élk event weggefilterd en
-  krijg je "0 afzetten" terwijl de analyse prima is.
-- **Zonder `doel_punt`** kiest de automatische doelkeuze de grootste beweger, en dat is op deze
-  clip niet dezelfde schaatser als bij de opgeslagen analyse. Je vergelijkt dan twee verschillende
-  metingen met elkaar.
+An iGPU shares its memory bandwidth with the CPU, so the RTX 3050's 10× isn't
+available here. If you want this genuinely faster, a smaller model
+(`yolo26m-pose.pt`, see `DEFAULT_YOLO_MODEL`) is probably a bigger win than further
+GPU tuning — but that *is* a measurement change and must go through the protocol
+below.
 
 ---
 
-## 6. Kun je CPU en GPU tegelijk laten rekenen?
+## 5. Measurement protocol — how to prove a speedup isn't a measurement change
 
-Technisch kan het, praktisch levert het bijna niets op — en dat is geen kwestie van smaak
-maar van rekenkunde. De GPU doet een frame in ~0,15 s, de CPU in ~1,75 s. Verdeel je het werk
-optimaal over die twee, dan kan de trage kant hooguit **~9%** van de frames voor zijn rekening
-nemen; meer, en hij wordt zelf de vertrager terwijl de snelle staat te wachten. De hele winst is
-dus die 9% (19,5 s → ~17,8 s). **Hoe sneller je GPU, hoe minder een CPU er nog bij kan
-bijdragen.**
+The rule for this project: **speed may change, the result may not.** A speedup that
+shifts the angles by half a degree isn't a speedup, it's a silent regression.
 
-**Waar de tijd nu heen gaat** (gemeten op de RTX 3050, 103 frames, `bocht=False`, door de tijd
-binnen de modelaanroepen af te zetten tegen de totale analysetijd):
+1. Run the same video twice: once with the new route, once with `SKATEANALYSIS_CPU=1`
+   as the reference. If they differ, **bisect**: run the new *model* on the old
+   *provider* (or vice versa). That's how the DirectML route's discrepancy turned out
+   to be in the ONNX export and not the GPU (chapter 4).
+2. Use **the same settings**, including the `doel_punt` of the original analysis
+   (found in `analysis.settings_json` in the library DB).
+3. Compare with the existing tooling: `python skate_eval.py compare cpu.npz new.npz`.
+   **Always read the stance-leg number** — see the `skate_eval.py` section in
+   CLAUDE.md for why the mixed number is misleading.
+4. Passed = same coverage, same number of pushes with the same legs and event
+   boundaries, and angles matching to within ~0.0°.
 
-| | tijd | aandeel |
+**Two pitfalls that genuinely tripped this measurement up while setting it up** — both
+cost a four-minute run before you realize your own test script was wrong:
+
+- `segment_pushes(resultaten, min_lengte=3)` — the second parameter is **`min_lengte`
+  (minimum length), not fps**. Pass it `info.fps` (30) by accident and every single
+  event gets filtered out, giving "0 pushes" while the analysis is perfectly fine.
+- **Without `doel_punt`**, automatic target selection picks the biggest mover, and on
+  this clip that isn't the same skater as in the saved analysis. You'd then be
+  comparing two different measurements against each other.
+
+---
+
+## 6. Can CPU and GPU compute at the same time?
+
+Technically yes, practically it buys almost nothing — and that's not a matter of
+taste but of arithmetic. The GPU does a frame in ~0.15 s, the CPU in ~1.75 s. Split
+the work optimally between the two and the slow side can handle at most **~9%** of
+the frames; more than that and it becomes the bottleneck while the fast one sits
+waiting. So the whole gain is that 9% (19.5 s → ~17.8 s). **The faster your GPU, the
+less a CPU can still contribute.**
+
+**Where the time actually goes** (measured on the RTX 3050, 103 frames,
+`corner=False`, by weighing the time inside the model calls against the total
+analysis time):
+
+| | time | share |
 |---|---|---|
-| YOLO-detectie | 15,50 s | 78% |
-| RTMPose-verfijning | 2,44 s | 12% |
-| Al het overige (decoderen, kleur, tracking, smoothing, afgeleiden) | 1,77 s | **9%** |
+| YOLO detection | 15.50 s | 78% |
+| RTMPose refinement | 2.44 s | 12% |
+| Everything else (decoding, color, tracking, smoothing, derivatives) | 1.77 s | **9%** |
 
-Dat laatste getal is het belangrijkste van de tabel: de CPU zit **niet** werkeloos naast een
-wachtende GPU. Was het 40% geweest, dan liep de aanvoer achter en viel er wél iets te winnen —
-maar dan door de aanvoer te repareren, niet door er inferentie bij te proppen. (Kanttekening:
-de 150 ms per YOLO-aanroep bevat ook CPU-voorbereiding binnen ultralytics, dus het pure GPU-deel
-is iets kleiner dan 78%. Aan de conclusie verandert dat niets.)
+That last number is the important one in the table: the CPU is **not** sitting idle
+next to a waiting GPU. Had it been 40%, the feed would have been lagging and there
+would have been something to gain — but by fixing the feed, not by cramming more
+inference into it. (Caveat: the 150 ms per YOLO call also includes CPU preparation
+inside ultralytics, so the pure GPU share is a bit smaller than 78%. That changes
+nothing about the conclusion.)
 
-**Twee struikelblokken die specifiek voor dit programma gelden:**
+**Two obstacles specific to this program:**
 
-- **De tracking is van nature volgordelijk.** De detectiepass draait ByteTrack met
-  `persist=True`: elk frame bouwt voort op het vorige, zo houdt elke schaatser een doorlopend ID.
-  Frames over twee werkers verdelen breekt die keten. Je zou de video in blokken moeten knippen en
-  de sporen daarna weer aaneen moeten naaien — precies de robuustheid raken waar dit programma het
-  bij kruisende schaatsers van moet hebben, voor een winst van 9%.
-- **De CPU is al bezet** met decoderen, aanleveren en verwerken. Laad je hem óók vol met eigen
-  inferentie, dan gaat het aanvoeren naar de GPU trager en kun je netto langzamer uitkomen.
+- **Tracking is inherently sequential.** The detection pass runs ByteTrack with
+  `persist=True`: every frame builds on the previous one, which is how each skater
+  keeps a continuous ID. Splitting frames across two workers breaks that chain.
+  You'd have to cut the video into blocks and stitch the tracks back together
+  afterward — hitting exactly the robustness this program relies on for crossing
+  skaters, for a 9% gain.
+- **The CPU is already busy** decoding, feeding, and processing. Load it up with its
+  own inference too and the feed to the GPU slows down, and you can end up net
+  slower.
 
-**Op een integrated GPU is het idee nóg minder kansrijk**, om een reden die niet meteen opvalt:
-een iGPU heeft geen eigen geheugen maar deelt het werkgeheugen met de processor. Allebei tegelijk
-laten rekenen betekent dat ze om dezelfde geheugenbandbreedte vechten.
+**On an integrated GPU the idea is even less promising**, for a reason that isn't
+immediately obvious: an iGPU has no memory of its own but shares system memory with
+the processor. Having both compute at once means they fight over the same memory
+bandwidth.
 
-**Wat wél helpt is minder werk, niet meer apparaten:** de bochtdetectie die er al in zit (gemeten
-45% tijdwinst op "Kim tempo") en eventueel een lichter model (`yolo26m-pose`) — maar dat laatste
-is een **meetwijziging** en hoort dus langs het protocol in hoofdstuk 5.
-
----
-
-## 7. Wat je beter niet doet
-
-- **Geen `half=True` / fp16.** Het is verleidelijk (het is op een GPU gratis snelheid), maar het
-  verandert de keypoints in de laatste decimalen en daarmee de gemeten hoeken. Dat is een
-  meetwijziging en hoort niet als bijvangst van een snelheidsmaatregel binnen te sluipen.
-- **Niet tegelijk de torch-versie ophogen** bij het wisselen naar een CUDA-build. Verander alleen
-  het `+cuXXX`-deel, dan blijft ultralytics-compatibiliteit buiten schot.
-- **rtmlib altijd met `--no-deps` installeren** — het declareert `opencv-contrib-python` en
-  overschrijft anders de bestaande cv2-installatie (staat ook in CLAUDE.md).
-- **Geen apparaatkeuze in de GUI bouwen.** De gebruiker (een trainer) kan niet weten wat hier het
-  juiste antwoord is; de code hoort dat zelf vast te stellen, zoals nu.
-- **Nooit een ultralytics-commando draaien zonder `YOLO_AUTOINSTALL=false`** op een
-  DirectML-machine — ook niet even snel vanaf de opdrachtregel. Het installeert dan de CPU-build
-  van ONNXRuntime over `onnxruntime-directml` heen en de GPU is stilletjes weg. Herstellen:
-  `pip uninstall -y onnxruntime` + `pip install --force-reinstall onnxruntime-directml`.
-- **Geen statische ONNX-export** (zie hoofdstuk 4): dat verandert de letterbox en daarmee de
-  meting.
-- **Het opwarm-frame van `_DmlYolo` niet verkleinen** om tijd te besparen. Het model is
-  dynamisch, dus elke vorm mág — maar de end2end-kop doet een TopK over `max_det` (300)
-  posities, en die zijn er op een klein beeld niet: op 64 px klapt de DirectML-sessie er
-  meteen op stuk en draait de hele analyse via de terugval alsnog op de CPU (uitgeprobeerd:
-  99 s → 224 s, mét de juiste uitkomst).
+**What actually helps is less work, not more devices:** the corner detection already
+in place (measured 45% time savings on "Kim tempo") and possibly a lighter model
+(`yolo26m-pose`) — but the latter *is* a measurement change and must go through the
+protocol in chapter 5.
 
 ---
 
-## 8. Werk verdelen over de twee laptops
+## 7. What not to do
 
-De bibliotheek staat in Google Drive, dus analyseren en bekijken hoeven niet op dezelfde machine.
-De RTX 3050-laptop blijft met ~0,19 s/frame veruit de snelste voor **analyses**; de laptop met de
-integrated GPU doet er met DirectML ~0,96 s/frame over (was ~2,14 s) en is daarmee prima voor
-**kijken en beoordelen** — afspelen, skeletten corrigeren, vergelijken, knippen — en voortaan ook
-bruikbaar voor een losse analyse tussendoor.
+- **No `half=True` / fp16.** It's tempting (free speed on a GPU), but it changes the
+  keypoints in the last decimal places and therefore the measured angles. That's a
+  measurement change and shouldn't sneak in as a side effect of a speed measure.
+- **Don't bump the torch version at the same time** as switching to a CUDA build.
+  Change only the `+cuXXX` part, keeping ultralytics compatibility out of the blast
+  radius.
+- **Always install rtmlib with `--no-deps`** — it declares `opencv-contrib-python`
+  and would otherwise overwrite the existing cv2 install (also noted in CLAUDE.md).
+- **Don't build a device choice into the GUI.** The user (a trainer) can't know
+  what's the right answer here; the code should determine that itself, as it does
+  now.
+- **Never run an ultralytics command without `YOLO_AUTOINSTALL=false`** on a
+  DirectML machine — not even a quick one from the command line. It will install the
+  CPU build of ONNXRuntime right over `onnxruntime-directml` and the GPU quietly
+  disappears. To recover: `pip uninstall -y onnxruntime` +
+  `pip install --force-reinstall onnxruntime-directml`.
+- **No static ONNX export** (see chapter 4): that changes the letterbox and with it
+  the measurement.
+- **Don't shrink `_DmlYolo`'s warm-up frame** to save time. The model is dynamic, so
+  any shape is allowed in principle — but the end2end head does a TopK over `max_det`
+  (300) positions, and a small image doesn't have that many: at 64 px the DirectML
+  session breaks immediately and the whole analysis falls back to the CPU anyway
+  (tried: 99 s → 224 s, with the correct result).
+
+---
+
+## 8. Splitting work across the two laptops
+
+The library lives in Google Drive, so analyzing and reviewing don't need to happen on
+the same machine. The RTX 3050 laptop stays by far the fastest for **analyses** at
+~0.19 s/frame; the laptop with the integrated GPU takes ~0.96 s/frame with DirectML
+(was ~2.14 s) and is therefore fine for **watching and reviewing** — playback,
+correcting skeletons, comparing, cutting — and from now on also usable for the
+occasional standalone analysis.
