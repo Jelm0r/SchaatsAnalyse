@@ -1031,7 +1031,7 @@ def list_source_videos(bieb, extern=False):
     distinction from the roadmap collapses here — every marked fragment becomes exactly
     one analysis.
 
-    Every row carries `bieb` (which library it's in — the GUI shows the shared and the
+    Every row carries `library` (which library it's in — the GUI shows the shared and the
     local one mixed together and needs to write back to the right one on a change) and
     `extern`: True for a **loose video from this pc** (absolute path,
     `source_video_for_path`), False for a recording from `opnames/`. `extern` filters:
@@ -1058,7 +1058,7 @@ def list_source_videos(bieb, extern=False):
         d["extern"] = _is_external(d["file"])
         if extern is not None and d["extern"] != extern:
             continue
-        d["bieb"] = bieb
+        d["library"] = bieb
         d["pad"] = _abs_path(bieb, d["file"])
         d["sync"] = video_sync_status(d["pad"], d["bytes"])
         uit.append(d)
@@ -1130,7 +1130,7 @@ def loose_video(bieb, lokaal, pad, meta_lezer=None):
     """The row for "View new video": in the **local** library, unless the user browsed
     to the shared library's recordings folder in the file picker — then it's simply the
     recording the scan already has for it (the same video under two keys would split
-    its points). The dict carries `bieb`, so the caller doesn't need to know itself
+    its points). The dict carries `library`, so the caller doesn't need to know itself
     which of the two it ended up in."""
     doel = bieb if _in_recordings_dir(bieb, pad) else lokaal
     return source_video_for_path(doel, pad, meta_lezer=meta_lezer)
@@ -1879,12 +1879,12 @@ if __name__ == "__main__":
         lokaal = os.path.join(tmp, "lokaal")
         os.environ[ENV_LOCAL] = lokaal
         assert local_library() == lokaal and os.path.isfile(os.path.join(lokaal, DB_NAME))
-        assert all(b["extern"] is False and b["bieb"] == bieb for b in list_source_videos(bieb))
+        assert all(b["extern"] is False and b["library"] == bieb for b in list_source_videos(bieb))
         los = os.path.join(tmp, "van de camera.mp4")
         with open(los, "wb") as f:
             f.write(b"nep-video ergens op de laptop")
         lb = loose_video(bieb, lokaal, los, meta_lezer=lambda p: (25.0, 1500))
-        assert lb["bieb"] == lokaal and lb["extern"] is True
+        assert lb["library"] == lokaal and lb["extern"] is True
         assert os.path.isabs(lb["bestand"]) and "/" in lb["bestand"]
         assert os.path.normpath(lb["pad"]) == os.path.normpath(los)
         assert lb["bytes"] is None and lb["sync"] is None   # no cloud size check
@@ -1911,7 +1911,7 @@ if __name__ == "__main__":
         # would split that recording's points.
         zelfde = loose_video(bieb, lokaal, os.path.join(recordings_path(bieb),
                                                         "Training 3 aug.mp4"))
-        assert zelfde["id"] == bron["id"] and zelfde["bieb"] == bieb
+        assert zelfde["id"] == bron["id"] and zelfde["library"] == bieb
         assert zelfde["bestand"] == f"{RECORDINGS_DIR}/Training 3 aug.mp4"
         assert len(list_source_videos(lokaal, extern=None)) == 1   # nothing added locally
 
@@ -1932,7 +1932,7 @@ if __name__ == "__main__":
         gedeeld = {b["id"] for b in list_source_videos(bieb, extern=None)}
         assert gedeeld == {bron["id"], cb["id"]}                            # ob is gone
         verhuisd = loose_video(bieb, lokaal, oud)
-        assert verhuisd["bieb"] == lokaal and verhuisd["total_frames"] == 900
+        assert verhuisd["library"] == lokaal and verhuisd["total_frames"] == 900
         assert [(m["frame"], m["label"]) for m in list_markings(lokaal, verhuisd["id"])] \
             == [(7, "start"), (99, "eind")]
         assert len(list_source_videos(lokaal, extern=None)) == 2

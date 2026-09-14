@@ -798,21 +798,89 @@ document supersedes it for anything about actual progress and lessons learned).
         `schaats_schermtest.py` quick mode -- 16/16 windows pass, including both
         `ViewWindow` variants (1 and 2 videos) and `FragmentPicker`.
 
+      - **Session 12** -- 8a for `CompareSide`/`ViewWindow`/`ViewSide`/`FragmentPicker`'s
+        own remaining Dutch names left by session 9: `speler`→`player`, `klok`→`clock`,
+        `toetsen`→`keys`, `_pauzeer_alles`→`_pause_all`, `_start_alles`→`_start_all`,
+        `_stop_alles`→`_stop_all`, `_zet_alles_snelheid`→`_set_all_speed`,
+        `_beide_naar_sync`→`_both_to_sync`, `btn_pauzeer_alles`→`btn_pause_all`,
+        `btn_start_alles`→`btn_start_all`, `btn_naar_sync`→`btn_to_sync`,
+        `chk_vanaf_sync`→`chk_from_sync`, `combo_alles_snelheid`→`combo_all_speed`,
+        `lbl_spoel`→`lbl_scrub`, plus the session 7 list: `toon`→`show_analysis` (not
+        bare `show` -- these are `QWidget` subclasses and `show()` is Qt's own
+        visibility method), `analyse_id`→`analysis_id`, `heeft_analyse`→`has_analysis`,
+        `leeg`→`clear` (+ `btn_leeg`→`btn_clear`, not on the original list but the same
+        button/method pair), `naar_sync`→`to_sync`, `bron_pad`→`source_path`,
+        `_spring`→`_jump`, `_ga_naar_tijd`→`_go_to_time`, `_verwijder`→`_remove`,
+        `fragmenten`→`fragments`, `bron`→`source`, `bieb`→`library`. `events`/
+        `sync_frame` were already English (no-op). `naam` was scoped narrowly to just
+        `CompareSide`'s own display-name attribute/constructor param (`self.name`,
+        `kant.name`) -- not the ~100 unrelated `naam` locals/dict-keys elsewhere in the
+        file, matching the established lower bar for plain local variables.
+        Also caught two identifiers one level deeper than the assigned list, found only
+        by grepping for `_<word>` variants of every renamed bare word after the main
+        pass: `_fragmenten`→`_fragments` and `_punten`→`_points` (both `FragmentPicker`'s
+        and `ViewWindow`'s own private state, underscore-prefixed so untouched by the
+        bare-word regex; leaving them Dutch next to their now-English public siblings
+        --`fragments`/`points`-- would have been an inconsistent half-finish of the same
+        feature). Six leftover Dutch inline comments in the same range (missed by
+        whichever session did this range's 8b/8c) were translated too while in there.
+        **Pattern D risk found and fixed**: `skate_db.list_source_videos()` sets a
+        literal `d["bieb"] = bieb` dict key (not just a bare identifier) that
+        `skate_gui.py` reads back as `source["bieb"]`/`bron["bieb"]` in half a dozen
+        places -- unlike the `instellingen_json`/`config.json` keys deferred to Phase 8,
+        this key is **not persisted to disk** (built fresh by the query function on
+        every call), so it could be renamed outright in the same commit rather than
+        needing a dual-write/migration: `skate_db.py`'s dict key and its own self-test
+        assertions were updated to `"library"` alongside `skate_gui.py`'s readers. Two
+        docstring mentions of `` `bieb` `` (the dict-key sense, not the parameter-name
+        sense) were updated to `` `library` `` too; `skate_db.py`'s own function
+        *parameter* named `bieb` is untouched (out of scope, matches precedent).
+        **Pattern G confirmed via `save_analysis`'s `bron_id`/`bron_start_frame`/
+        `bron_eind_frame` keyword params**: these are real keyword arguments
+        `skate_gui.py` passes into still-Dutch `skate_db.save_analysis()`, so despite
+        being visually similar to `bron_pad`/`bron` they were deliberately **left
+        untouched** (not on the assigned list either) -- renaming them without also
+        touching `save_analysis`'s signature would have broken the call. Same reasoning
+        kept `CopyDialog`/`LocalProbe`'s own unrelated `gedaan` (bytes-copied-so-far,
+        not analyzed-segments) Dutch, via line-range-scoped regex rather than a blind
+        file-wide one for `gedaan` and `punten` specifically (both words are reused
+        for an unrelated concept elsewhere in the file -- `_on_progress`'s byte counter
+        and a graph-plotting local respectively).
+        **Found and fixed one stale cross-file call site**: `schaats_schermtest.py`
+        (untranslated, Phase 9) called `G.FragmentPicker(..., gedaan=[...])` by keyword
+        -- updated to `analyzed=` (same category of fix as session 7's two stale
+        cross-references, and exactly the check the "Verification per phase" section
+        already calls mandatory: grep every call site for the old keyword before/after
+        a rename `save_analysis`-style). Also refreshed `schaats_db.py`'s shim
+        docstring, which still claimed `schaats_gui.py` (a file that no longer exists,
+        renamed in an earlier phase) needed it.
+        **Verified**: `py_compile` on all four touched files; real `import skate_gui`
+        under `.venv-yolo`; `skate_db.py`'s self-test (covers the `"library"` dict-key
+        round-trip); a throwaway script exercising `CompareSide.clear/has_analysis/
+        to_sync`, `FragmentBar.zet(fragments=, analyzed=)` + its `CLICKED` signal, and
+        `PointsBar.zet(points=)`; a repo-wide grep for every old identifier (incl.
+        `_fragmenten`/`_punten` and the `bieb`/`bron_id`-family distinctions) -- clean;
+        `schaats_schermtest.py` full run -- 16/16 windows pass, including `FragmentPicker`
+        and both `ViewWindow` variants.
+
       - **Next up**, in order (line numbers will have drifted -- re-`grep -n "^class "`
         first, don't trust these verbatim):
-        - **8a for `CompareSide`/`ViewWindow`/`ViewSide`/`FragmentPicker`'s own
-          remaining Dutch names** that session 9 deliberately left alone because they
-          belong to those classes, not `MainWindow`: `speler`, `klok`, `toetsen`,
-          `_pauzeer_alles`, `_start_alles`, `_stop_alles`, `_zet_alles_snelheid`,
-          `_beide_naar_sync`, `btn_pauzeer_alles`, `btn_start_alles`, `btn_naar_sync`,
-          `chk_vanaf_sync`, `combo_alles_snelheid`, `lbl_spoel`, plus the session 7
-          list (`toon`, `analyse_id`, `heeft_analyse`, `leeg`, `naar_sync`, `events`,
-          `sync_frame`, `naam`, `gedaan`, `fragmenten`, `bron_pad`, `_spring`,
-          `_ga_naar_tijd`, `_verwijder`, `punten`, `bron`, `bieb`).
+        - A few identifiers deliberately left Dutch this session for being one step
+          removed from the assigned list or genuinely shared with an untranslated
+          class, should a future session want them: `kant`/`kanten` (ViewWindow's list
+          of `ViewSide`s, and the same word in `MainWindow`'s own compare-page code --
+          a much bigger, separate rename), `lbl_punten`/`lbl_geen_punten`/
+          `punten_aan`/`_punt_kant` (siblings of `_punten`, not renamed), `lopend`/
+          `selectie` (`FragmentBar`'s other two `zet()` keywords, siblings of
+          `fragments`/`analyzed`, not renamed since they weren't on the assigned list
+          and `cursor` there is already English).
         - The deferred `instellingen_json`/`config.json` key translation + one-time
           library rewrite (see "Deferred to Phase 8" below) -- do this once both the
           reader (`skate_db.py`) and every writer (`MainWindow`'s `_new_analysis`/
-          `_new_batch_analysis`) can be changed together in one commit.
+          `_new_batch_analysis`) can be changed together in one commit. This is also
+          the right moment to revisit `save_analysis`'s own still-Dutch `bron_id`/
+          `bron_start_frame`/`bron_eind_frame` parameters (see this session's Pattern G
+          note above) and the day's Phase 8-scoped identifiers noted above.
         - `main()` is fully translated (part of session 8, and session 9 confirmed
           nothing in it needed a rename) -- nothing left there.
         Re-`grep -n "^class \|^def "` at the start of each session rather than trusting

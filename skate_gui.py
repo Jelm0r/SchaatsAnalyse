@@ -454,11 +454,11 @@ OPNAME_KOL_NAAM, OPNAME_KOL_DUUR, OPNAME_KOL_LOKAAL = 0, 1, 2
 OPNAME_KOL_STATUS, OPNAME_KOL_TELLING, OPNAME_KOL_NOTITIE = 3, 4, 5
 
 
-def _opname_sleutel(bron):
+def _opname_sleutel(source):
     """Identity of a row in the recordings table: (library, id). The id alone isn't
     enough — the list shows both the shared work list and the loose videos from the
     local library, two databases whose ids both start at 1."""
-    return (bron["bieb"], bron["id"])
+    return (source["library"], source["id"])
 
 # Display for `skate_db.file_is_local`: (text, color, explanation). Without this column
 # there's no signal at all that a recording is still in the cloud — the file *is* there,
@@ -745,7 +745,7 @@ def show_dialog(dlg):
     `VideoPlayer` and `VideoCapture` inside.
 
     `deleteLater()` and not `WA_DeleteOnClose`, because the caller reads the outcome
-    (`dlg.doel_punt`, `dlg.fragmenten`, ...) only *after* `exec()`. Verified: the dialog
+    (`dlg.doel_punt`, `dlg.fragments`, ...) only *after* `exec()`. Verified: the dialog
     stays alive until we're back in the main event loop — straight through a
     `QProgressDialog` (which does `processEvents`) and through a nested dialog — so every
     call site can safely read it, while it's cleaned up well before the analysis starts.
@@ -1061,12 +1061,12 @@ class TargetPicker(QDialog):
             y0 = min(max(self._pan[1] * ph - ch / 2, 0.0), ph - ch)
             ix0, iy0 = int(round(x0)), int(round(y0))
             icw, ich = min(int(round(cw)), pw - ix0), min(int(round(ch)), ph - iy0)
-            bron = self._pix.copy(ix0, iy0, icw, ich)
+            source = self._pix.copy(ix0, iy0, icw, ich)
             self._crop_norm = (ix0 / pw, iy0 / ph, icw / pw, ich / ph)
         else:
-            bron = self._pix
+            source = self._pix
             self._crop_norm = (0.0, 0.0, 1.0, 1.0)
-        scaled = bron.scaled(self.label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = source.scaled(self.label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self._scaled_size = scaled.size()
         if self._box is not None:
             x0, y0 = self._norm_to_pixmap(self._box[0], self._box[1])
@@ -1819,14 +1819,14 @@ class AnalysisWorker(QThread):
     thread too: the video copy to the media folder can take a while."""
     progress = Signal(int, int)
     status = Signal(str)                     # text for the progress dialog (busy phase)
-    done = Signal(object, object, object, object)    # info, resultaten, events, analyse_id
+    done = Signal(object, object, object, object)    # info, resultaten, events, analysis_id
     error = Signal(str)                      # the analysis itself failed
     save_error = Signal(str)                 # only the save failed (the analysis exists)
     warning = Signal(str)                    # silent fallback in the analysis (e.g. a click hit nobody)
 
     def __init__(self, input_pad, model_pad, smooth_n=5, threshold=0.015, force_fps=None,
                  doel_punt=None, horizon_deg=0.0, auto_horizon=False, smooth_landmarks=True,
-                 perspectief=None, bieb=None, schaatser_id=None, titel=None,
+                 perspectief=None, library=None, schaatser_id=None, titel=None,
                  instellingen=None, backend=None, aangemaakt_door="", bocht=True,
                  deinterlacen=False, doel_kader=None):
         super().__init__()
@@ -1843,7 +1843,7 @@ class AnalysisWorker(QThread):
         self.bocht = bocht
         self.deinterlacen = deinterlacen
         self.perspectief = perspectief
-        self.bieb = bieb
+        self.library = library
         self.schaatser_id = schaatser_id
         self.titel = titel
         self.instellingen = instellingen
@@ -1882,18 +1882,18 @@ class AnalysisWorker(QThread):
 
         # Save to the library; if this fails, the (long) analysis isn't lost -- the
         # results are still shown, just not kept.
-        analyse_id = None
-        if self.bieb is not None and self.schaatser_id is not None:
+        analysis_id = None
+        if self.library is not None and self.schaatser_id is not None:
             self.status.emit("Saving to the library...")
             try:
-                analyse_id = skate_db.save_analysis(
-                    self.bieb, self.schaatser_id, self.titel, self.input_pad,
+                analysis_id = skate_db.save_analysis(
+                    self.library, self.schaatser_id, self.titel, self.input_pad,
                     info, resultaten, events,
                     backend=self.backend, instellingen=self.instellingen,
                     aangemaakt_door=self.aangemaakt_door)
             except Exception as e:
                 self.save_error.emit(str(e))
-        self.done.emit(info, resultaten, events, analyse_id)
+        self.done.emit(info, resultaten, events, analysis_id)
 
 
 class BatchWorker(QThread):
@@ -1905,15 +1905,15 @@ class BatchWorker(QThread):
     task_start = Signal(int, int, str)           # index (0-based), total, titel
     progress   = Signal(int, int)                # frame_nr, total of the current video
     status     = Signal(str)                     # busy text (video copy to the library)
-    task_done  = Signal(int, object)             # index, analyse_id (or None)
+    task_done  = Signal(int, object)             # index, analysis_id (or None)
     task_error = Signal(int, str)                # index, error message -- the batch continues
     all_done   = Signal(list, list, list)        # succeeded titles, [(titel, message)] failed,
                                                  # [(titel, message)] warnings
 
-    def __init__(self, taken, bieb, backend, aangemaakt_door=""):
+    def __init__(self, taken, library, backend, aangemaakt_door=""):
         super().__init__()
         self.taken = taken
-        self.bieb = bieb
+        self.library = library
         self.backend = backend
         self.aangemaakt_door = aangemaakt_door
         self.cancelled = False
@@ -1963,8 +1963,8 @@ class BatchWorker(QThread):
                 if self.cancelled:
                     break                        # don't start a long video copy anymore
                 self.status.emit("Saving to the library...")
-                analyse_id = skate_db.save_analysis(
-                    self.bieb, taak["schaatser_id"], taak["titel"], taak["input_pad"],
+                analysis_id = skate_db.save_analysis(
+                    self.library, taak["schaatser_id"], taak["titel"], taak["input_pad"],
                     info, resultaten, events,
                     backend=self.backend, instellingen=taak["instellingen"],
                     aangemaakt_door=self.aangemaakt_door,
@@ -1972,7 +1972,7 @@ class BatchWorker(QThread):
                     bron_start_frame=taak.get("bron_start_frame"),
                     bron_eind_frame=taak.get("bron_eind_frame"))
                 geslaagd.append(taak["titel"])
-                self.task_done.emit(i, analyse_id)
+                self.task_done.emit(i, analysis_id)
             except AnalysisAborted:
                 break                            # shutting down: the rest of the row is dropped
             except Exception as e:
@@ -2268,20 +2268,20 @@ class BatchAnalysisDialog(QDialog):
         # The trainer only needs to fill in skater + titel -- the rest is exactly the
         # existing batch flow.
         for f in (voorgevuld or []):
-            self._add_row(f["input_pad"], f.get("titel"), bron={
+            self._add_row(f["input_pad"], f.get("titel"), source={
                 "bron_id": f.get("bron_id"),
                 "bron_start_frame": f.get("bron_start_frame"),
                 "bron_eind_frame": f.get("bron_eind_frame")})
 
-    def _add_row(self, pad, titel=None, bron=None):
+    def _add_row(self, pad, titel=None, source=None):
         """One video row: pad behind the first cell, skater combo, editable titel.
-        `bron` (phase 8) rides along so the analysis knows which piece of which
+        `source` (phase 8) rides along so the analysis knows which piece of which
         recording this clip comes from."""
         r = self.tabel.rowCount()
         self.tabel.insertRow(r)
         item_pad = QTableWidgetItem(os.path.basename(pad))
         item_pad.setData(Qt.UserRole, pad)                 # full path behind the row
-        item_pad.setData(Qt.UserRole + 1, bron)
+        item_pad.setData(Qt.UserRole + 1, source)
         item_pad.setFlags(item_pad.flags() & ~Qt.ItemIsEditable)
         self.tabel.setItem(r, 0, item_pad)
         self.tabel.setCellWidget(r, 1, self._make_skater_combo())
@@ -2363,15 +2363,15 @@ class AnalysisPicker(QDialog):
     row to set up a comparison, and after that per side to switch analyses.
     """
 
-    def __init__(self, bieb, titel="Choose analysis", voorkeur_schaatser_id=None, parent=None):
+    def __init__(self, library, titel="Choose analysis", voorkeur_schaatser_id=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(titel)
-        self.bieb = bieb
+        self.library = library
 
         form = QFormLayout(self)
         self.combo_schaatser = QComboBox()
         # Skip skaters with no analyses -- that way the analysis combo can never be empty.
-        for s in skate_db.list_skaters(bieb):
+        for s in skate_db.list_skaters(library):
             if not s["aantal_analyses"]:
                 continue
             tekst = s["naam"] + (f" ({s['geboortejaar']})" if s["geboortejaar"] else "")
@@ -2400,7 +2400,7 @@ class AnalysisPicker(QDialog):
         self.combo_analyse.clear()
         sid = self.combo_schaatser.currentData()
         if sid is not None:
-            for a in skate_db.list_analyses(self.bieb, sid):
+            for a in skate_db.list_analyses(self.library, sid):
                 gem = f"{a['gem_hoek']:.1f}°" if a["gem_hoek"] is not None else "—"
                 self.combo_analyse.addItem(
                     f"{a['datum']} — {a['titel']}  "
@@ -2408,7 +2408,7 @@ class AnalysisPicker(QDialog):
         self._ok.setEnabled(self.combo_analyse.count() > 0)
 
     @property
-    def analyse_id(self):
+    def analysis_id(self):
         return self.combo_analyse.currentData()
 
     @property
@@ -2417,7 +2417,7 @@ class AnalysisPicker(QDialog):
         if sid is None:
             return ""
         # the combo text may carry the birth year too; for the heading we only want the name
-        naam = next((s["naam"] for s in skate_db.list_skaters(self.bieb)
+        naam = next((s["naam"] for s in skate_db.list_skaters(self.library)
                      if s["id"] == sid), "")
         return naam
 
@@ -4064,10 +4064,10 @@ class CompareSide(QWidget):
     an incomplete push is exactly the one that's systematically too steep.
     """
 
-    def __init__(self, naam, kies_callback, parent=None):
+    def __init__(self, name, kies_callback, parent=None):
         super().__init__(parent)
-        self.naam = naam
-        self.analyse_id = None
+        self.name = name
+        self.analysis_id = None
         self.events = []
         self.sync_frame = 0
 
@@ -4077,7 +4077,7 @@ class CompareSide(QWidget):
         kop = QHBoxLayout()
         # ElideLabel: a long name + title must not make this side (and so the main window)
         # wider than the screen -- see the class.
-        self.lbl_titel = ElideLabel(f"{naam} — no analysis chosen yet")
+        self.lbl_titel = ElideLabel(f"{name} — no analysis chosen yet")
         self.lbl_titel.setStyleSheet("font-weight: bold; padding: 2px;")
         kop.addWidget(self.lbl_titel, stretch=1)
         self.btn_kies = QPushButton("Choose analysis...")
@@ -4085,10 +4085,10 @@ class CompareSide(QWidget):
         kop.addWidget(self.btn_kies)
         # Clearing is wired up from outside (see _build_compare_page): the master clock
         # must let go first, and it doesn't know this side the other way around.
-        self.btn_leeg = QPushButton("✕")
-        self.btn_leeg.setToolTip("Clear this side.")
-        self.btn_leeg.setEnabled(False)
-        kop.addWidget(self.btn_leeg)
+        self.btn_clear = QPushButton("✕")
+        self.btn_clear.setToolTip("Clear this side.")
+        self.btn_clear.setEnabled(False)
+        kop.addWidget(self.btn_clear)
         v.addLayout(kop)
 
         # No speed control of its own: the shared control at the bottom of the compare
@@ -4097,11 +4097,11 @@ class CompareSide(QWidget):
         # into two from ~435, and that row plus 20 px of picture is exactly what the
         # compare page (the tallest of the three) had too much of on a 1280x720 screen.
         # Two 440-wide sides still fit comfortably on 1280 (see schaats_schermtest.py).
-        self.speler = VideoPlayer(min_size=(440, 180), show_speed=False)
+        self.player = VideoPlayer(min_size=(440, 180), show_speed=False)
         # The HUD is drawn at fixed full-frame positions and is unreadable in a half
         # panel; can be switched back on per side.
-        self.speler.chk_hud.setChecked(False)
-        v.addWidget(self.speler, stretch=1)
+        self.player.chk_hud.setChecked(False)
+        v.addWidget(self.player, stretch=1)
 
         rij_sync = QHBoxLayout()
         self.btn_sync = QPushButton("⚑ Set sync here")
@@ -4129,60 +4129,60 @@ class CompareSide(QWidget):
         self.btn_sync.setEnabled(False)
 
     # ── Filling / emptying ───────────────────────────────────────────────
-    def toon(self, analyse_id, schaatser_naam, data):
+    def show_analysis(self, analysis_id, schaatser_naam, data):
         """Takes a loaded analysis (dict from MainWindow._load_analysis_data) into use.
 
         Loading the same analysis again (e.g. after an edit) keeps the sync point: that
         belongs to the video, not to the loading. A *different* analysis starts over at
         frame 0."""
-        zelfde = analyse_id == self.analyse_id
-        self.analyse_id = analyse_id
+        zelfde = analysis_id == self.analysis_id
+        self.analysis_id = analysis_id
         self.events = data["events"]
         self.sync_frame = (min(self.sync_frame, max(0, len(data["resultaten"]) - 1))
                            if zelfde else 0)
         self.lbl_titel.setText(f"{schaatser_naam} — {data['titel']}")
-        self.speler.load(data["info"], data["resultaten"], data["video_pad"],
+        self.player.load(data["info"], data["resultaten"], data["video_pad"],
                          data.get("deinterlaced", False))
         self._fill_table()
         self.btn_kies.setText("Switch...")
         self.btn_sync.setEnabled(True)
-        self.btn_leeg.setEnabled(True)
-        self.speler.go_to(self.sync_frame)
+        self.btn_clear.setEnabled(True)
+        self.player.go_to(self.sync_frame)
         self._show_sync_label()
 
-    def leeg(self):
+    def clear(self):
         """Releases the video (needed before the media folder can be deleted)."""
-        self.speler.release()
-        self.analyse_id = None
+        self.player.release()
+        self.analysis_id = None
         self.events = []
         self.sync_frame = 0
         self.tabel.setRowCount(0)
-        self.lbl_titel.setText(f"{self.naam} — no analysis chosen yet")
+        self.lbl_titel.setText(f"{self.name} — no analysis chosen yet")
         self.lbl_sync.setText("sync: frame 0")
         self.btn_kies.setText("Choose analysis...")
         self.btn_sync.setEnabled(False)
-        self.btn_leeg.setEnabled(False)
+        self.btn_clear.setEnabled(False)
 
-    def heeft_analyse(self):
-        return self.analyse_id is not None and bool(self.speler.resultaten)
+    def has_analysis(self):
+        return self.analysis_id is not None and bool(self.player.resultaten)
 
     # ── Sync point ───────────────────────────────────────────────────────
     def _set_sync(self):
-        if not self.heeft_analyse():
+        if not self.has_analysis():
             return
-        self.sync_frame = max(0, self.speler.huidige_idx)
+        self.sync_frame = max(0, self.player.huidige_idx)
         self._show_sync_label()
 
     def _show_sync_label(self):
-        if not self.heeft_analyse():
+        if not self.has_analysis():
             self.lbl_sync.setText("sync: frame 0")
             return
-        tijd = self.speler.resultaten[self.sync_frame].tijd
+        tijd = self.player.resultaten[self.sync_frame].tijd
         self.lbl_sync.setText(f"sync: frame {self.sync_frame}  (t={tijd:.2f}s)")
 
-    def naar_sync(self):
-        if self.heeft_analyse():
-            self.speler.go_to(self.sync_frame)
+    def to_sync(self):
+        if self.has_analysis():
+            self.player.go_to(self.sync_frame)
 
     # ── Table ────────────────────────────────────────────────────────────
     def _fill_table(self):
@@ -4202,7 +4202,7 @@ class CompareSide(QWidget):
 
     def _click_row(self, rij, _kolom):
         if 0 <= rij < len(self.events):
-            self.speler.go_to(self.events[rij].start_frame)
+            self.player.go_to(self.events[rij].start_frame)
 
 
 # ── Trimming fragments from a long recording (phase 8) ─────────────────────────
@@ -4241,7 +4241,7 @@ class FragmentBar(QWidget):
     nothing is merged or shortened automatically. The trainer adjusts it themself or leaves
     it as it is (the trimming is entirely manual).
     """
-    CLICKED = Signal(int)        # index into `fragmenten` of the clicked block (-1 = beside it)
+    CLICKED = Signal(int)        # index into `fragments` of the clicked block (-1 = beside it)
 
     HEIGHT = 26
     COLOR_BACKGROUND = QColor(45, 45, 45)
@@ -4260,21 +4260,21 @@ class FragmentBar(QWidget):
             "Green = just marked · gray = already analyzed · orange = still running · "
             "red = overlap.\nClick a block to jump to it.")
         self.totaal = 1
-        self.fragmenten = []      # [(start, eind)] — zojuist gemarkeerd
-        self.gedaan = []          # [(start, eind, label)] — uit een eerdere sessie
-        self.lopend = None        # startframe van het nog niet gestopte fragment
+        self.fragments = []      # [(start, eind)] — just marked
+        self.analyzed = []          # [(start, eind, label)] — from an earlier session
+        self.lopend = None        # start frame of the not-yet-stopped fragment
         self.cursor = 0
         self.selectie = -1
 
-    def zet(self, totaal=None, fragmenten=None, gedaan=None, lopend=..., cursor=None,
+    def zet(self, totaal=None, fragments=None, analyzed=None, lopend=..., cursor=None,
             selectie=None):
         """Update everything the bar shows in one call (and redraw)."""
         if totaal is not None:
             self.totaal = max(1, int(totaal))
-        if fragmenten is not None:
-            self.fragmenten = list(fragmenten)
-        if gedaan is not None:
-            self.gedaan = list(gedaan)
+        if fragments is not None:
+            self.fragments = list(fragments)
+        if analyzed is not None:
+            self.analyzed = list(analyzed)
         if lopend is not ...:
             self.lopend = lopend
         if cursor is not None:
@@ -4291,9 +4291,9 @@ class FragmentBar(QWidget):
         p.fillRect(self.rect(), self.COLOR_BACKGROUND)
         h = self.height()
 
-        for start, eind, _label in self.gedaan:
+        for start, eind, _label in self.analyzed:
             self._blok(p, start, eind, self.COLOR_DONE, 4, h - 8)
-        for i, (start, eind) in enumerate(self.fragmenten):
+        for i, (start, eind) in enumerate(self.fragments):
             self._blok(p, start, eind, self.COLOR_NEW, 2, h - 4)
             if i == self.selectie:
                 p.setPen(QPen(self.COLOR_SELECTION, 2))
@@ -4301,8 +4301,8 @@ class FragmentBar(QWidget):
                 x0, x1 = self._x(start), self._x(eind)
                 p.drawRect(QRect(x0, 1, max(2, x1 - x0), h - 3))
         # Overlap after the blocks, so the hatching lies on top of them.
-        for i, (a0, a1) in enumerate(self.fragmenten):
-            for b0, b1 in self.fragmenten[i + 1:]:
+        for i, (a0, a1) in enumerate(self.fragments):
+            for b0, b1 in self.fragments[i + 1:]:
                 s, e = max(a0, b0), min(a1, b1)
                 if s <= e:
                     self._blok(p, s, e, self.COLOR_OVERLAP, 2, h - 4)
@@ -4320,7 +4320,7 @@ class FragmentBar(QWidget):
 
     def mousePressEvent(self, event):
         frame = int(event.position().x() / max(1, self.width() - 1) * self.totaal)
-        for i, (start, eind) in enumerate(self.fragmenten):
+        for i, (start, eind) in enumerate(self.fragments):
             if start <= frame <= eind:
                 self.CLICKED.emit(i)
                 return
@@ -4345,14 +4345,14 @@ class FragmentPicker(QDialog):
     measurement -- and `show_overlay=False`, since there's no analysis to draw.
     """
 
-    def __init__(self, bron_pad, info, gedaan=(), deinterlacen=False, parent=None):
+    def __init__(self, source_path, info, analyzed=(), deinterlacen=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Trim fragments — {os.path.basename(bron_pad)}")
+        self.setWindowTitle(f"Trim fragments — {os.path.basename(source_path)}")
         self.info = info
         self.fps = info.fps or 30.0
-        self._fragmenten = []          # [(start, eind)] in markeervolgorde
-        self._start_open = None        # startframe van het lopende fragment
-        self._stam = os.path.splitext(os.path.basename(bron_pad))[0]
+        self._fragments = []          # [(start, eind)] in markeervolgorde
+        self._start_open = None        # start frame of the running fragment
+        self._stam = os.path.splitext(os.path.basename(source_path))[0]
 
         # Keep it tight: this window has to fit entirely on a laptop screen (1280x800,
         # working area 752 px) -- otherwise the button bar sinks below the edge and
@@ -4367,19 +4367,19 @@ class FragmentPicker(QDialog):
         uitleg.setWordWrap(True)
         v.addWidget(uitleg)
 
-        self.lbl_spoel = QLabel("")
-        self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
+        self.lbl_scrub = QLabel("")
+        self.lbl_scrub.setStyleSheet("color: #5aaaf0;")
 
-        self.speler = VideoPlayer(min_size=(400, 200), fast_seek=True,
+        self.player = VideoPlayer(min_size=(400, 200), fast_seek=True,
                                   show_overlay=False)
-        self.speler.on_frame_shown = self._frame_shown
-        v.addWidget(self.speler, stretch=1)
+        self.player.on_frame_shown = self._frame_shown
+        v.addWidget(self.player, stretch=1)
 
         # The bar hangs inside the player (under the scrub slider), so it has the same
         # width as the timeline and shifts along with it.
         self.balk = FragmentBar()
         self.balk.CLICKED.connect(self._click_bar)
-        self.speler.add_bottom_bar(self.balk)
+        self.player.add_bottom_bar(self.balk)
 
         # Navigation aid: on a half-hour recording the slider is too coarse to find a
         # push again.
@@ -4388,19 +4388,19 @@ class FragmentPicker(QDialog):
                            ("+1 s", 1), ("+10 s", 10), ("+1 min", 60)):
             knop = QPushButton(label)
             knop.setMaximumWidth(72)
-            knop.clicked.connect(lambda _=False, s=sec: self._spring(s))
+            knop.clicked.connect(lambda _=False, s=sec: self._jump(s))
             rij_nav.addWidget(knop)
         rij_nav.addWidget(QLabel("Go to"))
         self.veld_tijd = QLineEdit()
         self.veld_tijd.setPlaceholderText("m:ss")
         self.veld_tijd.setFixedWidth(80)
-        self.veld_tijd.returnPressed.connect(self._ga_naar_tijd)
+        self.veld_tijd.returnPressed.connect(self._go_to_time)
         rij_nav.addWidget(self.veld_tijd)
         knop_ga = QPushButton("Go")
         knop_ga.setMaximumWidth(48)
-        knop_ga.clicked.connect(self._ga_naar_tijd)
+        knop_ga.clicked.connect(self._go_to_time)
         rij_nav.addWidget(knop_ga)
-        rij_nav.addWidget(self.lbl_spoel)
+        rij_nav.addWidget(self.lbl_scrub)
         rij_nav.addStretch(1)
         v.addWidget(rij_nav)
 
@@ -4436,9 +4436,9 @@ class FragmentPicker(QDialog):
         onder.addLayout(rechts, stretch=1)
         v.addLayout(onder)
 
-        if gedaan:
+        if analyzed:
             info_gedaan = QLabel(
-                f"Gray in the bar: {len(gedaan)} stretch(es) of this recording are "
+                f"Gray in the bar: {len(analyzed)} stretch(es) of this recording are "
                 f"already analyzed.")
             info_gedaan.setStyleSheet("color: #888;")
             v.addWidget(info_gedaan)
@@ -4459,21 +4459,21 @@ class FragmentPicker(QDialog):
         # nothing has been analyzed yet. `box_sequence` then returns None and the zoom
         # stays manual.
         resultaten = [FrameResult(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.load(info, resultaten, bron_pad, deinterlacen)
+        self.player.load(info, resultaten, source_path, deinterlacen)
         self.balk.zet(totaal=len(resultaten),
-                      gedaan=[(f["start_frame"], f["eind_frame"],
-                               f["titel"] or "") for f in gedaan])
-        self.speler.go_to(0)
+                      analyzed=[(f["start_frame"], f["eind_frame"],
+                               f["titel"] or "") for f in analyzed])
+        self.player.go_to(0)
         self._refresh()
 
         # The same keys as everywhere else, plus S/E/Del for marking. Deliberately no
         # QShortcut anymore for those three: a letter shortcut would also fire while
         # typing in the "go to" field, and the filter leaves a focused text field alone.
-        self.toetsen = PlayerKeys(
-            self, lambda: [self.speler],
+        self.keys = PlayerKeys(
+            self, lambda: [self.player],
             extra={Qt.Key_S: self._start_fragment, Qt.Key_E: self._stop_fragment,
                    Qt.Key_Delete: self._delete_selection},
-            on_scrub=self.lbl_spoel.setText)
+            on_scrub=self.lbl_scrub.setText)
 
         # Only after everything is in place: that way the clamp in set_window_size can
         # work against a final layout (and a `resize()` is ignored once the content is
@@ -4484,7 +4484,7 @@ class FragmentPicker(QDialog):
     def _start_fragment(self):
         if self._start_open is not None:
             return
-        self._start_open = self.speler.huidige_idx
+        self._start_open = self.player.huidige_idx
         self._refresh()
 
     def _stop_fragment(self):
@@ -4492,26 +4492,26 @@ class FragmentPicker(QDialog):
         fragment: better to record nothing than to trim a reversed stretch."""
         if self._start_open is None:
             return
-        eind = self.speler.huidige_idx
+        eind = self.player.huidige_idx
         if eind < self._start_open:
             QMessageBox.information(
                 self, "Stop is before the start",
                 "The end of a fragment lies before its start. Scrub further ahead and "
                 "press Stop again, or start this fragment over.")
             return
-        self._fragmenten.append((self._start_open, eind))
+        self._fragments.append((self._start_open, eind))
         self._start_open = None
-        self._refresh(selectie=len(self._fragmenten) - 1)
+        self._refresh(selectie=len(self._fragments) - 1)
 
     def _delete_selection(self):
         rij = self.tabel.currentRow()
-        if 0 <= rij < len(self._fragmenten):
-            self._fragmenten.pop(rij)
+        if 0 <= rij < len(self._fragments):
+            self._fragments.pop(rij)
             self._refresh()
 
     def _click_row(self, rij, _kolom=0):
-        if 0 <= rij < len(self._fragmenten):
-            self.speler.go_to(self._fragmenten[rij][0])
+        if 0 <= rij < len(self._fragments):
+            self.player.go_to(self._fragments[rij][0])
             self.balk.zet(selectie=rij)
 
     def _click_bar(self, index):
@@ -4521,15 +4521,15 @@ class FragmentPicker(QDialog):
         self._click_row(index)
 
     # ── Navigation ───────────────────────────────────────────────────────
-    def _spring(self, seconden):
-        self.speler.go_to(self.speler.huidige_idx + int(round(seconden * self.fps)))
+    def _jump(self, seconden):
+        self.player.go_to(self.player.huidige_idx + int(round(seconden * self.fps)))
 
-    def _ga_naar_tijd(self):
+    def _go_to_time(self):
         frame = _read_time(self.veld_tijd.text(), self.fps)
         if frame is None:
             QMessageBox.information(self, "Time", "Use m:ss (for example 12:30).")
             return
-        self.speler.go_to(frame)
+        self.player.go_to(frame)
 
     def _frame_shown(self, idx):
         self.balk.zet(cursor=idx, lopend=self._start_open)
@@ -4546,8 +4546,8 @@ class FragmentPicker(QDialog):
             "" if self._start_open is None
             else f"Running from {_time_text(self._start_open, self.fps)}")
 
-        self.tabel.setRowCount(len(self._fragmenten))
-        for i, (start, eind) in enumerate(self._fragmenten):
+        self.tabel.setRowCount(len(self._fragments))
+        for i, (start, eind) in enumerate(self._fragments):
             duur = (eind - start + 1) / self.fps
             waarden = [str(i + 1),
                        f"{_time_text(start, self.fps)} – {_time_text(eind, self.fps)}",
@@ -4559,21 +4559,21 @@ class FragmentPicker(QDialog):
             knop = QPushButton("✕")
             knop.setMaximumWidth(30)
             knop.setToolTip("Remove this fragment")
-            knop.clicked.connect(lambda _=False, r=i: self._verwijder(r))
+            knop.clicked.connect(lambda _=False, r=i: self._remove(r))
             self.tabel.setCellWidget(i, 3, knop)
-        if selectie is not None and 0 <= selectie < len(self._fragmenten):
+        if selectie is not None and 0 <= selectie < len(self._fragments):
             self.tabel.selectRow(selectie)
 
-        self.balk.zet(fragmenten=self._fragmenten, lopend=self._start_open,
+        self.balk.zet(fragments=self._fragments, lopend=self._start_open,
                       selectie=selectie if selectie is not None else -1)
-        n = len(self._fragmenten)
+        n = len(self._fragments)
         self._ok.setText(f"Done — analyze {n} fragment{'s' if n != 1 else ''}"
                          if n else "Done")
         self._ok.setEnabled(n > 0)
 
-    def _verwijder(self, rij):
-        if 0 <= rij < len(self._fragmenten):
-            self._fragmenten.pop(rij)
+    def _remove(self, rij):
+        if 0 <= rij < len(self._fragments):
+            self._fragments.pop(rij)
             self._refresh()
 
     # ── Closing ──────────────────────────────────────────────────────────
@@ -4589,25 +4589,25 @@ class FragmentPicker(QDialog):
         self.accept()
 
     @property
-    def fragmenten(self):
+    def fragments(self):
         """[(start_frame, eind_frame, naam)] sorted by start frame. The name doubles as
         both the clip's file name and the suggested analysis title; the start time in it
         makes it recognizable and, in practice, unique (trim_fragments dedupes the rest)."""
         return [(start, eind, f"{self._stam} {_time_text(start, self.fps).replace(':', '-')}")
-                for start, eind in sorted(self._fragmenten)]
+                for start, eind in sorted(self._fragments)]
 
     def changeEvent(self, event):
         # No longer active (alt-tab, a message box in front): the key-release then never
         # arrives and scrubbing would run forever.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
-            self.toetsen.stop_scrubbing()
+            self.keys.stop_scrubbing()
         super().changeEvent(event)
 
     def done(self, resultaat):
         # Not closeEvent: a modal dialog that closes via accept()/reject() doesn't get one.
         # The video file must be released, or Windows keeps holding the recording.
-        self.toetsen.detach()
-        self.speler.release()
+        self.keys.detach()
+        self.player.release()
         super().done(resultaat)
 
 
@@ -4620,7 +4620,7 @@ class PointsBar(QWidget):
     Clicking on (or right next to) a tick jumps to it; that's the fastest way back to the
     same picture, while the list beside it mainly serves to show *what* a point is.
     """
-    CLICKED = Signal(int)        # index into `punten` of the clicked tick (-1 = beside it)
+    CLICKED = Signal(int)        # index into `points` of the clicked tick (-1 = beside it)
 
     HEIGHT = 22
     HIT_PX = 6               # how far off a tick a click still counts
@@ -4634,16 +4634,16 @@ class PointsBar(QWidget):
         self.setFixedHeight(self.HEIGHT)
         self.setToolTip("Saved points in this recording. Click a tick to jump to it.")
         self.totaal = 1
-        self.punten = []          # [(frame, label)] op framenummer gesorteerd
+        self.points = []          # [(frame, label)] sorted by frame number
         self.cursor = 0
         self.selectie = -1
 
-    def zet(self, totaal=None, punten=None, cursor=None, selectie=None):
+    def zet(self, totaal=None, points=None, cursor=None, selectie=None):
         """Update everything the bar shows in one call (and redraw)."""
         if totaal is not None:
             self.totaal = max(1, int(totaal))
-        if punten is not None:
-            self.punten = list(punten)
+        if points is not None:
+            self.points = list(points)
         if cursor is not None:
             self.cursor = int(cursor)
         if selectie is not None:
@@ -4657,7 +4657,7 @@ class PointsBar(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), self.COLOR_BACKGROUND)
         h = self.height()
-        for i, (frame, _label) in enumerate(self.punten):
+        for i, (frame, _label) in enumerate(self.points):
             x = self._x(frame)
             kleur = self.COLOR_SELECTION if i == self.selectie else self.COLOR_POINT
             p.fillRect(QRect(max(0, x - 1), 3, 3, h - 6), kleur)
@@ -4674,7 +4674,7 @@ class PointsBar(QWidget):
     def mousePressEvent(self, event):
         klik_x = event.position().x()
         dichtst, beste = -1, self.HIT_PX + 1
-        for i, (frame, _label) in enumerate(self.punten):
+        for i, (frame, _label) in enumerate(self.points):
             afstand = abs(self._x(frame) - klik_x)
             if afstand < beste:
                 dichtst, beste = i, afstand
@@ -4692,13 +4692,13 @@ class ViewSide(QWidget):
     and there's nothing to sync.
     """
 
-    def __init__(self, bron, info, parent=None):
+    def __init__(self, source, info, parent=None):
         super().__init__(parent)
-        self.bron = bron
+        self.source = source
         self.info = info
         self.fps = info.fps or 30.0
         self.sync_frame = 0
-        self.punten_aan = bron.get("id") is not None
+        self.punten_aan = source.get("id") is not None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -4707,26 +4707,26 @@ class ViewSide(QWidget):
         self.kop = QWidget()
         kop = QHBoxLayout(self.kop)
         kop.setContentsMargins(0, 0, 0, 0)
-        self.lbl_titel = ElideLabel(bron["naam"])   # long file name: shorten, don't widen
+        self.lbl_titel = ElideLabel(source["naam"])   # long file name: shorten, don't widen
         self.lbl_titel.setStyleSheet("font-weight: bold;")
         kop.addWidget(self.lbl_titel, stretch=1)
         # Closing is wired up from outside (see ViewWindow._voeg_kant): the clock must
         # let go first, and it doesn't know this side the other way around.
-        self.btn_leeg = QPushButton("✕")
-        self.btn_leeg.setToolTip("Close this video; the other one stays.")
-        kop.addWidget(self.btn_leeg)
+        self.btn_clear = QPushButton("✕")
+        self.btn_clear.setToolTip("Close this video; the other one stays.")
+        kop.addWidget(self.btn_clear)
         v.addWidget(self.kop)
 
         # The same flags as the trim window, plus drawing: here -- and only here -- you
         # can draw over the picture. This is the window where you look and point things
         # out; on the viewing and compare pages the left button is already taken (panning,
         # the skeleton editor), and in the trim window you're setting boundaries.
-        self.speler = VideoPlayer(min_size=(400, 200), fast_seek=True,
+        self.player = VideoPlayer(min_size=(400, 200), fast_seek=True,
                                   show_overlay=False, show_drawing=True)
-        v.addWidget(self.speler, stretch=1)
+        v.addWidget(self.player, stretch=1)
         # The bar hangs inside the player, so it has the same width as the timeline.
         self.balk = PointsBar()
-        self.speler.add_bottom_bar(self.balk)
+        self.player.add_bottom_bar(self.balk)
 
         self.rij_sync = QWidget()
         rij = QHBoxLayout(self.rij_sync)
@@ -4747,24 +4747,24 @@ class ViewSide(QWidget):
         # Empty FrameResult list: the player wants one (slider length, time label), but
         # by definition nothing has been analyzed here -- that's the whole point.
         resultaten = [FrameResult(i, i / self.fps) for i in range(max(1, info.totaal))]
-        self.speler.load(info, resultaten, bron["pad"], bool(bron.get("interlaced")))
+        self.player.load(info, resultaten, source["pad"], bool(source.get("interlaced")))
         self.balk.zet(totaal=len(resultaten))
         self._show_sync_label()
 
     def release(self):
-        self.speler.release()
+        self.player.release()
 
     # ── Sync point (per session, not saved) ──────────────────────────────
     def _set_sync(self):
-        self.sync_frame = max(0, self.speler.huidige_idx)
+        self.sync_frame = max(0, self.player.huidige_idx)
         self._show_sync_label()
 
     def _show_sync_label(self):
         self.lbl_sync.setText(
             f"sync: frame {self.sync_frame}  ({_time_text(self.sync_frame, self.fps)})")
 
-    def naar_sync(self):
-        self.speler.go_to(self.sync_frame)
+    def to_sync(self):
+        self.player.go_to(self.sync_frame)
 
 
 class ViewWindow(QDialog):
@@ -4795,22 +4795,22 @@ class ViewWindow(QDialog):
     session, not saved), and as soon as a side closes with ✕ the points of the remaining
     video come back. `_zet_modus` is the one place that handles that difference.
 
-    `bron` is a row from `skate_db` -- a recording from `opnames/` or a loose video from
+    `source` is a row from `skate_db` -- a recording from `opnames/` or a loose video from
     this pc (`bronvideo_voor_pad`); the window doesn't care which. Only when there's no
-    row (`bron['id'] is None`, registration failed) do the points fall away.
+    row (`source['id'] is None`, registration failed) do the points fall away.
     """
 
     PANEL_WIDTH = 260
 
     def __init__(self, paren, trainer_naam="", kies_tweede=None, parent=None):
-        """`paren` = one or two `(bron, info)`; `kies_tweede` supplies one more (or None)
+        """`paren` = one or two `(source, info)`; `kies_tweede` supplies one more (or None)
         on request, for the "Tweede video ernaast" button."""
         super().__init__(parent)
         self.trainer_naam = trainer_naam
         self.kies_tweede = kies_tweede
         self.kanten = []
         self._punt_kant = None      # the side the points panel is attached to
-        self._punten = []           # rows from bron_markering, sorted by frame number
+        self._points = []           # rows from bron_markering, sorted by frame number
         self._vullen = False        # suppresses itemChanged while building
 
         v = QVBoxLayout(self)
@@ -4820,9 +4820,9 @@ class ViewWindow(QDialog):
         kop = QHBoxLayout()
         self.lbl_naam = QLabel("")
         kop.addWidget(self.lbl_naam)
-        self.lbl_spoel = QLabel("")
-        self.lbl_spoel.setStyleSheet("color: #5aaaf0;")
-        kop.addWidget(self.lbl_spoel)
+        self.lbl_scrub = QLabel("")
+        self.lbl_scrub.setStyleSheet("color: #5aaaf0;")
+        kop.addWidget(self.lbl_scrub)
         kop.addStretch(1)
         self.lbl_geen_punten = QLabel("points aren't saved")
         self.lbl_geen_punten.setStyleSheet("color: #888;")
@@ -4851,7 +4851,7 @@ class ViewWindow(QDialog):
         v.addLayout(kop)
 
         self.splitter = QSplitter(Qt.Horizontal)
-        self.splitter_kanten = QSplitter(Qt.Horizontal)      # de video's
+        self.splitter_kanten = QSplitter(Qt.Horizontal)      # the videos
         self.splitter.addWidget(self.splitter_kanten)
         self.splitter.addWidget(self._bouw_puntenpaneel())
         self.splitter.setStretchFactor(0, 1)
@@ -4862,35 +4862,35 @@ class ViewWindow(QDialog):
         self.balk_alles = QWidget()
         balk = QHBoxLayout(self.balk_alles)
         balk.setContentsMargins(0, 0, 0, 0)
-        self.btn_start_alles = QPushButton("▶ Start all")
-        self.btn_start_alles.setToolTip(
+        self.btn_start_all = QPushButton("▶ Start all")
+        self.btn_start_all.setToolTip(
             "Plays both videos at once from their sync point, each at its own fps.\n"
             "Space also plays both at once, but resumes where they currently are.")
         # lambda: clicked() would otherwise pass `checked=False` as vanaf_sync.
-        self.btn_start_alles.clicked.connect(lambda: self._start_alles())
-        balk.addWidget(self.btn_start_alles)
-        self.btn_pauzeer_alles = QPushButton("⏸ Pause all")
-        self.btn_pauzeer_alles.clicked.connect(self._pauzeer_alles)
-        balk.addWidget(self.btn_pauzeer_alles)
-        self.btn_naar_sync = QPushButton("⏮ Both to sync")
-        self.btn_naar_sync.clicked.connect(self._beide_naar_sync)
-        balk.addWidget(self.btn_naar_sync)
-        self.chk_vanaf_sync = QCheckBox("from sync point")
-        self.chk_vanaf_sync.setChecked(True)
-        self.chk_vanaf_sync.setToolTip(
+        self.btn_start_all.clicked.connect(lambda: self._start_all())
+        balk.addWidget(self.btn_start_all)
+        self.btn_pause_all = QPushButton("⏸ Pause all")
+        self.btn_pause_all.clicked.connect(self._pause_all)
+        balk.addWidget(self.btn_pause_all)
+        self.btn_to_sync = QPushButton("⏮ Both to sync")
+        self.btn_to_sync.clicked.connect(self._both_to_sync)
+        balk.addWidget(self.btn_to_sync)
+        self.chk_from_sync = QCheckBox("from sync point")
+        self.chk_from_sync.setChecked(True)
+        self.chk_from_sync.setToolTip(
             "Off: 'Start all' resumes where both videos currently are, without jumping\n"
             "back (space always does that).")
-        balk.addWidget(self.chk_vanaf_sync)
+        balk.addWidget(self.chk_from_sync)
         balk.addWidget(QLabel("Speed"))
-        self.combo_alles_snelheid = QComboBox()
-        self.combo_alles_snelheid.setToolTip(
+        self.combo_all_speed = QComboBox()
+        self.combo_all_speed.setToolTip(
             "Playback speed for both videos — even if you play just one on its own, so "
             "they always run at the same speed.")
         for label, factor in SPEEDS:
-            self.combo_alles_snelheid.addItem(label, factor)
-        self.combo_alles_snelheid.setCurrentIndex(ALL_SPEED_IDX)
-        self.combo_alles_snelheid.currentIndexChanged.connect(self._zet_alles_snelheid)
-        balk.addWidget(self.combo_alles_snelheid)
+            self.combo_all_speed.addItem(label, factor)
+        self.combo_all_speed.setCurrentIndex(ALL_SPEED_IDX)
+        self.combo_all_speed.currentIndexChanged.connect(self._set_all_speed)
+        balk.addWidget(self.combo_all_speed)
         balk.addStretch(1)
         v.addWidget(self.balk_alles)
 
@@ -4899,23 +4899,23 @@ class ViewWindow(QDialog):
         self.hulp.setStyleSheet("color: #888;")
         v.addWidget(self.hulp)
 
-        self.klok = MasterClock(
-            self, factor=lambda: self.combo_alles_snelheid.currentData() or 1.0,
-            on_done=self._stop_alles)
+        self.clock = MasterClock(
+            self, factor=lambda: self.combo_all_speed.currentData() or 1.0,
+            on_done=self._stop_all)
 
-        for bron, info in paren:
-            self._voeg_kant(bron, info)
+        for source, info in paren:
+            self._voeg_kant(source, info)
 
         # The default keys, plus the points keys that only exist here. The latter do
         # nothing as long as there are two videos (see _zet_punt etc.).
         extra = {Qt.Key_P: self._zet_punt, Qt.Key_Delete: self._verwijder_punt}
         for n in range(9):
             extra[Qt.Key_1 + n] = lambda i=n: self._ga_naar_punt(i)
-        self.toetsen = PlayerKeys(
-            self, lambda: [k.speler for k in self.kanten], extra=extra,
+        self.keys = PlayerKeys(
+            self, lambda: [k.player for k in self.kanten], extra=extra,
             on_play=self._toetsen_afspelen,
-            is_playing=lambda: self.klok.is_running() or any(k.speler.is_playing() for k in self.kanten),
-            on_scrub=self.lbl_spoel.setText)
+            is_playing=lambda: self.clock.is_running() or any(k.player.is_playing() for k in self.kanten),
+            on_scrub=self.lbl_scrub.setText)
 
         self._zet_modus()
 
@@ -4925,22 +4925,22 @@ class ViewWindow(QDialog):
         self.setWindowState(self.windowState() | Qt.WindowFullScreen)
 
     # ── Sides ────────────────────────────────────────────────────────────
-    def _voeg_kant(self, bron, info):
-        kant = ViewSide(bron, info)
-        kant.btn_leeg.clicked.connect(lambda _=False, k=kant: self._verwijder_kant(k))
+    def _voeg_kant(self, source, info):
+        kant = ViewSide(source, info)
+        kant.btn_clear.clicked.connect(lambda _=False, k=kant: self._verwijder_kant(k))
         # Pressing ▶ yourself = taking over manual control: let the clock go.
-        kant.speler.btn_play.clicked.connect(self._stop_alles)
+        kant.player.btn_play.clicked.connect(self._stop_all)
         kant.balk.CLICKED.connect(self._click_bar)   # the bar is only visible with points
         self.kanten.append(kant)
         self.splitter_kanten.addWidget(kant)
-        kant.speler.go_to(0)
+        kant.player.go_to(0)
         return kant
 
     def _verwijder_kant(self, kant):
         """✕ on a side: release that video and carry on with the other -- keeping points."""
         if len(self.kanten) < 2 or kant not in self.kanten:
             return
-        self._pauzeer_alles()
+        self._pause_all()
         self.kanten.remove(kant)
         kant.release()
         kant.setParent(None)
@@ -4950,7 +4950,7 @@ class ViewWindow(QDialog):
     def _voeg_tweede_toe(self):
         if self.kies_tweede is None or len(self.kanten) != 1:
             return
-        self._pauzeer_alles()
+        self._pause_all()
         paar = self.kies_tweede()
         if not paar:
             return
@@ -4966,14 +4966,14 @@ class ViewWindow(QDialog):
         "Start alles" and one speed, and no points -- the handlers stay attached to the
         keys but do nothing then."""
         twee = len(self.kanten) > 1
-        self.lbl_naam.setText("  |  ".join(f"<b>{k.bron['naam']}</b>" for k in self.kanten))
-        self.setWindowTitle("Viewing — " + " | ".join(k.bron["naam"] for k in self.kanten))
+        self.lbl_naam.setText("  |  ".join(f"<b>{k.source['naam']}</b>" for k in self.kanten))
+        self.setWindowTitle("Viewing — " + " | ".join(k.source["naam"] for k in self.kanten))
 
         for kant in self.kanten:
             kant.kop.setVisible(twee)
             kant.rij_sync.setVisible(twee)
-            kant.speler.lbl_speed.setVisible(not twee)
-            kant.speler.combo_speed.setVisible(not twee)
+            kant.player.lbl_speed.setVisible(not twee)
+            kant.player.combo_speed.setVisible(not twee)
         self.balk_alles.setVisible(twee)
         self.btn_tweede.setVisible(not twee and self.kies_tweede is not None)
 
@@ -4981,7 +4981,7 @@ class ViewWindow(QDialog):
         for kant in self.kanten:
             kant.balk.setVisible(kant is self._punt_kant)
         if twee:
-            self._zet_alles_snelheid()
+            self._set_all_speed()
             self.hulp.setText(keys_help("both videos at once",
                                            "<b>Esc</b> close"))
         else:
@@ -4995,7 +4995,7 @@ class ViewWindow(QDialog):
             kant = None
         vorige, self._punt_kant = self._punt_kant, kant
         if vorige is not None and vorige in self.kanten:
-            vorige.speler.on_frame_shown = None
+            vorige.player.on_frame_shown = None
         aan = kant is not None
         self.paneel.setVisible(aan and (self.btn_paneel.text() == "Hide points"))
         self.btn_paneel.setVisible(aan)
@@ -5003,11 +5003,11 @@ class ViewWindow(QDialog):
         # there are no points anyway, and the help line already says so.
         self.lbl_geen_punten.setVisible(len(self.kanten) == 1 and not aan)
         if not aan:
-            self._punten = []
+            self._points = []
             return
-        kant.speler.on_frame_shown = self._frame_shown
+        kant.player.on_frame_shown = self._frame_shown
         self._vernieuw_punten()
-        kant.balk.zet(cursor=max(0, kant.speler.huidige_idx))
+        kant.balk.zet(cursor=max(0, kant.player.huidige_idx))
 
     # ── Playing together (two sides, MasterClock) ─────────────────────────
     def _toetsen_afspelen(self, play):
@@ -5015,59 +5015,59 @@ class ViewWindow(QDialog):
         play/pause and so **resumes wherever the videos are**; only the "Start alles"
         button first jumps to the sync points."""
         if not play:
-            self._pauzeer_alles()
+            self._pause_all()
         elif len(self.kanten) > 1:
-            self._start_alles(vanaf_sync=False)
+            self._start_all(vanaf_sync=False)
         else:
-            self.kanten[0].speler.play()
+            self.kanten[0].player.play()
 
-    def _start_alles(self, vanaf_sync=None):
+    def _start_all(self, vanaf_sync=None):
         """`vanaf_sync`: None = what the checkbox says (the button), False = resume
         (space)."""
         if len(self.kanten) < 2:
             if self.kanten:
-                self.kanten[0].speler.play()
+                self.kanten[0].player.play()
             return
-        self._pauzeer_alles()
+        self._pause_all()
         if vanaf_sync is None:
-            vanaf_sync = self.chk_vanaf_sync.isChecked()
+            vanaf_sync = self.chk_from_sync.isChecked()
         if vanaf_sync:
             # Rewinding costs a seek per side here; that wait sits up front once instead
             # of in the first tick.
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 for kant in self.kanten:
-                    kant.naar_sync()
+                    kant.to_sync()
             finally:
                 QApplication.restoreOverrideCursor()
-        self.klok.start([k.speler for k in self.kanten])
+        self.clock.start([k.player for k in self.kanten])
 
-    def _stop_alles(self):
-        self.klok.stop()      # pauses the players that were running under it itself
+    def _stop_all(self):
+        self.clock.stop()      # pauses the players that were running under it itself
 
-    def _pauzeer_alles(self):
+    def _pause_all(self):
         """Everything still: clock, scrubbing, and each player released. Idempotent."""
-        self.klok.stop()
-        self.toetsen.stop_scrubbing()
+        self.clock.stop()
+        self.keys.stop_scrubbing()
         for kant in self.kanten:
-            kant.speler.pause()
+            kant.player.pause()
 
-    def _beide_naar_sync(self):
-        self._pauzeer_alles()
+    def _both_to_sync(self):
+        self._pause_all()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             for kant in self.kanten:
-                kant.naar_sync()
+                kant.to_sync()
         finally:
             QApplication.restoreOverrideCursor()
 
-    def _zet_alles_snelheid(self, _idx=None):
+    def _set_all_speed(self, _idx=None):
         """Sets the shared speed on both players -- also for playing one alone, since two
         videos at a different tempo next to each other can't be compared."""
-        idx = self.combo_alles_snelheid.currentIndex()
+        idx = self.combo_all_speed.currentIndex()
         for kant in self.kanten:
-            kant.speler.combo_speed.setCurrentIndex(idx)   # herstart een lopende timer
-        self.klok.recalibrate()
+            kant.player.combo_speed.setCurrentIndex(idx)   # restarts a running timer
+        self.clock.recalibrate()
 
     # ── Points panel ─────────────────────────────────────────────────────
     def _bouw_puntenpaneel(self):
@@ -5110,12 +5110,12 @@ class ViewWindow(QDialog):
     # Every handler below operates on `_punt_kant` and does nothing if it's absent -- with
     # two videos, or with a loose video that couldn't be registered.
     @property
-    def bieb(self):
-        return self._punt_kant.bron.get("bieb") if self._punt_kant else None
+    def library(self):
+        return self._punt_kant.source.get("library") if self._punt_kant else None
 
     @property
-    def bron(self):
-        return self._punt_kant.bron if self._punt_kant else None
+    def source(self):
+        return self._punt_kant.source if self._punt_kant else None
 
     def _vernieuw_punten(self, selectie=None):
         """Re-reads the points from the database and fills the table + bar. The database
@@ -5124,15 +5124,15 @@ class ViewWindow(QDialog):
         if kant is None:
             return
         try:
-            self._punten = skate_db.list_markings(self.bieb, self.bron["id"])
+            self._points = skate_db.list_markings(self.library, self.source["id"])
         except Exception as e:
-            self._punten = []
+            self._points = []
             self.lbl_punten.setText(f"Points could not be read: {e}")
             return
         self._vullen = True
         try:
-            self.tabel.setRowCount(len(self._punten))
-            for rij, punt in enumerate(self._punten):
+            self.tabel.setRowCount(len(self._points))
+            for rij, punt in enumerate(self._points):
                 nr = QTableWidgetItem(str(rij + 1))
                 nr.setFlags(nr.flags() & ~Qt.ItemIsEditable)
                 self.tabel.setItem(rij, 0, nr)
@@ -5151,9 +5151,9 @@ class ViewWindow(QDialog):
         finally:
             self._vullen = False
 
-        kant.balk.zet(punten=[(p["frame"], p["label"]) for p in self._punten],
+        kant.balk.zet(points=[(p["frame"], p["label"]) for p in self._points],
                       selectie=selectie if selectie is not None else -1)
-        n = len(self._punten)
+        n = len(self._points)
         self.lbl_punten.setText(
             "No points set yet." if not n
             else f"{n} point{'s' if n != 1 else ''} saved with this recording.")
@@ -5164,15 +5164,15 @@ class ViewWindow(QDialog):
         kant = self._punt_kant
         if kant is None:
             return
-        frame = kant.speler.huidige_idx
+        frame = kant.player.huidige_idx
         if frame < 0:
             return
-        if any(p["frame"] == frame for p in self._punten):
+        if any(p["frame"] == frame for p in self._points):
             self.lbl_punten.setText("There's already a point on this frame.")
             return
         try:
-            skate_db.add_marking(self.bieb, self.bron["id"], frame,
-                                          f"Point {len(self._punten) + 1}",
+            skate_db.add_marking(self.library, self.source["id"], frame,
+                                          f"Point {len(self._points) + 1}",
                                           self.trainer_naam)
         except Exception as e:
             QMessageBox.warning(self, "Point", f"The point could not be saved:\n{e}")
@@ -5180,7 +5180,7 @@ class ViewWindow(QDialog):
         # Re-read and only then select: the list is ordered by frame number, so a point
         # you set halfway back doesn't end up at the bottom.
         self._vernieuw_punten()
-        index = next((i for i, punt in enumerate(self._punten)
+        index = next((i for i, punt in enumerate(self._points)
                       if punt["frame"] == frame), None)
         if index is not None:
             self.tabel.selectRow(index)
@@ -5190,10 +5190,10 @@ class ViewWindow(QDialog):
         if self._punt_kant is None:
             return
         rij = self.tabel.currentRow()
-        if not 0 <= rij < len(self._punten):
+        if not 0 <= rij < len(self._points):
             return
         try:
-            skate_db.delete_marking(self.bieb, self._punten[rij]["id"])
+            skate_db.delete_marking(self.library, self._points[rij]["id"])
         except Exception as e:
             QMessageBox.warning(self, "Point", f"The point could not be removed:\n{e}")
             return
@@ -5203,14 +5203,14 @@ class ViewWindow(QDialog):
         if self._vullen or item.column() != 2 or self._punt_kant is None:
             return
         try:
-            skate_db.edit_marking(self.bieb, item.data(Qt.UserRole), label=item.text())
+            skate_db.edit_marking(self.library, item.data(Qt.UserRole), label=item.text())
         except Exception as e:
             QMessageBox.warning(self, "Point", f"The name could not be saved:\n{e}")
 
     def _ga_naar_punt(self, index):
         kant = self._punt_kant
-        if kant is not None and 0 <= index < len(self._punten):
-            kant.speler.go_to(self._punten[index]["frame"])
+        if kant is not None and 0 <= index < len(self._points):
+            kant.player.go_to(self._points[index]["frame"])
             self.tabel.selectRow(index)
             kant.balk.zet(selectie=index)
 
@@ -5237,22 +5237,22 @@ class ViewWindow(QDialog):
 
     def _minimaliseer(self):
         # Everything still first: a video running on in the taskbar decodes for nothing.
-        self._pauzeer_alles()
+        self._pause_all()
         self.showMinimized()
 
     def changeEvent(self, event):
         # If the window goes from active to inactive (alt-tab, a message box in front),
         # the key-release never arrives anymore and scrubbing would run forever.
         if (event.type() == QEvent.ActivationChange and not self.isActiveWindow()
-                and hasattr(self, "toetsen")):
-            self.toetsen.stop_scrubbing()
+                and hasattr(self, "keys")):
+            self.keys.stop_scrubbing()
         super().changeEvent(event)
 
     def done(self, resultaat):
         # Not closeEvent: a modal dialog that closes via accept()/reject() doesn't get one.
         # The video files must be released, or Windows keeps holding the recording.
-        self.toetsen.detach()
-        self.klok.stop()
+        self.keys.detach()
+        self.clock.stop()
         for kant in self.kanten:
             kant.release()
         super().done(resultaat)
@@ -5296,16 +5296,16 @@ class CopyWorker(QThread):
     progress = Signal(int, int, int, str)     # bytes done, bytes total, idx, name
     done = Signal(list, bool, object)         # copied paths, aborted?, error or None
 
-    def __init__(self, bieb, plan, parent=None):
+    def __init__(self, library, plan, parent=None):
         super().__init__(parent)
-        self.bieb = bieb
+        self.library = library
         self.plan = plan                       # updated in the thread (reason on failure)
 
     def run(self):
         paden, afgebroken, fout = [], False, None
         try:
             paden = skate_db.copy_to_recordings(
-                self.bieb, self.plan, progress_callback=self.progress.emit,
+                self.library, self.plan, progress_callback=self.progress.emit,
                 stop_check=self.isInterruptionRequested)
         except skate_db.CopyAborted:
             afgebroken = True
@@ -5451,7 +5451,7 @@ class MainWindow(QMainWindow):
         self.events = []
         self.worker = None
         self.batch_worker = None
-        self.bieb = None            # library path (set by _set_library)
+        self.library = None            # library path (set by _set_library)
         self.lokaal = None          # the local library (loose videos), see _set_library
         self._recordings = []          # phase 8: source-video rows behind the recordings table
         self._lokaal = {}           # path -> 'local'/'partial'/'cloud' (speed probe)
@@ -5459,7 +5459,7 @@ class MainWindow(QMainWindow):
         self._clip_tmp_dir = None    # temp folder with the just-trimmed fragments
         self.clip_worker = None
         self.trainer_naam = skate_db.trainer_name()  # phase 4: passed along as aangemaakt_door
-        self.analyse_id = None      # id of the analysis currently open in the library
+        self.analysis_id = None      # id of the analysis currently open in the library
         # Who the open analysis belongs to -- needed for the heading on the compare page
         # (and as a preference in the analysis picker); the DB only knows the id.
         self.open_analysis_skater_id = None
@@ -5562,13 +5562,13 @@ class MainWindow(QMainWindow):
             active=lambda: self.stack.currentWidget() is self.page_analysis)
         self.keys_compare = PlayerKeys(
             self,
-            lambda: [k.speler for k in (self.side_left, self.side_right)
-                     if k.heeft_analyse()],
+            lambda: [k.player for k in (self.side_left, self.side_right)
+                     if k.has_analysis()],
             on_scrub=self.lbl_scrub.setText,
             on_play=self._keys_compare_play,
             is_playing=lambda: (self.clock.is_running()
-                            or self.side_left.speler.is_playing()
-                            or self.side_right.speler.is_playing()),
+                            or self.side_left.player.is_playing()
+                            or self.side_right.player.is_playing()),
             active=lambda: self.stack.currentWidget() is self.page_compare)
         self._key_handlers = [self.keys_analysis, self.keys_compare]
 
@@ -5604,11 +5604,11 @@ class MainWindow(QMainWindow):
         """Stops any running playback (analysis page as well as both compare players),
         including a running scrub. Idempotent, so safe to call from anywhere."""
         self._stop_all()
-        for toetsen in self._key_handlers:
-            toetsen.stop_scrubbing()
+        for keys in self._key_handlers:
+            keys.stop_scrubbing()
         self.player.pause()
         for kant in (self.side_left, self.side_right):
-            kant.speler.pause()
+            kant.player.pause()
 
     def _page_switch(self, _idx=None):
         """When leaving a page: pause everything, and turn off edit mode -- the undo
@@ -5875,8 +5875,8 @@ class MainWindow(QMainWindow):
         databases overlap. `selecteer` = the key that should be selected after filling
         (the video just opened); otherwise the selection stays where it was."""
         try:
-            skate_db.sync_source_dir(self.bieb)
-            opnames = skate_db.list_source_videos(self.bieb)
+            skate_db.sync_source_dir(self.library)
+            opnames = skate_db.list_source_videos(self.library)
         except Exception as e:
             self.table_recordings.setRowCount(0)
             self.statusBar().showMessage(f"Could not read recordings: {e}", 6000)
@@ -5925,7 +5925,7 @@ class MainWindow(QMainWindow):
                 idx = combo.findText(b["status"])
                 combo.setCurrentIndex(idx if idx >= 0 else 0)
                 combo.currentTextChanged.connect(
-                    lambda tekst, bron=b: self._set_recording_status(bron, tekst))
+                    lambda tekst, source=b: self._set_recording_status(source, tekst))
                 self.table_recordings.setCellWidget(rij, OPNAME_KOL_STATUS, combo)
 
                 n_frag, n_sch = b["aantal_fragmenten"], b["aantal_schaatsers"]
@@ -5969,7 +5969,7 @@ class MainWindow(QMainWindow):
         if self.lokaal is None:
             return []
         try:
-            skate_db.migrate_loose_videos(self.bieb, self.lokaal)
+            skate_db.migrate_loose_videos(self.library, self.lokaal)
             return [b for b in skate_db.list_source_videos(self.lokaal, extern=True)
                     if b["sync"] != "ontbreekt"]
         except Exception as e:
@@ -5991,9 +5991,9 @@ class MainWindow(QMainWindow):
         bronnen = []
         for rij in rijen:
             item = self.table_recordings.item(rij, 0)
-            bron = self._recording_by_key(item.data(Qt.UserRole) if item else None)
-            if bron is not None:
-                bronnen.append(bron)
+            source = self._recording_by_key(item.data(Qt.UserRole) if item else None)
+            if source is not None:
+                bronnen.append(source)
         return bronnen
 
     def _recording_by_key(self, sleutel):
@@ -6047,16 +6047,16 @@ class MainWindow(QMainWindow):
         cel.setToolTip(uitleg)
         self.table_recordings.setItem(rij, OPNAME_KOL_LOKAAL, cel)
 
-    def _set_recording_status(self, bron, status):
+    def _set_recording_status(self, source, status):
         if self._filling_recordings:
             return
         try:
-            skate_db.edit_source_video(bron["bieb"], bron["id"], status=status,
+            skate_db.edit_source_video(source["library"], source["id"], status=status,
                                         bijgewerkt_door=self.trainer_naam)
         except Exception as e:
             QMessageBox.warning(self, "Recording", f"Saving the status failed:\n{e}")
             return
-        bron["status"] = status
+        source["status"] = status
         self.statusBar().showMessage(f"Status → {status}", 3000)
 
     def _recording_double_click(self, rij, kolom):
@@ -6067,64 +6067,64 @@ class MainWindow(QMainWindow):
         if self._filling_recordings or item.column() != OPNAME_KOL_NOTITIE:
             return
         naam_item = self.table_recordings.item(item.row(), 0)
-        bron = self._recording_by_key(naam_item.data(Qt.UserRole)) if naam_item else None
-        if bron is None:
+        source = self._recording_by_key(naam_item.data(Qt.UserRole)) if naam_item else None
+        if source is None:
             return
         try:
-            skate_db.edit_source_video(bron["bieb"], bron["id"], notitie=item.text(),
+            skate_db.edit_source_video(source["library"], source["id"], notitie=item.text(),
                                         bijgewerkt_door=self.trainer_naam)
         except Exception as e:
             QMessageBox.warning(self, "Recording", f"Saving the note failed:\n{e}")
 
-    def _recording_available(self, bron):
+    def _recording_available(self, source):
         """Is the file there, and complete? Reports itself what's wrong and returns False.
 
         Both the trim window and the view window open the recording directly from disk.
         In a shared cloud folder a half-hour recording is on its way for minutes, and then
         one clean message beats a window that crashes on a half file."""
-        if bron["sync"] == "ontbreekt":
+        if source["sync"] == "ontbreekt":
             QMessageBox.warning(
                 self, "Recording not found",
-                f"The file is no longer on disk:\n{bron['pad']}\n\n"
+                f"The file is no longer on disk:\n{source['pad']}\n\n"
                 "If the library is a shared cloud folder, the recording may not have "
                 "synced yet.")
             return False
-        if bron["sync"] == "onvolledig":
+        if source["sync"] == "onvolledig":
             QMessageBox.warning(
                 self, "Recording still downloading",
-                f"'{bron['naam']}' is on this PC still smaller than at the colleague who "
+                f"'{source['naam']}' is on this PC still smaller than at the colleague who "
                 "added it -- the cloud sync is still working on it.\n\n"
                 "Try again once the download is finished.")
             return False
-        if not self._warn_not_local(bron):
+        if not self._warn_not_local(source):
             return False
         # Determine this now, so both the view window and the trim window already have
         # the answer and there's no measurement of a few seconds partway through.
-        self._source_interlaced(bron)
+        self._source_interlaced(source)
         return True
 
-    def _source_interlaced(self, bron):
+    def _source_interlaced(self, source):
         """Is this recording interlaced (combing)? Measure once per recording and store
         the answer in the library: it costs a few seconds -- more on a streaming Drive --
         while the answer never changes. If the measurement fails, don't filter: better
         the raw image than touching pixels based on a failed measurement."""
-        if bron.get("interlaced") is not None:
-            return bool(bron["interlaced"])
+        if source.get("interlaced") is not None:
+            return bool(source["interlaced"])
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            uitkomst = is_interlaced(bron["pad"])
+            uitkomst = is_interlaced(source["pad"])
         except Exception:
             uitkomst = False
         finally:
             QApplication.restoreOverrideCursor()
         try:
-            if bron.get("id") is not None:
-                skate_db.set_source_interlaced(bron["bieb"], bron["id"], uitkomst)
+            if source.get("id") is not None:
+                skate_db.set_source_interlaced(source["library"], source["id"], uitkomst)
         except Exception:
             pass                      # measuring worked; only remembering it didn't
-        bron["interlaced"] = 1 if uitkomst else 0
+        source["interlaced"] = 1 if uitkomst else 0
         return uitkomst
-    def _warn_not_local(self, bron):
+    def _warn_not_local(self, source):
         """Warns if the recording isn't stored offline on this PC; True = go ahead.
 
         The file IS there -- the cloud folder just shows it -- but the image arrives
@@ -6140,23 +6140,23 @@ class MainWindow(QMainWindow):
         you've already viewed sits in the cloud cache and comes right back."""
         # The cache is keyed on path, so even a loose video that couldn't be registered
         # (no id) simply gets its own spot in it.
-        status = self._lokaal.get(bron["pad"])
+        status = self._lokaal.get(source["pad"])
         if status is None:                 # the background measurement hadn't gotten there yet
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                status = skate_db.file_is_local(bron["pad"])
+                status = skate_db.file_is_local(source["pad"])
             except Exception:
                 status = None
             finally:
                 QApplication.restoreOverrideCursor()
             if status:
-                self._lokaal[bron["pad"]] = status
+                self._lokaal[source["pad"]] = status
         if status not in ("cloud", "deels"):
             return True                    # local, or unmeasurable -> don't make a fuss
 
         antwoord = QMessageBox.warning(
             self, "Recording is still in the cloud",
-            f"'{bron['naam']}' is "
+            f"'{source['naam']}' is "
             + ("still only partly" if status == "deels" else "not")
             + " offline on this PC; the image is downloaded from the cloud while "
               "viewing.\n\n"
@@ -6200,8 +6200,8 @@ class MainWindow(QMainWindow):
         heading of a possible error message. If one of two fails, the window doesn't
         open -- better than silently showing one video when two were requested."""
         paren = []
-        for bron in bronnen:
-            paar = self._open_source(bron, titel)
+        for source in bronnen:
+            paar = self._open_source(source, titel)
             if paar is None:
                 return
             paren.append(paar)
@@ -6212,14 +6212,14 @@ class MainWindow(QMainWindow):
         if self._loose_added:
             self._refresh_recordings()  # the video added in the window, into the list
 
-    def _open_source(self, bron, titel):
-        """Availability check + `video_info` for one source -> `(bron, info)` or None
+    def _open_source(self, source, titel):
+        """Availability check + `video_info` for one source -> `(source, info)` or None
         (the message has then already been shown). The points go to the library the row
-        belongs to: shared for a recording, local for a loose video (`bron["bieb"]`)."""
-        if not self._recording_available(bron):
+        belongs to: shared for a recording, local for a loose video (`source["library"]`)."""
+        if not self._recording_available(source):
             return None
         try:
-            return bron, video_info(bron["pad"])
+            return source, video_info(source["pad"])
         except Exception as e:
             QMessageBox.critical(self, titel, f"Can't open the video:\n{e}")
             return None
@@ -6243,27 +6243,27 @@ class MainWindow(QMainWindow):
             if self.lokaal is None:
                 raise RuntimeError("the local library could not be opened at startup "
                                    "(see the log file)")
-            bron = skate_db.loose_video(self.bieb, self.lokaal, pad)
+            source = skate_db.loose_video(self.library, self.lokaal, pad)
         except Exception as e:
             QMessageBox.warning(
                 self, "View video",
                 f"The video can be viewed, but won't be remembered and points can't "
                 f"be saved right now:\n{e}")
-            bron = {"id": None, "bieb": None, "naam": os.path.basename(pad), "pad": pad,
+            source = {"id": None, "library": None, "naam": os.path.basename(pad), "pad": pad,
                     "sync": None, "interlaced": None}
-        return bron
+        return source
 
     def _choose_second_video(self):
         """For "➕ Second video alongside..." in the view window: the same route as a
         loose video (picker, registration, availability), but the window is already
-        open. Returns `(bron, info)` or None; remembers that the list needs a refresh
+        open. Returns `(source, info)` or None; remembers that the list needs a refresh
         afterwards."""
-        bron = self._choose_loose_video()
-        if bron is None:
+        source = self._choose_loose_video()
+        if source is None:
             return None
-        if bron["id"] is not None:
+        if source["id"] is not None:
             self._loose_added = True    # the row already exists, even if opening fails
-        return self._open_source(bron, "View video")
+        return self._open_source(source, "View video")
 
     def _view_loose_video(self):
         """View a video somewhere else on this PC, without copying it into the library.
@@ -6282,14 +6282,14 @@ class MainWindow(QMainWindow):
         since the row already exists by then. If registering fails (local library can't
         be opened), viewing just proceeds without points -- the database shouldn't get
         in the way there."""
-        bron = self._choose_loose_video()
-        if bron is None:
+        source = self._choose_loose_video()
+        if source is None:
             return
         try:
-            self._open_view_window([bron], "View video")
+            self._open_view_window([source], "View video")
         finally:
-            if bron["id"] is not None:
-                self._refresh_recordings(selecteer=_opname_sleutel(bron))
+            if source["id"] is not None:
+                self._refresh_recordings(selecteer=_opname_sleutel(source))
 
     def _import_from_camera(self):
         """Copy whole recordings from the camera/memory card to `opnames/`, inside the app.
@@ -6315,7 +6315,7 @@ class MainWindow(QMainWindow):
             pass                      # remembering the folder is a convenience, not a requirement
 
         try:
-            plan = skate_db.copy_plan(self.bieb, paden)
+            plan = skate_db.copy_plan(self.library, paden)
         except Exception as e:
             QMessageBox.critical(self, "Copying", f"Can't reach the 'opnames' folder:\n{e}")
             return
@@ -6331,7 +6331,7 @@ class MainWindow(QMainWindow):
         # Space: on a Drive folder the free space is that of the local cache/disk, and
         # a copy that runs aground at 90% costs a quarter of an hour for nothing.
         try:
-            vrij = shutil.disk_usage(skate_db.recordings_path(self.bieb)).free
+            vrij = shutil.disk_usage(skate_db.recordings_path(self.library)).free
         except OSError:
             vrij = None
         if vrij is not None and totaal > vrij:
@@ -6351,7 +6351,7 @@ class MainWindow(QMainWindow):
             if antwoord != QMessageBox.Yes:
                 return
 
-        worker = CopyWorker(self.bieb, plan, self)
+        worker = CopyWorker(self.library, plan, self)
         dlg = CopyDialog(worker, len(te_doen), self)
         worker.start()
         try:
@@ -6365,8 +6365,8 @@ class MainWindow(QMainWindow):
         sleutel = None
         if gekopieerd:
             try:
-                skate_db.sync_source_dir(self.bieb)
-                sleutel = _opname_sleutel(skate_db.source_video_for_path(self.bieb, gekopieerd[0]))
+                skate_db.sync_source_dir(self.library)
+                sleutel = _opname_sleutel(skate_db.source_video_for_path(self.library, gekopieerd[0]))
             except Exception:
                 sleutel = None
         self._refresh_recordings(selecteer=sleutel)
@@ -6393,7 +6393,7 @@ class MainWindow(QMainWindow):
         return "\n".join(f"• {i['naam']} — {i['reden']}" for i in items)
 
     def _open_recordings_folder(self):
-        pad = skate_db.recordings_path(self.bieb)
+        pad = skate_db.recordings_path(self.library)
         try:
             os.startfile(pad)                      # Windows; falls back gracefully elsewhere
         except Exception:
@@ -6430,10 +6430,10 @@ class MainWindow(QMainWindow):
         for kant in (self.side_left, self.side_right):
             splitter.addWidget(kant)
             # Pressing ▶ yourself = taking over manual control: let go of the master clock.
-            kant.speler.btn_play.clicked.connect(self._stop_all)
+            kant.player.btn_play.clicked.connect(self._stop_all)
             # Clearing a side while the master clock runs: stop the clock first.
-            kant.btn_leeg.clicked.connect(
-                lambda _=False, k=kant: (self._stop_all(), k.leeg()))
+            kant.btn_clear.clicked.connect(
+                lambda _=False, k=kant: (self._stop_all(), k.clear()))
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         v.addWidget(splitter, stretch=1)
@@ -6514,7 +6514,7 @@ class MainWindow(QMainWindow):
         self.btn_info = QPushButton("ℹ Info...")
         self.btn_info.setToolTip(
             "With which app version, backend and settings was this analysis made?")
-        # lambda: clicked() would otherwise pass `checked=False` as analyse_id.
+        # lambda: clicked() would otherwise pass `checked=False` as analysis_id.
         self.btn_info.clicked.connect(lambda: self._show_analysis_info())
         self.btn_info.setEnabled(False)
         self.player.add_control_button(self.btn_info)
@@ -6737,7 +6737,7 @@ class MainWindow(QMainWindow):
             if pad != standaard:
                 return self._set_library(standaard)
             raise
-        self.bieb = pad
+        self.library = pad
         self.lbl_library.setText(pad)
         # The local library (loose videos from this PC) is separate from the shared one
         # and doesn't change when the library folder is switched: open it once. If that
@@ -6760,7 +6760,7 @@ class MainWindow(QMainWindow):
         """Phase 4: warns if the cloud sync has left conflict copies of the database
         alongside schaats.db (see skate_db.detect_conflict_copies)."""
         try:
-            kopieen = skate_db.detect_conflict_copies(self.bieb)
+            kopieen = skate_db.detect_conflict_copies(self.library)
         except Exception:
             return
         if not kopieen:
@@ -6801,7 +6801,7 @@ class MainWindow(QMainWindow):
         self._show_trainer_naam()
 
     def _choose_library_folder(self):
-        pad = QFileDialog.getExistingDirectory(self, "Choose library folder", self.bieb or "")
+        pad = QFileDialog.getExistingDirectory(self, "Choose library folder", self.library or "")
         if not pad:
             return
         cfg = skate_db.load_config()
@@ -6817,7 +6817,7 @@ class MainWindow(QMainWindow):
         """Name for a skater id, or "" if it no longer exists."""
         if schaatser_id is None:
             return ""
-        s = next((x for x in skate_db.list_skaters(self.bieb)
+        s = next((x for x in skate_db.list_skaters(self.library)
                   if x["id"] == schaatser_id), None)
         return s["naam"] if s else ""
 
@@ -6839,7 +6839,7 @@ class MainWindow(QMainWindow):
         self.list_skaters_widget.blockSignals(True)
         self.list_skaters_widget.clear()
         selecteer_rij = None
-        schaatsers = skate_db.list_skaters(self.bieb)
+        schaatsers = skate_db.list_skaters(self.library)
         # Comparing works across skaters, so hang it off "is there an analysis
         # anywhere" rather than off the selection.
         self.btn_compare.setEnabled(any(s["aantal_analyses"] for s in schaatsers))
@@ -6865,7 +6865,7 @@ class MainWindow(QMainWindow):
         else:
             self._refresh_analyses()
 
-    def _make_row_buttons(self, analyse_id, titel):
+    def _make_row_buttons(self, analysis_id, titel):
         """The four per-analysis actions as a widget for the last table column.
         Each button carries its own analysis id (default argument in the lambda --
         otherwise the last loop value would apply to ALL rows), so a click works on the
@@ -6876,14 +6876,14 @@ class MainWindow(QMainWindow):
         h.setSpacing(4)
         knoppen = (
             ("Open", "Open this analysis on the view page.",
-             lambda _=False, a=analyse_id: self._open_analysis_from_library(a)),
+             lambda _=False, a=analysis_id: self._open_analysis_from_library(a)),
             ("ℹ Info...", "With which app version, backend and settings was this "
                           "analysis made?",
-             lambda _=False, a=analyse_id: self._show_analysis_info(a)),
+             lambda _=False, a=analysis_id: self._show_analysis_info(a)),
             ("Rename...", "Give this analysis a different title.",
-             lambda _=False, a=analyse_id, t=titel: self._rename_analysis(a, t)),
+             lambda _=False, a=analysis_id, t=titel: self._rename_analysis(a, t)),
             ("Delete", "Delete this analysis, including video and landmarks.",
-             lambda _=False, a=analyse_id, t=titel: self._delete_analysis(a, t)),
+             lambda _=False, a=analysis_id, t=titel: self._delete_analysis(a, t)),
         )
         for tekst, tip, slot in knoppen:
             b = QPushButton(tekst)
@@ -6898,7 +6898,7 @@ class MainWindow(QMainWindow):
         sid = self._selected_schaatser_id()
         self.table_analyses.setRowCount(0)
         if sid is not None:
-            analyses = skate_db.list_analyses(self.bieb, sid)
+            analyses = skate_db.list_analyses(self.library, sid)
             self.table_analyses.setRowCount(len(analyses))
             for rij, a in enumerate(analyses):
                 # Provenance in the tooltip: who made it (phase 4) and with which app
@@ -6928,21 +6928,21 @@ class MainWindow(QMainWindow):
         dlg = SkaterDialog(self)
         if show_dialog(dlg) != QDialog.Accepted or not dlg.naam:
             return
-        sid = skate_db.create_skater(self.bieb, dlg.naam, dlg.geboortejaar, dlg.notities)
+        sid = skate_db.create_skater(self.library, dlg.naam, dlg.geboortejaar, dlg.notities)
         self._refresh_skaters(selecteer_id=sid)
 
     def _edit_skater(self):
         sid = self._selected_schaatser_id()
         if sid is None:
             return
-        s = next((x for x in skate_db.list_skaters(self.bieb) if x["id"] == sid), None)
+        s = next((x for x in skate_db.list_skaters(self.library) if x["id"] == sid), None)
         if s is None:
             return
         dlg = SkaterDialog(self, naam=s["naam"], geboortejaar=s["geboortejaar"],
                           notities=s["notities"])
         if show_dialog(dlg) != QDialog.Accepted or not dlg.naam:
             return
-        skate_db.edit_skater(self.bieb, sid, dlg.naam, dlg.geboortejaar, dlg.notities)
+        skate_db.edit_skater(self.library, sid, dlg.naam, dlg.geboortejaar, dlg.notities)
         self._refresh_skaters(selecteer_id=sid)
 
     def _delete_skater(self):
@@ -6950,7 +6950,7 @@ class MainWindow(QMainWindow):
         if sid is None:
             return
         naam = self.list_skaters_widget.currentItem().data(Qt.UserRole + 1)
-        analyses = skate_db.list_analyses(self.bieb, sid)
+        analyses = skate_db.list_analyses(self.library, sid)
         tekst = f"Delete skater '{naam}'?"
         if analyses:
             tekst += (f"\n\nThe {len(analyses)} associated analys"
@@ -6960,10 +6960,10 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Delete skater", tekst) != QMessageBox.Yes:
             return
         ids = {a["id"] for a in analyses}
-        if self.analyse_id in ids:
+        if self.analysis_id in ids:
             self._close_view()   # let go of the open video before deleting
         self._close_compare_for(ids)
-        skate_db.delete_skater(self.bieb, sid)
+        skate_db.delete_skater(self.library, sid)
         self._refresh_skaters()
 
     def _rename_analysis(self, aid=None, huidig=""):
@@ -6977,7 +6977,7 @@ class MainWindow(QMainWindow):
                                          text=huidig)
         if not ok or not titel.strip():
             return
-        skate_db.rename_analysis(self.bieb, aid, titel.strip())
+        skate_db.rename_analysis(self.library, aid, titel.strip())
         self._refresh_analyses()
 
     def _delete_analysis(self, aid=None, titel=""):
@@ -6990,10 +6990,10 @@ class MainWindow(QMainWindow):
                 f"Delete analysis '{titel}', including the copied video and "
                 "landmarks?\n\nThis cannot be undone.") != QMessageBox.Yes:
             return
-        if aid == self.analyse_id:
+        if aid == self.analysis_id:
             self._close_view()   # Windows refuses to delete a still-open video
         self._close_compare_for({aid})
-        skate_db.delete_analysis(self.bieb, aid)
+        skate_db.delete_analysis(self.library, aid)
         self._refresh_skaters()
 
     def _close_view(self):
@@ -7001,7 +7001,7 @@ class MainWindow(QMainWindow):
         folder of the open analysis can be deleted)."""
         self.player.release()
         self.events = []
-        self.analyse_id = None
+        self.analysis_id = None
         self.open_analysis_skater_id = None
         self.open_analysis_skater_name = ""
         self.btn_compare_this.setEnabled(False)
@@ -7014,7 +7014,7 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(False)
     # -- New analysis + opening --------------------------------------------
     def _new_analysis(self):
-        schaatsers = skate_db.list_skaters(self.bieb)
+        schaatsers = skate_db.list_skaters(self.library)
         if not schaatsers:
             QMessageBox.information(
                 self, "New analysis",
@@ -7123,7 +7123,7 @@ class MainWindow(QMainWindow):
         h, w = frame0.shape[:2]
         invoer = config = None
         try:
-            eerdere = skate_db.list_calibrations(self.bieb, beeld_w=w, beeld_h=h)
+            eerdere = skate_db.list_calibrations(self.library, beeld_w=w, beeld_h=h)
         except Exception:
             eerdere = []
         if eerdere:
@@ -7159,7 +7159,7 @@ class MainWindow(QMainWindow):
             return None
         return kdlg.perspectief
 
-    def _load_analysis_data(self, analyse_id):
+    def _load_analysis_data(self, analysis_id):
         """
         Loads one analysis from the library and recomputes the derivatives with the
         saved settings (the phase 0 seam). Returns a dict, or None if it fails (the
@@ -7171,7 +7171,7 @@ class MainWindow(QMainWindow):
         uses).
         """
         try:
-            data = skate_db.load_analysis(self.bieb, analyse_id)
+            data = skate_db.load_analysis(self.library, analysis_id)
         except Exception as e:
             QMessageBox.critical(self, "Error opening",
                                  f"Can't load the analysis:\n\n{e}")
@@ -7218,7 +7218,7 @@ class MainWindow(QMainWindow):
         # algorithm improvement. If it fails (e.g. the DB briefly locked in the cloud
         # folder), that's no reason to abort opening.
         try:
-            skate_db.refresh_events_cache(self.bieb, analyse_id, events)
+            skate_db.refresh_events_cache(self.library, analysis_id, events)
         except Exception:
             pass
 
@@ -7240,13 +7240,13 @@ class MainWindow(QMainWindow):
             "deinterlaced": bool(inst.get("deinterlaced")),
         }
 
-    def _open_analysis_from_library(self, analyse_id=None):
+    def _open_analysis_from_library(self, analysis_id=None):
         """Opens a saved analysis on the view page."""
-        if analyse_id is None:
-            analyse_id = self._selected_analyse_id()
-        if analyse_id is None:
+        if analysis_id is None:
+            analysis_id = self._selected_analyse_id()
+        if analysis_id is None:
             return
-        data = self._load_analysis_data(analyse_id)
+        data = self._load_analysis_data(analysis_id)
         if data is None:
             return
 
@@ -7270,7 +7270,7 @@ class MainWindow(QMainWindow):
                 "without correction and may therefore deviate.")
 
         self.input_pad = data["video_pad"]
-        self.analyse_id = analyse_id
+        self.analysis_id = analysis_id
         self.open_analysis_skater_id = data["meta"]["schaatser_id"]
         self.open_analysis_skater_name = self._skater_name(self.open_analysis_skater_id)
         # The user is now deliberately viewing this analysis; an analysis running in
@@ -7278,41 +7278,41 @@ class MainWindow(QMainWindow):
         self._auto_show_done = False
         self.stack.setCurrentWidget(self.page_analysis)
         self._show_results(data["info"], data["resultaten"], data["events"],
-                              bron=data["titel"])
+                              source=data["titel"])
 
     # -- Comparing (two analyses side by side) --------------------------
     def _compare_skaters(self):
         """Opens the compare page; first asks for whichever analyses are still missing."""
-        if not any(s["aantal_analyses"] for s in skate_db.list_skaters(self.bieb)):
+        if not any(s["aantal_analyses"] for s in skate_db.list_skaters(self.library)):
             QMessageBox.information(
                 self, "Nothing to compare yet",
                 "There are no analyses in the library yet.")
             return
         for kant in (self.side_left, self.side_right):
-            if kant.heeft_analyse():
+            if kant.has_analysis():
                 continue          # already filled (e.g. on returning) -- leave it
             if not self._choose_compare_side(kant):
                 break             # cancelled: continue with what's there
-        if not (self.side_left.heeft_analyse() or self.side_right.heeft_analyse()):
+        if not (self.side_left.has_analysis() or self.side_right.has_analysis()):
             return                # nothing chosen at all -> don't go to an empty page
         self.stack.setCurrentWidget(self.page_compare)
         self.statusBar().showMessage(
             "Comparing: set a sync point per side on the same phase of the stroke and "
             "press 'Start all'.")
 
-    def _show_analysis_info(self, analyse_id=None):
+    def _show_analysis_info(self, analysis_id=None):
         """Info about an analysis: app version/commit, backend, date, creator and the
         main settings. Shared by the button on the view page (the open analysis) and the
         one on the start page (the row selected in the library). The metadata is fetched
         fresh from the DB here (cheap -- `analysis_meta` doesn't read the npz), so no
         copy needs to live on MainWindow that both a fresh analysis and opening one
         would have to keep in sync."""
-        if analyse_id is None:
-            analyse_id = self.analyse_id
-        if analyse_id is None:
+        if analysis_id is None:
+            analysis_id = self.analysis_id
+        if analysis_id is None:
             return
         try:
-            meta = skate_db.analysis_meta(self.bieb, analyse_id)
+            meta = skate_db.analysis_meta(self.library, analysis_id)
         except Exception as e:
             QMessageBox.warning(self, "Info", f"Could not read the analysis data:\n{e}")
             return
@@ -7323,16 +7323,16 @@ class MainWindow(QMainWindow):
         """Compare directly from the view page: the open analysis goes on the left, and
         for the right side (if nothing usable is there yet) an analysis is asked for
         right away. Skips the detour through the library."""
-        if self.analyse_id is None:
+        if self.analysis_id is None:
             return
         self._pause_all()
-        if not self._set_compare_side(self.side_left, self.analyse_id,
+        if not self._set_compare_side(self.side_left, self.analysis_id,
                                         self.open_analysis_skater_name):
             return          # message already shown
         # A different analysis on the right stays put (sync point included); the same
         # analysis twice side by side makes no sense.
-        if (not self.side_right.heeft_analyse()
-                or self.side_right.analyse_id == self.analyse_id):
+        if (not self.side_right.has_analysis()
+                or self.side_right.analysis_id == self.analysis_id):
             self._choose_compare_side(self.side_right,
                                       voorkeur_id=self.open_analysis_skater_id)
         self.stack.setCurrentWidget(self.page_compare)
@@ -7344,38 +7344,38 @@ class MainWindow(QMainWindow):
         """Lets one side choose an analysis and loads it. True if it succeeded."""
         if voorkeur_id is None:
             voorkeur_id = self._selected_schaatser_id()
-        dlg = AnalysisPicker(self.bieb, titel=f"{kant.naam}: choose analysis",
+        dlg = AnalysisPicker(self.library, titel=f"{kant.name}: choose analysis",
                              voorkeur_schaatser_id=voorkeur_id, parent=self)
-        if show_dialog(dlg) != QDialog.Accepted or dlg.analyse_id is None:
+        if show_dialog(dlg) != QDialog.Accepted or dlg.analysis_id is None:
             return False
-        return self._set_compare_side(kant, dlg.analyse_id, dlg.schaatser_naam)
+        return self._set_compare_side(kant, dlg.analysis_id, dlg.schaatser_naam)
 
-    def _set_compare_side(self, kant, analyse_id, schaatser_naam):
+    def _set_compare_side(self, kant, analysis_id, schaatser_naam):
         """Loads an analysis from the library into one side. True if it succeeded.
 
         Deliberately reloading rather than sharing the view page's results list: the
         skeleton editor mutates those objects in place, and each player has its own
         VideoCapture."""
         self._stop_all()
-        data = self._load_analysis_data(analyse_id)
+        data = self._load_analysis_data(analysis_id)
         if data is None:
             return False
-        kant.toon(analyse_id, schaatser_naam, data)
+        kant.show_analysis(analysis_id, schaatser_naam, data)
         return True
 
     def _close_compare_for(self, ids):
         """Lets go of the videos for these analyses on the compare page -- Windows
         refuses to delete a still-open video, and rmtree then fails silently."""
         for kant in (self.side_left, self.side_right):
-            if kant.analyse_id in ids:
-                kant.leeg()
+            if kant.analysis_id in ids:
+                kant.clear()
 
     def _both_to_sync(self):
         self._stop_all()
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             for kant in (self.side_left, self.side_right):
-                kant.naar_sync()
+                kant.to_sync()
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -7383,7 +7383,7 @@ class MainWindow(QMainWindow):
         """Plays both videos at the same time, driven by one `MasterClock`.
         `vanaf_sync`: None = whatever the checkbox says (the button), False = resume
         (space)."""
-        kanten = [k for k in (self.side_left, self.side_right) if k.heeft_analyse()]
+        kanten = [k for k in (self.side_left, self.side_right) if k.has_analysis()]
         if not kanten:
             QMessageBox.information(self, "Nothing to start",
                                     "First choose an analysis for both sides.")
@@ -7397,10 +7397,10 @@ class MainWindow(QMainWindow):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 for kant in kanten:
-                    kant.naar_sync()
+                    kant.to_sync()
             finally:
                 QApplication.restoreOverrideCursor()
-        self.clock.start([k.speler for k in kanten])
+        self.clock.start([k.player for k in kanten])
 
     def _stop_all(self):
         # The clock itself pauses the players that were running under it (see
@@ -7415,7 +7415,7 @@ class MainWindow(QMainWindow):
         running, it's recalibrated from the current position (`MasterClock.recalibrate`)."""
         idx = self.combo_all_speed.currentIndex()
         for kant in (self.side_left, self.side_right):
-            kant.speler.combo_speed.setCurrentIndex(idx)   # restarts a running timer
+            kant.player.combo_speed.setCurrentIndex(idx)   # restarts a running timer
         self.clock.recalibrate()
 
     def _read_first_frame(self, pad=None):
@@ -7499,7 +7499,7 @@ class MainWindow(QMainWindow):
                                      auto_horizon=self.auto_horizon,
                                      smooth_landmarks=not self.geen_smoothing,
                                      perspectief=self.perspectief,
-                                     bieb=self.bieb,
+                                     library=self.library,
                                      schaatser_id=opslag.get("schaatser_id"),
                                      titel=opslag.get("titel"),
                                      instellingen=opslag.get("instellingen"),
@@ -7575,7 +7575,7 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Error during analysis", bericht)
         self.player.set_controls_active(False)
 
-    def _analysis_done(self, info, resultaten, events, analyse_id):
+    def _analysis_done(self, info, resultaten, events, analysis_id):
         if self._shutting_down:
             return          # signal from just before closing: build nothing more
         self._hide_progress_bar()
@@ -7594,13 +7594,13 @@ class MainWindow(QMainWindow):
                 f"Analysis '{titel}' done and saved in the library.", 10000)
             return
 
-        self.analyse_id = analyse_id
+        self.analysis_id = analysis_id
         self.open_analysis_skater_id = opslag.get("schaatser_id")
         self.open_analysis_skater_name = self._skater_name(self.open_analysis_skater_id)
-        if analyse_id is not None:
+        if analysis_id is not None:
             # The view now reads the library copy from here on; the original may go.
             try:
-                self.input_pad = skate_db.analysis_video_path(self.bieb, analyse_id)
+                self.input_pad = skate_db.analysis_video_path(self.library, analysis_id)
             except Exception:
                 pass   # fall back to the source video (view only)
         self.stack.setCurrentWidget(self.page_analysis)
@@ -7621,8 +7621,8 @@ class MainWindow(QMainWindow):
                 "An analysis is already running. Wait for it before trimming new "
                 "fragments.")
             return
-        bron = self._selected_recording()
-        if bron is None:
+        source = self._selected_recording()
+        if source is None:
             QMessageBox.information(
                 self, "Trim fragments",
                 "First choose a recording in the list.\n\n"
@@ -7631,18 +7631,18 @@ class MainWindow(QMainWindow):
             return
         # Cloud sync: report and don't open, rather than letting the trim window crash
         # on a half file. A half-hour recording in 4K is on its way for minutes.
-        if not self._recording_available(bron):
+        if not self._recording_available(source):
             return
         # Before the marking work, not after: without a profile there'll be nothing to
         # save afterwards.
-        schaatsers = skate_db.list_skaters(self.bieb)
+        schaatsers = skate_db.list_skaters(self.library)
         if not schaatsers:
             QMessageBox.information(
                 self, "Trim fragments",
                 "First create a skater -- every analysis belongs to a profile.")
             return
         try:
-            info = video_info(bron["pad"])
+            info = video_info(source["pad"])
         except Exception as e:
             QMessageBox.critical(self, "Recording", f"Can't open the recording:\n{e}")
             return
@@ -7651,26 +7651,26 @@ class MainWindow(QMainWindow):
         # there's no source row to point at there, so those fragments become analyses
         # without provenance (like a batch of loose clips) and the trim window can't
         # draw any already-trimmed parts for it.
-        gedeeld = bron["bieb"] == self.bieb
-        gedaan = skate_db.source_fragments(self.bieb, bron["id"]) if gedeeld else []
-        dlg = FragmentPicker(bron["pad"], info, gedaan=gedaan,
-                             deinterlacen=self._source_interlaced(bron), parent=self)
-        if show_dialog(dlg) != QDialog.Accepted or not dlg.fragmenten:
+        gedeeld = source["library"] == self.library
+        analyzed = skate_db.source_fragments(self.library, source["id"]) if gedeeld else []
+        dlg = FragmentPicker(source["pad"], info, analyzed=analyzed,
+                             deinterlacen=self._source_interlaced(source), parent=self)
+        if show_dialog(dlg) != QDialog.Accepted or not dlg.fragments:
             return
 
-        paden = self._clip_to_temp(bron["pad"], dlg.fragmenten, info,
-                                          deinterlacen=self._source_interlaced(bron))
+        paden = self._clip_to_temp(source["pad"], dlg.fragments, info,
+                                          deinterlacen=self._source_interlaced(source))
         if not paden:
             return
         voorgevuld = [
             {"input_pad": pad, "titel": naam,
-             "bron_id": bron["id"] if gedeeld else None,
+             "bron_id": source["id"] if gedeeld else None,
              "bron_start_frame": start if gedeeld else None,
              "bron_eind_frame": eind if gedeeld else None}
-            for pad, (start, eind, naam) in zip(paden, dlg.fragmenten)]
+            for pad, (start, eind, naam) in zip(paden, dlg.fragments)]
         self._new_batch_analysis(voorgevuld=voorgevuld)
 
-    def _clip_to_temp(self, bron_pad, fragmenten, info, deinterlacen=False):
+    def _clip_to_temp(self, source_path, fragments, info, deinterlacen=False):
         """Writes the marked parts to a temporary folder and returns the paths (or []
         on cancel/error). `sla_analyse_op` copies them afterwards as always to
         `media/<uuid>/` -- one extra copy of a short file, not worth breaking open that
@@ -7688,7 +7688,7 @@ class MainWindow(QMainWindow):
             voortgang.setValue(int(gedaan / max(1, totaal) * 100))
 
         try:
-            paden = trim_fragments(bron_pad, fragmenten, self._clip_tmp_dir,
+            paden = trim_fragments(source_path, fragments, self._clip_tmp_dir,
                                     progress_callback=_report_progress,
                                     stop_check=voortgang.wasCanceled, fps=info.fps,
                                     deinterlacen=deinterlacen)
@@ -7714,7 +7714,7 @@ class MainWindow(QMainWindow):
             self._clip_tmp_dir = None
 
     def _new_batch_analysis(self, voorgevuld=None):
-        schaatsers = skate_db.list_skaters(self.bieb)
+        schaatsers = skate_db.list_skaters(self.library)
         if not schaatsers:
             QMessageBox.information(
                 self, "Batch analysis",
@@ -7870,7 +7870,7 @@ class MainWindow(QMainWindow):
         self._show_progress_bar("Starting batch...", met_stop=True)
 
         self._warn_backend_fallback()
-        self.batch_worker = BatchWorker(taken, self.bieb, BACKEND_NAME, self.trainer_naam)
+        self.batch_worker = BatchWorker(taken, self.library, BACKEND_NAME, self.trainer_naam)
         self.batch_worker.task_start.connect(self._batch_task_start)
         self.batch_worker.progress.connect(self._batch_progress)
         self.batch_worker.status.connect(self._analysis_status)   # reuse the busy phase
@@ -7898,7 +7898,7 @@ class MainWindow(QMainWindow):
             f"Video {self._batch_index + 1}/{self._batch_total} — {self._batch_current} "
             f"({frame_nr}/{totaal})")
 
-    def _batch_task_done(self, index, analyse_id):
+    def _batch_task_done(self, index, analysis_id):
         # Let each finished video pop up in the library right away (doesn't touch a
         # possibly open view -- those are different widgets).
         if self._shutting_down:
@@ -7936,10 +7936,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Batch done",
                 f"All {n_ok} videos have been analyzed and saved in the library.")
-    def _show_results(self, info, resultaten, events, bron=None):
+    def _show_results(self, info, resultaten, events, source=None):
         """
         Fills the view page with a results list. Shared by a fresh analysis and one
-        loaded from .npz (`bron` = the file name, for the status bar).
+        loaded from .npz (`source` = the file name, for the status bar).
         """
         self.events = events
 
@@ -7969,15 +7969,15 @@ class MainWindow(QMainWindow):
         # Comparing only works with an analysis that's in the library -- the compare
         # side reloads it from there. Same for the info: the metadata (app version,
         # settings) comes from the DB row.
-        self.btn_compare_this.setEnabled(self.analyse_id is not None)
-        self.btn_info.setEnabled(self.analyse_id is not None)
+        self.btn_compare_this.setEnabled(self.analysis_id is not None)
+        self.btn_info.setEnabled(self.analysis_id is not None)
         # Only offer it where there's something to gain: an analysis that already knows
         # the corner needs nothing, and without a library id the result can't be saved
         # anywhere.
         self.btn_corner_now.setEnabled(
-            self.analyse_id is not None and not any(r.bocht for r in resultaten))
+            self.analysis_id is not None and not any(r.bocht for r in resultaten))
 
-        herkomst = f"  ·  loaded from {bron}" if bron else ""
+        herkomst = f"  ·  loaded from {source}" if source else ""
         self.statusBar().showMessage(
             f"{os.path.basename(self.input_pad)} — {info.w}×{info.h} @ {info.fps:.1f}fps, "
             f"{len(resultaten)} frames, {len(events)} pushes found{herkomst}")
@@ -8250,7 +8250,7 @@ class MainWindow(QMainWindow):
         bezig = self._place is not None
         self.btn_undo.setEnabled(bool(self._undo) and not bezig)
         self.btn_redo.setEnabled(bool(self._redo) and not bezig)
-        self.btn_restore.setEnabled(self.analyse_id is not None and not bezig)
+        self.btn_restore.setEnabled(self.analysis_id is not None and not bezig)
         self.btn_next_gap.setEnabled(not bezig)
         # Only offer it where it makes sense: on a frame that already has a pose,
         # dragging is the tool, not placing -- and in the corner nothing is measured
@@ -8646,7 +8646,7 @@ class MainWindow(QMainWindow):
         Compute first, then ask: the user sees what it does to their table before
         anything goes to the library. On "no" everything goes back exactly as it was.
         """
-        if not self.resultaten or self.analyse_id is None:
+        if not self.resultaten or self.analysis_id is None:
             return
         info = self.video_info
         oude_vlaggen = [r.bocht for r in self.resultaten]
@@ -8682,7 +8682,7 @@ class MainWindow(QMainWindow):
 
         try:
             skate_db.save_corner_marking(
-                self.bieb, self.analyse_id, self.resultaten, info, self.events)
+                self.library, self.analysis_id, self.resultaten, info, self.events)
         except Exception as e:
             QMessageBox.warning(
                 self, "Not saved",
@@ -8701,10 +8701,10 @@ class MainWindow(QMainWindow):
 
     def _save(self):
         info = self.video_info
-        if self.analyse_id is not None:
+        if self.analysis_id is not None:
             try:
                 skate_db.save_edited_landmarks(
-                    self.bieb, self.analyse_id, self.resultaten, info, self.events)
+                    self.library, self.analysis_id, self.resultaten, info, self.events)
                 self.lbl_editor_hint.setText("Correction saved.")
             except Exception as e:
                 self.lbl_editor_hint.setText(f"Saving failed: {e}")
@@ -8747,7 +8747,7 @@ class MainWindow(QMainWindow):
         self._after_edit()
 
     def _restore_original(self):
-        if self.analyse_id is None:
+        if self.analysis_id is None:
             return
         if QMessageBox.question(
                 self, "Restore original",
@@ -8756,7 +8756,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         try:
-            hersteld = skate_db.restore_original_landmarks(self.bieb, self.analyse_id)
+            hersteld = skate_db.restore_original_landmarks(self.library, self.analysis_id)
         except Exception as e:
             QMessageBox.critical(self, "Restore original", f"Failed:\n\n{e}")
             return
@@ -8766,7 +8766,7 @@ class MainWindow(QMainWindow):
                 "This analysis hasn't been edited yet -- there's nothing to restore.")
             return
         try:
-            data = skate_db.load_analysis(self.bieb, self.analyse_id)
+            data = skate_db.load_analysis(self.library, self.analysis_id)
         except Exception as e:
             QMessageBox.critical(self, "Restore original", f"Reloading failed:\n\n{e}")
             return
@@ -8777,13 +8777,13 @@ class MainWindow(QMainWindow):
                            self.threshold, perspectief=self.perspectief)
         events = segment_pushes(resultaten)
         try:
-            skate_db.refresh_events_cache(self.bieb, self.analyse_id, events)
+            skate_db.refresh_events_cache(self.library, self.analysis_id, events)
         except Exception:
             pass
         self._undo.clear()
         self._redo.clear()
         self._manual.clear()
-        self._show_results(info, resultaten, events, bron=data["meta"]["titel"])
+        self._show_results(info, resultaten, events, source=data["meta"]["titel"])
         self._update_editor_buttons()
         self.lbl_editor_hint.setText("Original restored.")
 
@@ -8893,8 +8893,8 @@ class MainWindow(QMainWindow):
         # No longer the active window (alt-tab, a modal dialog in front): the key
         # release of . or , never arrives then and scrubbing would run forever.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
-            for toetsen in self._key_handlers:
-                toetsen.stop_scrubbing()
+            for keys in self._key_handlers:
+                keys.stop_scrubbing()
         super().changeEvent(event)
 
     def closeEvent(self, event):
@@ -8904,11 +8904,11 @@ class MainWindow(QMainWindow):
         self._stop_local_probe()
         self._stop_placing()   # still commit or roll back a running sequence
         self._pause_all()
-        for toetsen in self._key_handlers:
-            toetsen.detach()
+        for keys in self._key_handlers:
+            keys.detach()
         self.player.release()
-        self.side_left.leeg()
-        self.side_right.leeg()
+        self.side_left.clear()
+        self.side_right.clear()
         self._clean_up_clip_folder()   # trimmed fragments that will no longer be analyzed
         super().closeEvent(event)
 
