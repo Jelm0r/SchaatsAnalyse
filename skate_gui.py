@@ -444,7 +444,7 @@ def _calibration_rows(inst):
 
 # File filter for every video picker, derived from the extensions the library itself
 # accepts — otherwise `.mts` (AVCHD camcorder, exactly the interlaced material from
-# OPNAME.md) is present in the recordings folder but not in the file picker.
+# RECORDING.md) is present in the recordings folder but not in the file picker.
 VIDEO_FILTER = ("Video's (" + " ".join("*" + e for e in skate_db.VIDEO_EXTS) + ");;"
                 "Alle bestanden (*)")
 

@@ -438,7 +438,7 @@ def video_info(input_pad, force_fps=None):
 #
 # Measured on `00005.MTS` (AVCHD 1080i50) against the progressive phone clips: the two
 # fields sit **6.1 px** apart on knees and ankles (p90 13.4; max 44), against 0.06 px on
-# progressive material. With "2 px keypoint error = 2-4° angle error" (OPNAME.md), that's
+# progressive material. With "2 px keypoint error = 2-4° angle error" (RECORDING.md), that's
 # the single largest source of noise in that material — bigger than anything left to
 # gain algorithmically.
 DEINT_THRESHOLD    = 8      # per-pixel comb threshold on grayscale values

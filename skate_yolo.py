@@ -516,7 +516,7 @@ BOX_MIN_HEIGHT_PX   = 70     # below this there's nothing to measure: on `00000 
                              # fewer than four usable keypoints, and YOLO on a 5x
                              # magnified crop only saw a sporadic blob — the legs are
                              # then ~15 px, and 2 px of error is already 4°
-                             # (OPNAME.md). Only a warning.
+                             # (RECORDING.md). Only a warning.
 
 # COCO-17 keypoint index → MediaPipe 33-landmark index.
 COCO_TO_MP = {
