@@ -1200,15 +1200,65 @@ document supersedes it for anything about actual progress and lessons learned).
         referenced actually exists under that name in the current source) rather
         than the full `py_compile`/import/self-test chain those apply to code
         changes; no self-tests needed re-running since nothing executable changed.
-      **Still remaining**: `BUGS.md` (734 lines), `CLAUDE.md` (344 lines, dense —
-      do this one last, since it references identifiers across every other file
-      and needs everything else settled first). Both are large enough to warrant
-      their own session(s); pick up with `BUGS.md` next. Same identifier-
-      verification discipline applies: grep the current source before asserting a
-      rename, don't assume the glossary or `ROADMAP.md`'s now-verified rename
-      table covers every identifier `BUGS.md` mentions — it's a different
-      document with its own historical incidents and may reference names
-      `ROADMAP.md` never touched.
+      - `BUGS.md` — full translation (same filename, commit `87bfddc`, session 3 of
+        Phase 11). July-2026 code-review bug report, 24 findings + a re-check log.
+        Same identifier-verification discipline: grepped the current source
+        (`skate_analysis.py`, `skate_yolo.py`, `skate_gui.py`, `skate_db.py`,
+        `skate_eval.py`) for every function/class/constant/field before writing it
+        down. Confirmed renames not yet recorded elsewhere in this document:
+        `DoelTracker`->`TargetTracker`, `bepaal_afzet_uit_strek`->
+        `determine_push_from_extension`, `bepaal_afzetbeen`->`determine_push_leg`,
+        `detecteer_gewicht_op_been`->`detect_weight_on_leg`, `_kies_seed`->
+        `_choose_seed`, `_stik_keten`->`_stitch_chain`, `_splits_op_kleur`->
+        `_split_by_color`, `_kleur_sim`->`_color_sim` (now a nested closure inside
+        `_stitch_chain`, not a module-level function), `KleurReferentie`->
+        `ColorReference`, `Detectie`->`Detection`, `_interpoleer_doel`->
+        `_interpolate_target` (confirmed its `n_frames` parameter — finding C7's
+        subject — really is gone from the current signature),
+        `ONV_AFGEKAPT`/`ONV_GEEN_PUSH`->`INCOMPLETE_TRUNCATED`/`INCOMPLETE_NO_PUSH`,
+        `AFGEKAPT_MARKER`/`ONVOLLEDIG_MARKERS`->`TRUNCATED_MARKER`/
+        `INCOMPLETE_MARKERS`, `BibliotheekTeNieuw`->`LibraryTooNew`,
+        `AnalyseAfgebroken`->`AnalysisAborted`, `_meld_leesfout`->
+        `_report_read_error`, `_zoom_wiel`->`_zoom_wheel`, `bereken_metrics`->
+        `calculate_metrics`, `_botlengte_cv`->`_bone_length_cv`, plus the full set
+        of `skate_yolo.py` stitching/seeding constant renames (`KLIK_ZOEK_S`->
+        `CLICK_SEARCH_S`, `KLEUR_MATCH_MIN`/`_SPLIT_MIN`->`COLOR_MATCH_MIN`/
+        `_SPLIT_MIN`, `TRACK_HERSEED_GATE`->`TRACK_RESEED_GATE`,
+        `TRACK_GATE_GROEI`->`TRACK_GATE_GROWTH`, etc.). Left as literal Dutch
+        throughout, confirmed by grep to still be the real names in today's code
+        (not a translation gap): `doel_punt`, `laatste_bekend`, `kwijt`,
+        `heup_hist`/`heup_history`, `heup_dx`, `gewisseld`, `besloten`,
+        `hoek_buffer`, `hoek` (the literal parameter name in
+        `draw_leg_overlay`), `been`, and the `been`/`leg` field's stored values
+        `'links'`/`'rechts'`. **One bug caught and fixed after the first pass**:
+        `skate_eval.py`'s `annotate()` got a full clean translation with no shim in
+        Phase 7 (unlike `skate_analysis.py`/`skate_yolo.py`'s "locals stay Dutch"
+        lower bar) — its own current source uses `points`/`targets`/`stopped`, not
+        `punten`/`doelen`/`gestopt`, so the quoted code block under finding D3 had
+        to be corrected to match after checking that function's actual source
+        rather than assuming the same lower bar applied there too. Dropped the
+        `schaats_X.py:LINE`-style anchors throughout (stale after 14+ sessions of
+        refactoring since July 2026) for plain `[skate_X.py](skate_X.py)` links,
+        matching `EXE.md`/`GPU.md`'s convention from earlier in this phase.
+        `Documenten\SchaatsAnalyse\media\...` -> `Documents\SkateAnalysis\media\...`
+        (today's `default_library()` path). Kept as literal, untranslated facts:
+        scratchpad script paths/filenames, and one quoted historical SQL fragment
+        (`ALTER TABLE analyse ADD COLUMN video_bytes`, from the pre-Phase-5 schema
+        — accurately quotes what the *old* Dutch-named table looked like at the
+        time the bug occurred). **Verified**: grep of every identifier against
+        current source (all confirmed, the one exception above caught and fixed);
+        `py_compile` across the plain-venv modules; a script-checked pass over the
+        file for markdown table pipe-count consistency and code-fence balance. No
+        self-test re-run needed — pure `.md` edit, same bar as `ROADMAP.md`.
+
+      **Still remaining**: `CLAUDE.md` (344 lines, dense — do this one last, since
+      it references identifiers across every other file and needs everything else
+      settled first, which it now is). Same identifier-verification discipline
+      applies: grep the current source before asserting a rename, don't assume the
+      glossary or `ROADMAP.md`/`BUGS.md`'s now-verified rename tables cover every
+      identifier `CLAUDE.md` mentions — it's the densest and most
+      identifier-heavy document in the whole repo and may reference names neither
+      of those two touched.
 - [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
       self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
       exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
