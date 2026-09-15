@@ -1159,14 +1159,56 @@ document supersedes it for anything about actual progress and lessons learned).
         English gloss in parentheses; translating Windows/Drive themselves is out
         of scope.
 
-      **Still remaining**: `ROADMAP.md` (743 lines), `BUGS.md` (734 lines),
-      `CLAUDE.md` (344 lines, dense — do this one last, since it references
-      identifiers across every other file and needs everything else settled
-      first). All three are large enough to warrant their own session(s); pick up
-      with `ROADMAP.md` next. Same identifier-verification discipline applies:
-      grep the current source before asserting a rename, don't assume the Phase 6
-      glossary additions cover everything these two haven't been checked against
-      yet.
+      - `ROADMAP.md` — full translation (same filename, session 2 of Phase 11).
+        743 lines of historical planning/decision log spanning phases 0-8 plus
+        several "extra" features and two open ideas. No shim/compatibility-pattern
+        concerns here (it's prose, not code), but the same identifier-verification
+        discipline as every other Phase-11 doc applies: greped the current source
+        (`skate_analysis.py`, `skate_db.py`, `skate_yolo.py`, `skate_perspective.py`,
+        `skate_gui.py`) for every function/class/table/column/constant name the
+        document references before writing it down, rather than mechanically
+        glossary-translating each one blind — caught several that the glossary
+        alone wouldn't have gotten right, e.g. `resultaten_naar_arrays`/
+        `arrays_naar_resultaten` -> `results_to_arrays`/`arrays_to_results`,
+        `bepaal_bocht_reeks`/`bocht_ratio` -> `determine_corner_sequence`/
+        `corner_ratio`, `kader_reeks` -> `box_sequence`, `_stik_keten`'s gate
+        constants `STITCH_GATE_BASIS`/`_GROEI` -> `STITCH_GATE_BASIS`/`_GROWTH`,
+        `KLIK_ZOEK_S`/`KLIK_POORT_BASIS`/`_GROEI` -> `CLICK_SEARCH_S`/
+        `CLICK_GATE_BASE`/`_GROWTH`, `rij_offsets` -> `track_offsets`,
+        `VP_CONDITIE_WAARSCHUW`/`_MAX` -> `VP_CONDITION_WARN`/`_MAX`,
+        `GRIJP_MIN_PX`/`_MAX_PX` -> `HANDLE_MIN_PX`/`_MAX_PX`,
+        `ONVOLLEDIG_MARKERS` -> `INCOMPLETE_MARKERS`, and the full SQL schema
+        (table/column names) shown in phases 1 and 8's code blocks, which the
+        original Dutch document had never been updated to match Phase 5/8's real
+        renames (`schaatser`/`analyse`/`bronvideo`/`bron_markering`/
+        `afzet_event_cache` -> `skater`/`analysis`/`source_video`/
+        `source_marking`/`push_event_cache`, plus every column). Kept as literal
+        Dutch, matching the "shared vocabulary" and settled-exception calls made
+        in Phase 8: `doel_punt`, `doel_kader`, `schaatser_id`, `voorgevuld`,
+        `input_pad`/`titel` inside the documented `{input_pad, schaatser_id,
+        titel}` batch-task dict shape (all confirmed via grep to still be the
+        literal current parameter/key names in `skate_gui.py`/`skate_yolo.py`
+        today, not stale leftovers). Class names updated throughout to their
+        Phase 8 renames (`TargetPicker`, `HorizonPicker`, `CalibrationPicker`,
+        `FragmentPicker`, `FragmentBar`, `BatchAnalysisDialog`, `VideoPlayer`,
+        `MasterClock`, `CompareSide`, `AnalysisInfoDialog`, etc.), all confirmed
+        present in `skate_gui.py` by class-name grep before use. `bronvideo`'s
+        design-note prose section keeps `bronvideo`/`opnames/` where it's naming
+        the *file-system folder* (an explicit exception, never renamed) but uses
+        `source_video` for the *table*. No code was touched — pure `.md` edit —
+        so the verification here is grep-only (confirming every identifier
+        referenced actually exists under that name in the current source) rather
+        than the full `py_compile`/import/self-test chain those apply to code
+        changes; no self-tests needed re-running since nothing executable changed.
+      **Still remaining**: `BUGS.md` (734 lines), `CLAUDE.md` (344 lines, dense —
+      do this one last, since it references identifiers across every other file
+      and needs everything else settled first). Both are large enough to warrant
+      their own session(s); pick up with `BUGS.md` next. Same identifier-
+      verification discipline applies: grep the current source before asserting a
+      rename, don't assume the glossary or `ROADMAP.md`'s now-verified rename
+      table covers every identifier `BUGS.md` mentions — it's a different
+      document with its own historical incidents and may reference names
+      `ROADMAP.md` never touched.
 - [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
       self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
       exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
