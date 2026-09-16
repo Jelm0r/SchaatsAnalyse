@@ -34,8 +34,8 @@ import skate_perspective   # pure numpy — safe in both venvs
 
 
 # ── Where do the files live? ────────────────────────────────────────────────────
-# These three belong here (the lowest shared module: schaats_gui, schaats_yolo, and
-# schaats_db all import them from here), but now live in skate_environment.py — that
+# These three belong here (the lowest shared module: skate_gui, skate_yolo, and
+# skate_db all import them from here), but now live in skate_environment.py — that
 # module is stdlib-only and thus loadable before the splash screen, where `data_dir()`
 # is already needed to redirect output (EXE.md step 2) while this module pulls in
 # cv2+numpy. They're re-exported here, so every existing import keeps working unchanged.
@@ -191,7 +191,7 @@ EXTENSION_MIN_SLOPE_DEG = 20.0   # minimum slope of the lower leg relative to ve
 # needs to check truthiness, while the GUI can tell the user WHAT went wrong — "the
 # video ended" calls for a longer recording, "no full push observed" calls for a
 # critical look at the leg assignment. The texts double as the marker that travels along
-# in the library's events cache (schaats_db).
+# in the library's events cache (skate_db).
 INCOMPLETE_TRUNCATED = "truncated"      # run runs to the end of the video/pose segment
 INCOMPLETE_NO_PUSH   = "no full push"   # plateau covers only the standing-up
 
@@ -240,11 +240,11 @@ SKELETON = (255, 200, 0)  # bright cyan-blue; clearly visible and doesn't clash 
 def _alias(new_name):
     """Builds a get/set property that mirrors `new_name`, so a call site that still
     uses the original Dutch field name keeps working without change. Transitional —
-    see the translate-to-english plan: schaats_gui.py/schaats_yolo.py/schaats_db.py/
-    schaats_eval.py/schaats_schermtest.py aren't translated yet and still read/write
-    these fields by their old names. Remove each alias once nothing references it
-    anymore. A plain (un-annotated) class attribute like this is not picked up by
-    @dataclass as a field, so it coexists safely with the real ones."""
+    see the translate-to-english plan: `skate_gui.py`'s `MainWindow` and `skate_db.py`'s
+    events-cache builder still read/write these fields by their old names (deliberately
+    left that way — see the plan's "shared vocabulary" notes). Remove each alias once
+    nothing references it anymore. A plain (un-annotated) class attribute like this is
+    not picked up by @dataclass as a field, so it coexists safely with the real ones."""
     def getter(self):
         return getattr(self, new_name)
 
@@ -299,10 +299,10 @@ class FrameResult:
     speed: float = None         # m/s (only if the line-distance scale is known)
 
     # Transitional Dutch-name aliases (see `_alias` above); remove once
-    # schaats_gui.py/schaats_yolo.py/schaats_db.py/schaats_eval.py/schaats_schermtest.py
-    # are translated and nothing references them anymore. `frame_nr` and `lm`/`lm_data`
-    # keep their names outright — short and already language-neutral, not worth the
-    # churn of renaming every call site across the whole project for them.
+    # skate_gui.py's MainWindow and skate_db.py's events-cache builder are translated
+    # and nothing references them anymore. `frame_nr` and `lm`/`lm_data` keep their
+    # names outright — short and already language-neutral, not worth the churn of
+    # renaming every call site across the whole project for them.
     tijd = _alias("time")
     been = _alias("leg")
     hoek = _alias("angle")
@@ -402,12 +402,10 @@ class PerspectiveConfig:
                    ankle_height=d.get("ankle_height", d.get("enkel_hoogte", ANKLE_HEIGHT_M)),
                    calibration_input=calibration_input)
 
-    # Transitional Dutch-name aliases (see `_alias` above) — schaats_gui.py still reads
+    # Transitional Dutch-name aliases (see `_alias` above) — skate_gui.py still reads
     # and constructs these by their old names.
-    kalibratie = _alias("calibration")
     methode = _alias("method")
     onderbeen_l = _alias("lower_leg_l")
-    enkel_hoogte = _alias("ankle_height")
     invoer = _alias("calibration_input")
     naar_dict = to_dict
     uit_dict = classmethod(from_dict.__func__)
@@ -576,7 +574,7 @@ class VideoReader:
 
     Everything else (`grab`, `set`, `get`, `isOpened`, `release`) goes through
     `__getattr__` to the capture, so every existing read loop keeps working unchanged —
-    the same pass-through pattern as the DirectML shell in schaats_yolo.
+    the same pass-through pattern as the DirectML shell in skate_yolo.
     """
 
     def __init__(self, input_pad, threshold=DEINT_THRESHOLD):
@@ -1787,7 +1785,7 @@ def trim_fragments(bron_pad, fragmenten, doelmap, progress_callback=None,
 
     **One sequential pass**: every frame goes to the writer of every fragment it falls
     in, so the video is decoded exactly once and there's never any seeking — same
-    motive as the read loop in `schaats_yolo._detecteer_alles`, and overlapping
+    motive as the read loop in `skate_yolo._detect_all`, and overlapping
     fragments are therefore simply fine (the frame then goes to two writers).
 
     Codec `mp4v`: bundled with the opencv-python wheel, whereas `avc1` is often missing
@@ -2076,7 +2074,7 @@ def _world_trajectory(resultaten, perspectief, fps, w, h):
     (standing still, a gap), it falls back to the track-line direction (world-y) with
     the sign of the net displacement — after all, the track lines ARE the direction of travel.
     """
-    kal = perspectief.kalibratie
+    kal = perspectief.calibration
     n = len(resultaten)
     pos = np.full((n, 2), np.nan)
     for i, r in enumerate(resultaten):
@@ -2087,7 +2085,7 @@ def _world_trajectory(resultaten, perspectief, fps, w, h):
         else:                             # no cyclic assignment: lowest ankle in frame
             e_idx = L_ANKLE if r.lm[L_ANKLE].y >= r.lm[R_ANKLE].y else R_ANKLE
         P = skate_perspective.point_on_ice(kal, _lm_px(r, e_idx, w, h),
-                                           height=perspectief.enkel_hoogte)
+                                           height=perspectief.ankle_height)
         if P is not None:
             pos[i] = P[:2]
 
@@ -2118,18 +2116,18 @@ def _perspective_angle(r, enkel_px, knie_px, perspectief, richting):
     measurement on a failed reconstruction (ankle above the horizon — can only happen
     with a derailed detection).
     """
-    # Transitional: PerspectiveConfig.methode/perspectief.methode still hold the
-    # original Dutch method names here until schaats_gui.py is translated in its own
-    # phase (see the translate-to-english plan). Normalize once, locally, so the
-    # comparison below and the call into skate_perspective agree — the same shim
-    # `reconstruct_angle` itself falls back on.
+    # `perspectief.methode` can still hold the original Dutch method value
+    # ('onderbeen'/'beenvlak') on a config reconstructed from an analysis saved before
+    # the English rename (Pattern E — persisted data, not a code-translation gap).
+    # Normalize once, locally, so the comparison below and the call into
+    # skate_perspective agree — the same shim `reconstruct_angle` itself falls back on.
     method = {"onderbeen": "lower_leg", "beenvlak": "leg_plane"}.get(
         perspectief.methode, perspectief.methode)
     rec = skate_perspective.reconstruct_angle(
-        perspectief.kalibratie, enkel_px, knie_px,
+        perspectief.calibration, enkel_px, knie_px,
         method=method, lower_leg_l=perspectief.onderbeen_l,
         plane_direction=richting if method == 'leg_plane' else None,
-        travel_direction=richting, ankle_height=perspectief.enkel_hoogte)
+        travel_direction=richting, ankle_height=perspectief.ankle_height)
     oude_hoek = calculate_angle_to_ice(enkel_px, knie_px, r.horizon_deg)
     if rec is None:
         r.hoek_correctie = None
@@ -2227,7 +2225,7 @@ def process_derivatives(resultaten, w, h, fps, smooth_n=5, threshold=0.015, cycl
             if np.isnan(posities[i, 0]):
                 continue
             r.wereld_xy = (float(posities[i, 0]), float(posities[i, 1]))
-            if perspectief.kalibratie.scale_known:
+            if perspectief.calibration.scale_known:
                 j0, j1 = max(i - k, 0), min(i + k, len(resultaten) - 1)
                 d = posities[j1] - posities[j0]
                 if not np.isnan(d[0]) and j1 > j0:
@@ -2362,7 +2360,7 @@ def set_horizon(resultaten, input_pad, info, horizon_deg, auto_horizon, force_fp
     knows the camera pose exactly) — this then only drives the drawn ice line.
     """
     if perspectief is not None:
-        hz = perspectief.kalibratie.horizon_deg
+        hz = perspectief.calibration.horizon_deg
         for r in resultaten:
             r.horizon_deg = hz
         return
@@ -2693,42 +2691,6 @@ def analyze_video(input_pad, output_pad, model_pad, smooth_n=5, threshold=0.015,
     events = segment_pushes(resultaten)
     print(f"\n[DONE] Result saved: {output_pad}")
     print(f"        {idx} frames processed, {len(events)} pushes found")
-
-
-# ── Transitional Dutch-name aliases (module level) ──────────────────────────────
-# schaats_gui.py/schaats_yolo.py/schaats_db.py/schaats_eval.py/schaats_schermtest.py
-# aren't translated yet (see the translate-to-english plan) and still do
-# `from schaats_analyse import <dutch name>` — now `from skate_analysis import
-# <dutch name>`, since only the module's own file got renamed in those import lines,
-# not the names inside them (that's each file's own phase). These aliases keep every
-# such import resolving to the same object under its new English name. Remove each one
-# once nothing imports it anymore.
-FrameResultaat = FrameResult
-AfzetEvent = PushEvent
-PerspectiefConfig = PerspectiveConfig
-KnipAfgebroken = TrimAborted
-ONV_AFGEKAPT = INCOMPLETE_TRUNCATED
-ONV_GEEN_PUSH = INCOMPLETE_NO_PUSH
-BOCHT_IN = CORNER_IN
-BOCHT_UIT = CORNER_OUT
-sla_landmarks_op = save_landmarks
-laad_landmarks = load_landmarks
-arrays_naar_resultaten = arrays_to_results
-resultaten_naar_arrays = results_to_arrays
-verwerk_afgeleiden = process_derivatives
-segmenteer_afzetten = segment_pushes
-bereken_hoek_tov_ijs = calculate_angle_to_ice
-bocht_ratio = corner_ratio
-bepaal_bocht_reeks = determine_corner_sequence
-teken_overlay_op_frame = draw_overlay_on_frame
-horizon_hoek_uit_lijn = horizon_angle_from_line
-detecteer_ijslijn = detect_ice_line
-kader_reeks = box_sequence
-maak_voorvulling = make_prefill
-knip_fragmenten = trim_fragments
-zet_horizon = set_horizon
-fase_voortgang = phase_progress
-analyseer = analyze
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

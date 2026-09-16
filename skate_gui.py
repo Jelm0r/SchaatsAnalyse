@@ -604,7 +604,7 @@ IS_YOLO = _HAS_YOLO
 # Prediction of skate_yolo.BACKEND_NAME (that module isn't loaded yet). Once it is, this
 # name gets replaced by its own — so a mismatch corrects itself, and the name saved with
 # an analysis always comes from the backend itself.
-BACKEND_NAME = (("YOLO-pose + ByteTrack + RTMPose-verfijning" if _HAS_RTMPOSE
+BACKEND_NAME = (("YOLO-pose + ByteTrack + RTMPose refinement" if _HAS_RTMPOSE
                  else "YOLO-pose + ByteTrack") if IS_YOLO else "MediaPipe")
 
 _backend_slot = threading.Lock()
@@ -4337,7 +4337,7 @@ class FragmentPicker(QDialog):
     """
     The trim window (ROADMAP phase 8): go through a half-hour recording and mark the
     usable stretches. Yields a list `(start_frame, eind_frame, naam)`; the actual trim is
-    done by `schaats_analyse.trim_fragments`, and the clips then enter the existing batch
+    done by `skate_analysis.trim_fragments`, and the clips then enter the existing batch
     flow as pre-filled rows.
 
     **This is a trimming tool and the trimming is entirely manual.** The app decides
@@ -5295,7 +5295,7 @@ class LocalProbe(QThread):
 class CopyWorker(QThread):
     """Copies recordings from the camera to `opnames/` in the background
     (`skate_db.copy_to_recordings`). On a thread because a single 4 GB recording takes
-    minutes and the progress bar has to keep moving meanwhile; 'Stoppen' =
+    minutes and the progress bar has to keep moving meanwhile; 'Stop' =
     `requestInterruption`, which the copy loop reads as `stop_check` -- it then cleans up
     the partial file itself."""
 
@@ -5328,7 +5328,7 @@ class CopyDialog(QDialog):
     Drive folder writes in fits and starts, and with the overall average the estimate
     would lag behind there for minutes. The display is roughly rounded (`_remaining_text`)
     so it doesn't jump back and forth on every tick. The window only closes once the
-    thread is done -- closing via ✕ or Esc is 'Stoppen', since destroying a running
+    thread is done -- closing via ✕ or Esc is 'Stop', since destroying a running
     QThread is a crash."""
 
     def __init__(self, worker, aantal, parent=None):
@@ -7685,11 +7685,11 @@ class MainWindow(QMainWindow):
 
     def _clip_to_temp(self, source_path, fragments, info, deinterlacen=False):
         """Writes the marked parts to a temporary folder and returns the paths (or []
-        on cancel/error). `sla_analyse_op` copies them afterwards as always to
+        on cancel/error). `skate_db.save_analysis` copies them afterwards as always to
         `media/<uuid>/` -- one extra copy of a short file, not worth breaking open that
         save route for."""
         self._clean_up_clip_folder()
-        self._clip_tmp_dir = tempfile.mkdtemp(prefix="schaats_fragmenten_")
+        self._clip_tmp_dir = tempfile.mkdtemp(prefix="skate_fragments_")
 
         voortgang = QProgressDialog("Trimming fragments...", "Stop", 0, 100, self)
         voortgang.setWindowTitle("Trimming")

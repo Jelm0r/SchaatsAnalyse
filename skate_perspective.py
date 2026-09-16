@@ -530,11 +530,11 @@ def reconstruct_angle(kal, ankle_px, knee_px, method="lower_leg",
     (pixel above the horizon). `reliable=False` marks frames where the leg is nearly
     in the viewing direction (condition < {:.0f}°) or the geometry didn't close.
     """.format(CONDITION_MIN_DEG)
-    # Transitional: schaats_analyse.py/schaats_gui.py haven't been translated to
-    # English yet (see the translate-to-english plan) and still pass the original
-    # Dutch method names through PerspectiefConfig/the calibration dialog. Accept both
-    # spellings here so this module can be finished on its own without a cross-file
-    # break; drop this once every caller uses 'lower_leg'/'leg_plane' directly.
+    # `skate_gui.py`'s calibration dialog can still pass through the original Dutch
+    # method value on a `PerspectiveConfig` reconstructed from an analysis saved before
+    # the English rename (Pattern E — persisted data, not a code-translation gap).
+    # Accept both spellings here so this module can be finished on its own without a
+    # cross-file break; drop this once every caller uses 'lower_leg'/'leg_plane' only.
     method = {"onderbeen": "lower_leg", "beenvlak": "leg_plane"}.get(method, method)
 
     A = point_on_ice(kal, ankle_px, height=ankle_height)

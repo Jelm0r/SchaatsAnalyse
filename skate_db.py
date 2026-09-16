@@ -43,8 +43,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import date
 
-from skate_analysis import (sla_landmarks_op, laad_landmarks, video_info,
-                             ONV_AFGEKAPT, ONV_GEEN_PUSH, is_frozen, data_dir)
+from skate_analysis import (save_landmarks, load_landmarks, video_info,
+                             INCOMPLETE_TRUNCATED, INCOMPLETE_NO_PUSH, is_frozen, data_dir)
 
 DB_NAME      = "schaats.db"
 MEDIA_DIR    = "media"
@@ -65,11 +65,12 @@ SOURCE_STATUSES = ("todo", "in_progress", "done", "unusable")
 SOURCE_STATUS_DEFAULT = SOURCE_STATUSES[0]
 # Text flags in push_event_cache.note for a push that stays visible but falls outside
 # the average angle (`PushEvent.incomplete`). The texts are skate_analysis's own, so
-# caches from before the second reason just keep working: `ONV_AFGEKAPT` is still
-# literally "truncated" (translated from "afgekapt" together with skate_analysis.py;
-# see the v5->v6 migration for how already-cached rows from before that rename catch up).
-TRUNCATED_MARKER = ONV_AFGEKAPT
-INCOMPLETE_MARKERS = (ONV_AFGEKAPT, ONV_GEEN_PUSH)
+# caches from before the second reason just keep working: `INCOMPLETE_TRUNCATED` is
+# still literally "truncated" (translated from "afgekapt" together with
+# skate_analysis.py; see the v5->v6 migration for how already-cached rows from before
+# that rename catch up).
+TRUNCATED_MARKER = INCOMPLETE_TRUNCATED
+INCOMPLETE_MARKERS = (INCOMPLETE_TRUNCATED, INCOMPLETE_NO_PUSH)
 ENV_LIBRARY = "SKATEANALYSIS_LIBRARY"   # override for tests
 ENV_LOCAL = "SKATEANALYSIS_LOCAL"       # same, for the local library
 LOCAL_DIR = "local"                     # under data_dir(): the local library
@@ -483,7 +484,7 @@ def _migrate(con, van, bieb):
                 con.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
 
         # 3. Status enum values. Persisted directly (also used verbatim as the status
-        #    combobox's items in schaats_gui.py) with NO recompute path of its own —
+        #    combobox's items in skate_gui.py) with NO recompute path of its own —
         #    unlike the event cache below, nothing ever regenerates this column, so a
         #    row left on the old spelling would sit outside the new enum forever.
         con.execute(
@@ -627,14 +628,13 @@ def _normalize_backend(name):
 
 def _add_legacy_keys(d, **old_equals_new):
     """Adds the original Dutch keys back onto an already-built dict, each pointing at
-    the same value as its new English column name, so schaats_gui.py (not translated
-    yet, see the translate-to-english plan) can keep reading a returned row by its
-    original key — module-level function/class aliases (see the bottom of this file)
-    only cover `schaats_db.some_function`, not the *shape* of what a function returns,
-    so this is the other half of that same compatibility story. Call as
-    `_add_legacy_keys(d, oude_naam="new_name", ...)`; a mapping is only applied where
-    `new_name` is actually present in `d`. Mutates and returns `d`. Remove each call
-    once its caller reads the new names directly."""
+    the same value as its new English column name, so skate_gui.py's still-partly-Dutch
+    `MainWindow` (see the translate-to-english plan) can keep reading a returned row by
+    its original key — `skate_db.py`'s own functions have called their real English
+    names directly since Phase 9; this covers only the *shape* of what a function
+    returns, not its name. Call as `_add_legacy_keys(d, oude_naam="new_name", ...)`; a
+    mapping is only applied where `new_name` is actually present in `d`. Mutates and
+    returns `d`. Remove each call once its caller reads the new names directly."""
     for old, new in old_equals_new.items():
         if new in d:
             d[old] = d[new]
@@ -831,7 +831,7 @@ def save_analysis(bieb, schaatser_id, titel, video_pad, info, resultaten, events
         os.makedirs(doelmap)
         videokopie = os.path.join(doelmap, videonaam)
         shutil.copy2(video_pad, videokopie)
-        sla_landmarks_op(os.path.join(doelmap, NPZ_NAME), resultaten, info)
+        save_landmarks(os.path.join(doelmap, NPZ_NAME), resultaten, info)
         video_bytes = os.path.getsize(videokopie)
 
         rel_video = f"{MEDIA_DIR}/{analyse_id}/{videonaam}"
@@ -904,7 +904,7 @@ def load_analysis(bieb, analyse_id):
     empty — run process_derivatives() + segment_pushes() (the phase 0 seam)."""
     meta = analysis_meta(bieb, analyse_id)
     # Keep the npz read outside the DB connection (keep the connection as short as possible).
-    info, resultaten = laad_landmarks(os.path.join(bieb, MEDIA_DIR, analyse_id, NPZ_NAME))
+    info, resultaten = load_landmarks(os.path.join(bieb, MEDIA_DIR, analyse_id, NPZ_NAME))
     return {"meta": meta, "info": info, "resultaten": resultaten,
             "video_pad": _abs_path(bieb, meta["video_file"])}
 
@@ -1019,25 +1019,25 @@ def copy_plan(bieb, paden):
         item = {"pad": pad, "naam": naam, "bytes": 0, "doel": doel, "reden": None}
         plan.append(item)
         if not os.path.isfile(pad):
-            item["reden"] = "bestand niet gevonden"
+            item["reden"] = "file not found"
             continue
         item["bytes"] = os.path.getsize(pad)
         if os.path.splitext(naam)[1].lower() not in VIDEO_EXTS:
-            item["reden"] = "geen videobestand"
+            item["reden"] = "not a video file"
         elif _in_recordings_dir(bieb, pad):
-            item["reden"] = "staat al in de map opnames"
+            item["reden"] = "already in the opnames folder"
         elif os.path.normcase(naam) in gezien:
-            item["reden"] = "twee keer gekozen"
+            item["reden"] = "chosen twice"
         elif os.path.exists(doel):
             try:
                 bestaand = os.path.getsize(doel)
             except OSError:
                 bestaand = None
             if bestaand == item["bytes"]:
-                item["reden"] = "staat al in de bibliotheek"
+                item["reden"] = "already in the library"
             else:
-                item["reden"] = ("er staat al een ánder bestand met deze naam in de "
-                                 "bibliotheek — hernoem het eerst op de camera")
+                item["reden"] = ("a different file with this name is already in the "
+                                 "library — rename it on the camera first")
         gezien.add(os.path.normcase(naam))
     return plan
 
@@ -1087,7 +1087,7 @@ def copy_to_recordings(bieb, plan, progress_callback=None, stop_check=None):
             raise
         except OSError as e:
             _remove_quietly(tmp)
-            item["reden"] = f"mislukt: {e.strerror or e}"
+            item["reden"] = f"failed: {e.strerror or e}"
             gedaan += item["bytes"]        # the bar shouldn't stay stuck on this file
             if progress_callback:
                 progress_callback(gedaan, totaal, idx, item["naam"])
@@ -1479,7 +1479,7 @@ def save_edited_landmarks(bieb, analyse_id, resultaten, info, events):
     ruw = os.path.join(doelmap, NPZ_RAW_NAME)
     if not os.path.isfile(ruw) and os.path.isfile(npz):
         shutil.copy2(npz, ruw)          # pristine original, only on the first edit
-    sla_landmarks_op(npz, resultaten, info)
+    save_landmarks(npz, resultaten, info)
     with _connect(bieb) as con:
         con.execute("UPDATE analysis SET edited = 1 WHERE id = ?", (analyse_id,))
         _write_events_cache(con, analyse_id, events)
@@ -1499,7 +1499,7 @@ def save_corner_marking(bieb, analyse_id, resultaten, info, events):
     comparable with other unedited analyses (see the warning in skate_eval).
     """
     npz = os.path.join(bieb, MEDIA_DIR, analyse_id, NPZ_NAME)
-    sla_landmarks_op(npz, resultaten, info)
+    save_landmarks(npz, resultaten, info)
     with _connect(bieb) as con:
         _write_events_cache(con, analyse_id, events)
 
@@ -1542,7 +1542,7 @@ def delete_analysis(bieb, analyse_id):
 if __name__ == "__main__":
     import tempfile
     import numpy as np
-    from skate_analysis import arrays_naar_resultaten, resultaten_naar_arrays, AfzetEvent
+    from skate_analysis import arrays_to_results, results_to_arrays, PushEvent
 
     tmp = tempfile.mkdtemp(prefix="skate_db_test_")
     try:
@@ -1772,18 +1772,18 @@ if __name__ == "__main__":
             "w": np.int32(64), "h": np.int32(48),
             "fps": np.float32(25.0), "totaal": np.int32(n),
         }
-        info, resultaten = arrays_naar_resultaten(arrays)
+        info, resultaten = arrays_to_results(arrays)
         events = [
-            AfzetEvent(0, "links",  0,  5, 0.00, 0.20, 40.0, 38.0, 44.0),
-            AfzetEvent(1, "rechts", 6, 12, 0.24, 0.48, 42.0, 40.0, 45.0,
-                       note="gemiste tegenafzet?"),
+            PushEvent(0, "links",  0,  5, 0.00, 0.20, 40.0, 38.0, 44.0),
+            PushEvent(1, "rechts", 6, 12, 0.24, 0.48, 42.0, 40.0, 45.0,
+                       note="missed counter-push?"),
             # Incomplete: count toward the total, but not toward the average angle —
             # otherwise those far-too-steep angles would drag the average up. Both
             # reasons, since `list_analyses` must filter out both.
-            AfzetEvent(2, "links",  13, 19, 0.52, 0.76, 79.0, 60.0, 80.0,
-                       incomplete=ONV_AFGEKAPT),
-            AfzetEvent(3, "rechts", 20, 26, 0.80, 1.04, 83.0, 74.0, 88.0,
-                       incomplete=ONV_GEEN_PUSH),
+            PushEvent(2, "links",  13, 19, 0.52, 0.76, 79.0, 60.0, 80.0,
+                       incomplete=INCOMPLETE_TRUNCATED),
+            PushEvent(3, "rechts", 20, 26, 0.80, 1.04, 83.0, 74.0, 88.0,
+                       incomplete=INCOMPLETE_NO_PUSH),
         ]
         video = os.path.join(tmp, "Testvideo.mp4")
         with open(video, "wb") as f:
@@ -2066,7 +2066,7 @@ if __name__ == "__main__":
         assert detect_conflict_copies(bieb) == ["schaats-LAPTOP.db"]
         os.remove(os.path.join(bieb, "adressen.db"))
         os.remove(os.path.join(bieb, "schaats-LAPTOP.db"))
-        terug = resultaten_naar_arrays(data["resultaten"], data["info"])
+        terug = results_to_arrays(data["resultaten"], data["info"])
         assert np.array_equal(terug["landmarks"], arrays["landmarks"])
 
         rename_analysis(bieb, aid, "Hernoemd")
@@ -2079,7 +2079,7 @@ if __name__ == "__main__":
         bewerkt_res = list(data["resultaten"])
         r0 = bewerkt_res[0]
         r0.lm[26] = r0.lm[26]._replace(x=0.123, y=0.456, visibility=1.0)  # r_knee moved
-        bewerkte_events = [AfzetEvent(0, "links", 0, 5, 0.00, 0.20, 30.0, 28.0, 33.0)]
+        bewerkte_events = [PushEvent(0, "links", 0, 5, 0.00, 0.20, 30.0, 28.0, 33.0)]
         save_edited_landmarks(bieb, aid, bewerkt_res, data["info"], bewerkte_events)
         assert os.path.isfile(os.path.join(map_a, NPZ_RAW_NAME))
         with np.load(os.path.join(map_a, NPZ_NAME)) as gew:
@@ -2143,9 +2143,9 @@ if __name__ == "__main__":
         plan = copy_plan(bieb, [groot, dubbel, anders, os.path.join(camera, "weg.mp4"),
                                    os.path.join(camera, "notitie.txt"), groot])
         assert [i["reden"] is None for i in plan] == [True, False, False, False, False, False]
-        assert plan[1]["reden"] == "staat al in de bibliotheek"
-        assert "hernoem" in plan[2]["reden"] and plan[3]["reden"] == "bestand niet gevonden"
-        assert plan[4]["reden"] == "geen videobestand" and plan[5]["reden"] == "twee keer gekozen"
+        assert plan[1]["reden"] == "already in the library"
+        assert "rename" in plan[2]["reden"] and plan[3]["reden"] == "file not found"
+        assert plan[4]["reden"] == "not a video file" and plan[5]["reden"] == "chosen twice"
         # Abort after the first block: no file, no partial file, nothing in the scan.
         tellers = []
         try:
@@ -2170,8 +2170,8 @@ if __name__ == "__main__":
         assert sync_source_dir(bieb) == 1
         assert source_video_for_path(bieb, plan[0]["doel"])["bestand"] == f"{RECORDINGS_DIR}/00007.MTS"
         # One more time: now it's "already in the library".
-        assert copy_plan(bieb, [groot])[0]["reden"] == "staat al in de bibliotheek"
+        assert copy_plan(bieb, [groot])[0]["reden"] == "already in the library"
 
-        print("Zelftest OK")
+        print("Self-test OK")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

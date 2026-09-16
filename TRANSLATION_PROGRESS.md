@@ -1303,18 +1303,142 @@ document supersedes it for anything about actual progress and lessons learned).
         needed, same bar as `ROADMAP.md`/`BUGS.md`.
 
       **Phase 11 is now done.**
-- [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
-      self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
-      exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
-      the renamed files, and **delete the `schaats_yolo.py` compatibility shim**
-      (`schaats_db.py`'s own shim — and the Dutch-alias block in `skate_db.py` it
-      depended on — was already deleted in Phase 9, once `schaats_schermtest.py`, its
-      last consumer, was translated) and any leftover `_add_legacy_keys()`/`_alias()`
-      calls whose caller has by now been translated directly — they're transitional,
-      not permanent design. `schaats_yolo.py` is already fully orphaned (nothing
-      imports it — `skate_gui.py` calls `skate_yolo` directly) but stays until Phase
-      10 updates `schaatsanalyse.spec`'s hidden-imports list and entry point, which
-      still reference it.
+- [x] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo; every
+      self-test (`skate_environment.py`, `skate_perspective.py`, `skate_db.py`,
+      `.venv-yolo\Scripts\python.exe skate_yolo.py`, `skate_screentest.py` quick and
+      `--all`); a real `import skate_gui`/`import skate_yolo` under both venvs
+      (offscreen Qt); `grep -ri schaats` repo-wide, iterated to a clean state (see
+      below); confirmed `start_gui.bat`/`build.bat`/`skate_analysis.spec` already
+      pointed at the renamed files (true since Phase 10 — no change needed there).
+
+      **Deleted `schaats_yolo.py`** (the last surviving Pattern-B shim) and the
+      now-dead "Transitional Dutch-name aliases" block at the bottom of
+      `skate_yolo.py` (`BACKEND_NAAM`, `analyseer`) — confirmed via grep that
+      `skate_gui.py`'s `_load_backend()` already does `import skate_yolo` and reads
+      `skate_yolo.BACKEND_NAME`/`skate_yolo.analyze` directly (since Phase 9), so
+      nothing referenced either alias anymore.
+
+      **`_add_legacy_keys()`/`_alias()` audit** — checked every one of `skate_db.py`'s
+      four `_add_legacy_keys()` call sites and every `FrameResult`/`PushEvent`/
+      `PerspectiveConfig` `_alias()` in `skate_analysis.py` against a repo-wide grep
+      for its old name. Two were genuinely dead and removed:
+      - `PerspectiveConfig.kalibratie`/`.enkel_hoogte` — turned out to have zero
+        external readers (`skate_gui.py` only ever reads `.methode`/`.onderbeen_l`/
+        `.invoer` on this class); their only uses were **internal** to
+        `skate_analysis.py` itself (`_world_trajectory`, `_perspective_angle`,
+        `process_derivatives`, `set_horizon` — 6 call sites), so those were switched
+        to the real field names `.calibration`/`.ankle_height` and the two aliases
+        deleted. `.methode`/`.onderbeen_l`/`.invoer` stay — confirmed live in
+        `skate_gui.py` (3/2/5 hits).
+      - The entire **module-level alias block** at the bottom of `skate_analysis.py`
+        (26 names: `FrameResultaat`, `AfzetEvent`, `PerspectiefConfig`,
+        `KnipAfgebroken`, `ONV_AFGEKAPT`, `ONV_GEEN_PUSH`, `BOCHT_IN`/`BOCHT_UIT`,
+        `sla_landmarks_op`, `laad_landmarks`, `arrays_naar_resultaten`,
+        `resultaten_naar_arrays`, `verwerk_afgeleiden`, `segmenteer_afzetten`,
+        `bereken_hoek_tov_ijs`, `bocht_ratio`, `bepaal_bocht_reeks`,
+        `teken_overlay_op_frame`, `horizon_hoek_uit_lijn`, `detecteer_ijslijn`,
+        `kader_reeks`, `maak_voorvulling`, `knip_fragmenten`, `zet_horizon`,
+        `fase_voortgang`, `analyseer`) — a repo-wide grep (all `.py`/`.spec`/`.bat`
+        files, not just the modules `_alias()`'s own comment named) found **zero**
+        remaining readers for any of them. Turned out `skate_db.py` was the one
+        actual holdout: its top-level import and self-test still did
+        `from skate_analysis import (sla_landmarks_op, laad_landmarks, ...,
+        ONV_AFGEKAPT, ONV_GEEN_PUSH, ...)` and used `AfzetEvent`/
+        `arrays_naar_resultaten`/`resultaten_naar_arrays` in its self-test, even
+        though `skate_db.py`'s *own* functions have used real English names since
+        Phase 5 — a Pattern-A import that Phase 5/9 never got around to switching
+        over cross-module. Switched all of it (import line, `TRUNCATED_MARKER`/
+        `INCOMPLETE_MARKERS`, `save_landmarks`/`load_landmarks` call sites, the
+        self-test's local import and its `PushEvent(...)`/`arrays_to_results`/
+        `results_to_arrays` calls) to the real names, confirmed the block was then
+        dead repo-wide, and deleted it. The per-field `FrameResult`/`PushEvent`
+        `_alias()`s (`.hoek`/`.been`/`.bocht`/...) themselves are **not** dead —
+        `skate_gui.py`'s `MainWindow` still reads dozens of them (40+ live hits
+        across the ~15 fields) and `skate_db.py`'s own events-cache builder
+        (`_meta_from_row` neighbor, `ev.been`/`.hoek`/`.eind_frame`/etc. in
+        `refresh_events_cache`) reads five more — left exactly as documented, updated
+        the stale comments pointing at those (see below) to name the real remaining
+        readers instead of a blanket "isn't translated yet" claim that's no longer
+        accurate now that the module itself has a real name.
+
+      **Real bugs found and fixed along the way** (not just stale comments):
+      1. `skate_db.py`'s self-test printed `"Zelftest OK"` — the one genuinely
+         untranslated piece of *output* text left in a file whose Phase 5 entry
+         claims full translation; a plain oversight, now `"Self-test OK"` (matching
+         every other module's self-test).
+      2. `skate_db.copy_plan()`/`copy_to_recordings()` (the "from camera to
+         library" feature, added 12 Sep 2026 — after Phase 5 had already closed)
+         built its `reden` (skip-reason) strings entirely in Dutch: `"bestand niet
+         gevonden"`, `"geen videobestand"`, `"staat al in de map opnames"`,
+         `"twee keer gekozen"`, `"staat al in de bibliotheek"`, the "different file,
+         same name" sentence, and `f"mislukt: {e}"`. `skate_gui.py`'s
+         `_import_from_camera`/`_copy_reasons` interpolates this string **directly**
+         into a `QMessageBox` shown to the user — so this was live, user-facing
+         Dutch text sitting inside an otherwise fully-English dialog flow. Translated
+         all seven to English and updated the four self-test assertions that checked
+         the old Dutch strings verbatim.
+      3. `skate_gui.py`'s hardcoded `BACKEND_NAME` **prediction** (shown in the
+         status bar until the real backend import replaces it — see the "Startup"
+         section of `CLAUDE.md`) still read `"YOLO-pose + ByteTrack +
+         RTMPose-verfijning"`, one word out of step with `skate_yolo.BACKEND_NAME`'s
+         real (translated) `"... RTMPose refinement"`. Harmless in the sense that it
+         self-corrects the instant the backend loads, but genuinely visible Dutch
+         text for however long that takes. Fixed to match exactly.
+
+      **Stale filename/function references in comments and docstrings** (not
+      behavior bugs, but exactly what `grep -ri schaats` is supposed to catch and
+      what a future reader would otherwise wrongly resolve): `skate_analysis.py` had
+      six separate comments still naming `schaats_gui.py`/`schaats_yolo.py`/
+      `schaats_db.py`/`schaats_eval.py`/`schaats_schermtest.py`/`schaats_analyse`
+      (including one naming a function by its pre-Phase-6 Dutch name,
+      `schaats_yolo._detecteer_alles`, now `skate_yolo._detect_all`) — all updated,
+      and the two `_alias()`-adjacent comments also had their *claims* corrected
+      (see above: naming the actual remaining readers instead of a stale "hasn't
+      been translated yet" that's no longer true of the module as a whole).
+      `skate_perspective.py` had one comment making the same now-false claim about
+      `schaats_analyse.py`/`schaats_gui.py` "not translated yet" — reworded to
+      correctly describe this as Pattern E (old *persisted* analyses can still carry
+      the Dutch `'onderbeen'/'beenvlak'` method value), not a code-translation gap.
+      `skate_db.py` had three more stale filename mentions (`schaats_gui.py` x2,
+      `schaats_db.some_function` in `_add_legacy_keys`'s own docstring — also
+      corrected the now-false "module-level function/class aliases at the bottom of
+      this file" claim, since that block was deleted back in Phase 9).
+      `skate_gui.py` had two: `schaats_analyse.trim_fragments` (now
+      `skate_analysis.trim_fragments`) and a `tempfile.mkdtemp(prefix=
+      "schaats_fragmenten_")` (harmless but pointlessly Dutch — now
+      `"skate_fragments_"`), plus a docstring naming the pre-Phase-5 Dutch
+      `sla_analyse_op` where it meant `skate_db.save_analysis`, and two stray
+      `'Stoppen'` mentions in `CopyDialog`'s docstring (the button itself has read
+      "Stop" since it was written — just the docstring's quoted button name was
+      stale). `start_gui.bat`'s one-line Dutch `REM` comment (explicitly deferred by
+      Phase 10 as "incidental, not in this phase's scope") — translated.
+
+      **What's left matching `schaats`, confirmed to be exactly the explicit
+      exceptions list**: `schaats.db` (literal filename, all modules),
+      `SchaatsAnalyse` (the pre-rename `%APPDATA%`/`%LOCALAPPDATA%` folder-migration
+      source path, three sites — must stay byte-identical, it's matching an
+      on-disk path from before this whole rename), `schaatsanalyse.ico`'s absence
+      (already gone, not a hit), and `skate_db.py`'s conflict-copy self-test/
+      docstring examples (`'schaats-DESKTOP.db'`, `'schaats (1).db'`,
+      `'schaats-LAPTOP.db'`, `'schaats....db'`) — these are deliberately
+      Dutch-database-derived example filenames a sync client would leave next to
+      the real `schaats.db`, not identifiers. `schaatser`/`schaatsers`/
+      `schaatser_id`/`schaatser_naam` throughout `skate_gui.py`'s `MainWindow` are
+      the already-settled Phase 8 "shared vocabulary" list, unchanged.
+
+      **Verified**: `python -m py_compile` on all eight touched files; `python
+      skate_db.py` (self-test OK, including the four updated `copy_plan` assertions);
+      `python skate_environment.py`; `python skate_perspective.py` (PASS);
+      `.venv-yolo\Scripts\python.exe skate_yolo.py` (all three self-tests OK); real
+      `import skate_gui`/`import skate_yolo` under both venvs with
+      `QT_QPA_PLATFORM=offscreen`, confirming `skate_gui.BACKEND_NAME`'s corrected
+      prediction now matches `skate_yolo.BACKEND_NAME` exactly once both are
+      imported; `.venv-yolo\Scripts\python.exe skate_screentest.py` quick mode
+      (16/16) and `--all` (22 failures — identical count to the pre-existing
+      documented baseline, i.e. no regression from any edit this phase); a final
+      repo-wide `grep -ri schaats` sweep showing only the exceptions listed above.
+
+      **Phase 12 is now done — the translate-to-english effort is complete.**
 
 ## Explicit exceptions — never rename these
 

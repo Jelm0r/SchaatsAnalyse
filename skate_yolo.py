@@ -2307,18 +2307,6 @@ def _self_test_spyglass():
     print("Self-test _Spyglass OK")
 
 
-# ── Transitional Dutch-name aliases ───────────────────────────────────────────────
-# schaats_gui.py isn't translated yet (see the translate-to-english plan) and does a
-# bare `import schaats_yolo`, then reads `schaats_yolo.BACKEND_NAAM` and calls
-# `schaats_yolo.analyseer(...)` (in `_laad_backend()`). `schaats_yolo.py` itself now
-# only exists as a tiny compatibility shim (`from skate_yolo import *`), so these
-# aliases are what makes those two names available on this module for that shim to
-# re-export. Remove both (and eventually the shim file) once schaats_gui.py is
-# translated and imports skate_yolo directly under its real names.
-BACKEND_NAAM = BACKEND_NAME
-analyseer = analyze
-
-
 if __name__ == '__main__':
     _self_test_corner_guard()
     _self_test_seed()
