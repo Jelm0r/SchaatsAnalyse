@@ -1768,7 +1768,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
               progress_callback=None, yolo_model=None, horizon_deg=0.0,
               auto_horizon=False, verfijn=True, perspectief=None,
               waarschuwing_callback=None, bocht=True, deinterlacen=None,
-              doel_kader=None):
+              doel_kader=None, bocht_data=False):
     """
     Volledige analyse via YOLO-pose + ByteTrack + offline doelkeuze + crop-verfijning.
     Signatuur-compatibel met schaats_analyse.analyseer() (`model_pad` — het MediaPipe
@@ -1795,6 +1795,10 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     en leveren bochtframes geen afzetmeting. Dat is hier vooral een snelheidsmaatregel:
     de detectiepass is het leeuwendeel van de analysetijd en in de bocht valt er niets te
     meten. Met `bocht=False` wordt elk frame geïnfereerd en gemeten, zoals voorheen.
+    Met `bocht_data=True` wordt elk frame geïnfereerd en verfijnd (dus óók in de
+    bocht), maar krijgt elk bochtframe zijn `bocht`-vlag: landmarks worden gewoon
+    opgeslagen (datacollectie voor een toekomstige bochtmeting), terwijl
+    `segmenteer_afzetten` ze weigert — er komen dus géén bochtafzetten uit.
     """
     info = video_info(input_pad, force_fps)
     # None = zelf uitzoeken (CLI-gemak); de GUI bepaalt het in de dialoog en geeft een
@@ -1835,7 +1839,8 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     # frames over en zijn de frames die hij nog wél infereert enkel controleframes;
     # allebei staan ze in `buiten_meting` en gaan zo de rest van de pijplijn in.
     frames, buiten_meting = _detecteer_alles(input_pad, model, info,
-                                             progress_callback=det_cb, bocht=bocht,
+                                             progress_callback=det_cb,
+                                             bocht=(False if bocht_data else bocht),
                                              waarschuwing_callback=waarschuwing_callback,
                                              deinterlacen=deinterlacen)
     n_frames = len(frames)
@@ -1907,9 +1912,10 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
     # bocht wél heeft geïnfereerd geven daar het oordeel; zeggen die dat het rechte stuk
     # alweer bezig is, dan draait de detectiepass daarná weer op vol tempo en worden
     # díe frames wél gewoon gemeten.
-    if bocht:
+    if bocht or bocht_data:
         _bocht_met_controleframes(resultaten, buiten_meting, info)
-        bocht_per_frame = [r.bocht for r in resultaten]
+        # bocht_data: verfijn ook de bochtframes, dus geen skip-lijst doorgeven.
+        bocht_per_frame = None if bocht_data else [r.bocht for r in resultaten]
     else:
         bocht_per_frame = None
 
@@ -1955,7 +1961,7 @@ def analyseer(input_pad, model_pad=None, smooth_n=5, threshold=0.015, force_fps=
 
     if smooth_landmarks:
         smooth_landmarks_offline(resultaten, info.w, info.h, fps=info.fps)
-    if bocht:
+    if bocht or bocht_data:
         # Nog eens, nu op de verfijnde landmarks: de frames die pass 2 erbij heeft
         # gevonden krijgen zo alsnog hun eigen oordeel.
         _bocht_met_controleframes(resultaten, buiten_meting, info)
