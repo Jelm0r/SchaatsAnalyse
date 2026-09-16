@@ -1124,7 +1124,7 @@ document supersedes it for anything about actual progress and lessons learned).
       `.venv-yolo\Scripts\python.exe skate_screentest.py` (quick mode) — 16/16
       windows pass; repo-wide grep for the old filenames — zero hits outside the
       three markdown files Phase 11 will handle.
-- [ ] **Phase 11 — Documentation** (in progress). Translate `CLAUDE.md`, `ROADMAP.md`,
+- [x] **Phase 11 — Documentation**. Translate `CLAUDE.md`, `ROADMAP.md`,
       `BUGS.md`, `EXE.md`, `GPU.md`, `TODO_CRASH.md`, `INSTALLEREN.md`→`INSTALL.md`,
       `OPNAME.md`→`RECORDING.md`, `README.md`. Do this only once the actual names/
       paths they describe are final (i.e., after Phase 10), or you'll be translating
@@ -1251,14 +1251,58 @@ document supersedes it for anything about actual progress and lessons learned).
         file for markdown table pipe-count consistency and code-fence balance. No
         self-test re-run needed — pure `.md` edit, same bar as `ROADMAP.md`.
 
-      **Still remaining**: `CLAUDE.md` (344 lines, dense — do this one last, since
-      it references identifiers across every other file and needs everything else
-      settled first, which it now is). Same identifier-verification discipline
-      applies: grep the current source before asserting a rename, don't assume the
-      glossary or `ROADMAP.md`/`BUGS.md`'s now-verified rename tables cover every
-      identifier `CLAUDE.md` mentions — it's the densest and most
-      identifier-heavy document in the whole repo and may reference names neither
-      of those two touched.
+      - `CLAUDE.md` — full translation (same filename, session 4 of Phase 11,
+        344 → 344 lines). The densest, most identifier-heavy document in the repo:
+        it describes the whole architecture across every module, so before writing
+        each section this session grepped the real source (`def`/`class` listings,
+        module-level constants, and — critically — the `_alias()` tables at the
+        bottom of `skate_analysis.py`/`skate_perspective.py`, which give an exact
+        Dutch→English mapping for every `FrameResult`/`PushEvent`/`PerspectiveConfig`/
+        `CalibrationInput` field) rather than trusting the glossary or
+        `ROADMAP.md`/`BUGS.md`'s rename tables to cover every name this document
+        happens to mention. That grep-first discipline caught real mistakes made
+        *while translating this same session*, not just pre-existing drift:
+        `bocht_ratio`→`corner_ratio` (the function was renamed but the prose used the
+        old name), `lm_data['l_heup']`→`lm_data['l_hip']` (the dict key was already
+        translated in `skate_analysis.py`, phase 4), `kader_uitkomst`→`box_outcome`,
+        `_pas_edit_toe`→`_apply_edit`, `hist_masker`→`hist_mask`,
+        `minimum_met_afbreking`→`minimum_with_wrapping`, `schat`→`estimate`, and
+        roughly twenty `MainWindow`-method mistakes (`_opname_beschikbaar`,
+        `_bekijk_losse_video`, `_zet_modus`, `_kies_video`, `_pending_opslag`,
+        `_scrub_doel`, `_zoom_volg`, `_trim_recording`, `VENSTER_RAND`,
+        `_alles_tick`, worker signals `taak_start`/`alles_klaar`, ...) from
+        wrongly assuming Session 8's "MainWindow identifiers stay Dutch until
+        session 9" note still applied — session 9 (already landed before this one)
+        had in fact renamed the whole class, including its skeleton-editor and
+        recordings-tab sections, so the right names were sitting in the source the
+        whole time and just needed to be grepped rather than guessed. Caught via a
+        scripted pass (extract every backtick-quoted identifier-shaped token from
+        the finished document, grep it against the concatenation of all eight
+        `skate_*.py` files, list what's missing) run twice — 29 misses on the first
+        pass, 5 harmless false positives (real filenames/an illustrative Qt method
+        name/a placeholder) left on the second. `--no-bocht` (the CLI flag) is
+        `--no-corner` in the real argparse block, another catch from checking
+        rather than assuming the flag list translates 1:1 with the glossary.
+        Two genuinely settled Dutch exceptions carried through unchanged, per the
+        glossary/session-13 note: `doel_punt`/`doel_kader`/`perspectief`/`bocht`/
+        `waarschuwing_callback` as literal keyword arguments, and the whole
+        `bieb`/`schaatser_id`/`analyse_id`/`naam`/`titel`/`resultaten`/`events`/
+        `deinterlacen`/`trainer_naam`/`huidige_idx` "shared vocabulary" list.
+        Explicit exceptions from the table above kept literal: `schaats.db`,
+        `opnames/`, `landmarks.npz`/`landmarks_ruw.npz`, `media/`.
+        **Verified**: the repo-wide `def`/`class`/constant grep described above (two
+        passes, clean on the second bar 5 known-good exceptions); a repo-wide grep
+        for every old module filename (`schaats_*.py`) and every old class name from
+        the glossary/rename tables (`DoelTracker`, `AfzetEvent`, `FrameResultaat`,
+        `_BochtWacht`, `_Kijkglas`, `DoelKiezer`, `VideoSpeler`, `SpelerToetsen`,
+        `MasterKlok`, `VergelijkKant`, `BekijkVenster`, `NieuweAnalyseDialog`, ...) —
+        zero hits; a scripted check of markdown-table pipe-count consistency and
+        code-fence balance; a scan for common Dutch function words and for any
+        accented character — zero hits, confirming no stray Dutch sentence fragment
+        survived. No code was touched — pure `.md` edit — so no self-test re-run was
+        needed, same bar as `ROADMAP.md`/`BUGS.md`.
+
+      **Phase 11 is now done.**
 - [ ] **Phase 12 — Final sweep**. `python -m py_compile` across the whole repo, every
       self-test once more, `grep -ri schaats` repo-wide (expect only the explicit
       exceptions below to still match), confirm `start_gui.bat`/`build.bat` point at
