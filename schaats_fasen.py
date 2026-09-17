@@ -38,8 +38,10 @@ CLI:
                              [--rotatie 10.0] [--dump] [--rook png]
 """
 import argparse
+import csv
 import json
 import math
+import os
 import sys
 
 import cv2
@@ -161,11 +163,16 @@ def automatische_fasen(resultaten, info, rotatie_graden=10.0):
 
 
 def duw_pct(slag, fps=None):
+    """Efficientie-score: 1.0 = 50% van de slag is de efficiënte duwfase (2→3).
+
+    score = aandeel efficiënte frames / 0.5 → 2.0 = hele slag efficiënt,
+    1.0 = helft, 0.5 = kwart.
+    """
     try:
         a, b, c, d = slag['pushing_start'], slag['endpush_start'], slag['positioning_start'], slag['end_frame']
         if None in (a, b, c, d) or d <= c:
             return None
-        return round(100.0 * (b - a) / (d - c), 1)
+        return round(2.0 * (b - a) / (d - c), 2)
     except (KeyError, TypeError):
         return None
 
@@ -204,6 +211,105 @@ def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None, fase_
         cv2.putText(fr, f'dit frame: {fase_frame.upper()}', (w // 2 - 350, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
     return fr
+
+
+def scan_videos(d):
+    if not os.path.isdir(d):
+        return []
+    vids = []
+    for f in sorted(os.listdir(d)):
+        if f.startswith('._') or not f.lower().endswith(('.mp4', '.mov', '.m4v')):
+            continue
+        vids.append(os.path.join(d, f))
+    return vids
+
+
+def video_paden(video_pad):
+    stem = os.path.splitext(os.path.basename(video_pad))[0]
+    d = os.path.dirname(video_pad)
+    return {
+        'video': video_pad,
+        'npz': os.path.join(d, 'npz', stem + '.npz'),
+        'fasen': os.path.join(d, 'fasen', stem + '.fasen.json'),
+        'rapport': os.path.join(d, 'reports', stem),
+    }
+
+
+def laad_fasen_json(pad):
+    with open(pad) as fh:
+        return json.load(fh).get('strokes', [])
+
+
+def lege_resultaten(video_pad, fps=None):
+    """Frames zonder landmarks: handmatige annotatie van een onbewerkte video."""
+    cap = cv2.VideoCapture(video_pad)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    fps_v = cap.get(cv2.CAP_PROP_FPS) or (fps or 30.0)
+    cap.release()
+    info = sa.VideoInfo(w=0, h=0, fps=fps_v, totaal=n)
+    res = [sa.FrameResultaat(frame_nr=i, tijd=i / fps_v) for i in range(n)]
+    for r in res:
+        r.pose_gevonden = False
+        r.bocht = False
+    return info, res
+
+
+def fase_banden_op_frame(fr, slagen, slag):
+    if slag:
+        if 'positioning_start' in slag and 'pushing_start' in slag:
+            cv2.rectangle(fr, (slag['positioning_start'], 0), (slag['pushing_start'], 14),
+                          BAND_KLEUR['positioning'], -1)
+        if 'pushing_start' in slag and 'endpush_start' in slag:
+            cv2.rectangle(fr, (slag['pushing_start'], 0), (slag['endpush_start'], 14),
+                          BAND_KLEUR['duw'], -1)
+        if 'endpush_start' in slag and 'end_frame' in slag:
+            cv2.rectangle(fr, (slag['endpush_start'], 0), (slag['end_frame'], 14),
+                          BAND_KLEUR['eind'], -1)
+    return fr
+
+
+def rapport(slagen, info, resultaten, out_dir, video_pad):
+    """Push- en efficientierapport: CSV per slag + overlayvideo met fasebanden."""
+    os.makedirs(out_dir, exist_ok=True)
+    events = sa.segmenteer_afzetten(resultaten) if resultaten and resultaten[0].lm_data else []
+    csv_pad = os.path.join(out_dir, 'rapport.csv')
+    with open(csv_pad, 'w', newline='', encoding='utf-8') as fh:
+        wcsv = csv.writer(fh)
+        wcsv.writerow(['slag', 'been', 'positionering_start', 'pushing_start',
+                       'endpush_start', 'end_frame', 'duur_pos_s', 'duur_duw_s',
+                       'duur_eind_s', 'efficientie_pct', 'afzethoek', 'gecorrigeerd'])
+        fps = info.fps or 30.0
+        for i, s in enumerate(slagen):
+            a = s.get('positioning_start', s.get('pushing_start', 0))
+            b = s.get('endpush_start', s.get('pushing_start', 0))
+            c = s.get('endpush_start', s.get('end_frame', 0))
+            d = s.get('end_frame', 0)
+            ev = next((e for e in events if e.start_frame == s.get('pushing_start')), None)
+            wcsv.writerow([i, s.get('been', '?'), s.get('positioning_start', ''),
+                           s.get('pushing_start', ''), s.get('endpush_start', ''),
+                           s.get('end_frame', ''),
+                           round((b - a) / fps, 2), round((c - b) / fps, 2),
+                           round((d - c) / fps, 2), duw_pct(s),
+                           ev.hoek if ev else '', bool(s.get('corrected'))])
+    mp4 = os.path.join(out_dir, 'overlay.mp4')
+    writer = cv2.VideoWriter(mp4, cv2.VideoWriter_fourcc(*'mp4v'), info.fps or 30.0,
+                             (info.w, info.h))
+    cap = cv2.VideoCapture(video_pad)
+    for idx, r in enumerate(resultaten):
+        ok, fr = cap.read()
+        if not ok:
+            break
+        fr = teken_hulplijnen(fr, r, info.w, info.h)
+        slag = None
+        for s in slagen:
+            if s.get('positioning_start', -1) <= idx <= s.get('end_frame', -1):
+                slag = s
+                break
+        fr = fase_banden_op_frame(fr, slagen, slag)
+        writer.write(fr)
+    cap.release()
+    writer.release()
+    return csv_pad, mp4
 
 
 def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
@@ -320,16 +426,13 @@ def main_rook(npz_pad, video_pad, uit_png, frame_nr=100, rotatie=10.0):
 def run_gui(args):
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QImage, QPixmap
-    from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget,
-                                   QListWidgetItem, QMainWindow, QPushButton,
-                                   QStatusBar, QVBoxLayout, QWidget)
+    from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
+                                   QListWidget, QListWidgetItem, QMainWindow,
+                                   QPushButton, QStatusBar, QVBoxLayout, QWidget)
 
-    info, resultaten = laad_context(args.npz)
-    slagen = automatische_fasen(resultaten, info, args.rotatie)
-
-    def slag_index_op_frame(f):
+    def slag_index_in(slagen, f):
         for i, s in enumerate(slagen):
-            if s['positioning_start'] <= f <= s['end_frame']:
+            if s.get('positioning_start', -1) <= f <= s.get('end_frame', -1):
                 return i
         return None
 
@@ -338,26 +441,52 @@ def run_gui(args):
     class Venster(QMainWindow):
         def __init__(self):
             super().__init__()
-            self.cap = cv2.VideoCapture(args.input)
+            self.cap = None
+            self.video_pad = None
+            self.info = None
+            self.resultaten = []
+            self.slagen = []
             self.f = 0
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.volgende)
             self.bewerk_i = None
-            self.bewerk_fase = 0   # 0..3: welke fasegrens je aan het definiëren bent
+            self.bewerk_fase = 0
 
-            self.video_label = QLabel(' laden…')
+            # links: videolijst
+            self.videolijst = QListWidget()
+            self.videolijst.itemClicked.connect(self.klik_video)
+            self.videolijst.setFixedWidth(300)
+            self.b_map = QPushButton('Kies map…')
+            self.b_map.clicked.connect(self.kies_map)
+            self.b_rapport = QPushButton('Rapport + overlay (R)')
+            self.b_rapport.clicked.connect(self.maak_rapport)
+            links = QVBoxLayout()
+            links.addWidget(self.b_map)
+            links.addWidget(self.videolijst, 1)
+            links.addWidget(self.b_rapport)
+            links_w = QWidget()
+            links_w.setLayout(links)
+
+            # midden: video + tijdlijn
+            self.video_label = QLabel(' kies een video…')
             self.video_label.setAlignment(Qt.AlignCenter)
             self.tijd_label = QLabel()
             self.tijd_label.setFixedHeight(40)
+            midden = QVBoxLayout()
+            midden.addWidget(self.video_label, 1)
+            midden.addWidget(self.tijd_label)
+            midden_w = QWidget()
+            midden_w.setLayout(midden)
+
+            # rechts: fasen
+            self.fase_label = QLabel('geen fase')
+            self.fase_label.setAlignment(Qt.AlignCenter)
+            self.fase_label.setFixedHeight(50)
+            self.fase_label.setStyleSheet(
+                'font-size: 18px; font-weight: bold; color: white; background: #555;')
             self.lijst = QListWidget()
             self.lijst.itemClicked.connect(self.klik_slag)
             self.lijst.setFixedWidth(430)
-
-            self.fase_label = QLabel('geen fase')
-            self.fase_label.setAlignment(Qt.AlignCenter)
-            self.fase_label.setFixedHeight(46)
-            self.fase_label.setStyleSheet('font-size: 20px; font-weight: bold; color: #222; background: #555;')
-
             self.b_redefine = QPushButton('Redefine (E)')
             self.b_redefine.clicked.connect(self.toggle_bewerk)
             self.b_new = QPushButton('Nieuw (N)')
@@ -375,14 +504,11 @@ def run_gui(args):
             fase_knoppen = QHBoxLayout()
             for b in self.b_fasen:
                 fase_knoppen.addWidget(b)
-
             knoppen = QHBoxLayout()
             for b in (self.b_redefine, self.b_new, self.b_undo, self.b_save):
                 knoppen.addWidget(b)
-
             legend = QLabel(LEGENDA)
             legend.setStyleSheet('font-size: 12px; color: #ccc;')
-
             rechts = QVBoxLayout()
             rechts.addWidget(self.fase_label)
             rechts.addWidget(self.lijst, 1)
@@ -392,47 +518,137 @@ def run_gui(args):
             rechts_w = QWidget()
             rechts_w.setLayout(rechts)
 
-            links = QVBoxLayout()
-            links.addWidget(self.video_label, 1)
-            links.addWidget(self.tijd_label)
-            links_w = QWidget()
-            links_w.setLayout(links)
-
             top = QHBoxLayout()
-            top.addWidget(links_w, 1)
+            top.addWidget(links_w)
+            top.addWidget(midden_w, 1)
             top.addWidget(rechts_w)
             w = QWidget()
             w.setLayout(top)
             self.setCentralWidget(w)
             self.status = QStatusBar()
             self.setStatusBar(self.status)
-            for wdgt in (self.lijst, self.b_redefine, self.b_new, self.b_undo, self.b_save):
+            self.setWindowTitle('Schaats-werkbank — fasen per slag')
+            self.resize(1750, 900)
+            for wdgt in (self.videolijst, self.lijst, self.b_redefine, self.b_new,
+                         self.b_undo, self.b_save, self.b_map, self.b_rapport):
                 wdgt.setFocusPolicy(Qt.NoFocus)
             for b in self.b_fasen:
                 b.setFocusPolicy(Qt.NoFocus)
             self.setFocusPolicy(Qt.StrongFocus)
-            self.setWindowTitle('Fasen-marker v3')
-            self.resize(1550, 900)
-            self.vul_lijst()
+
+            self.map = args.map or os.path.expanduser('~/SchaatsAnalyse-album')
+            self.vul_videolijst()
+            if self.videos:
+                self.laad_video(self.videos[0])
             self.toon()
+
+        def vul_videolijst(self):
+            self.videos = scan_videos(self.map)
+            self.videolijst.blockSignals(True)
+            self.videolijst.clear()
+            for v in self.videos:
+                stem = os.path.splitext(os.path.basename(v))[0]
+                p = video_paden(v)
+                if os.path.exists(p['fasen']):
+                    st = laad_fasen_json(p['fasen'])
+                    ncorr = sum(1 for s in st if s.get('corrected'))
+                    status = f'{len(st)} slagen ({ncorr} gecorrigeerd)'
+                elif os.path.exists(p['npz']):
+                    status = 'voorbereid (auto)'
+                else:
+                    status = 'geen analyse — handmatig'
+                self.videolijst.addItem(QListWidgetItem(f'{os.path.basename(v)}\n{status}'))
+            self.videolijst.blockSignals(False)
+
+        def kies_map(self):
+            d = QFileDialog.getExistingDirectory(self, 'Kies videomap', self.map)
+            if d:
+                self.map = d
+                self.vul_videolijst()
+                if self.videos:
+                    self.laad_video(self.videos[0])
+                    self.toon()
+
+        def klik_video(self, item):
+            self.timer.stop()
+            self.laad_video(self.videos[self.videolijst.row(item)])
+            self.toon()
+
+        def laad_video(self, video_pad):
+            self.video_pad = video_pad
+            p = video_paden(video_pad)
+            os.makedirs(os.path.join(self.map, 'npz'), exist_ok=True)
+            os.makedirs(os.path.join(self.map, 'fasen'), exist_ok=True)
+            self.cap = cv2.VideoCapture(video_pad)
+            if not self.cap.isOpened():
+                self.status.showMessage(f'video niet te lezen: {video_pad}', 6000)
+                return
+            self.bewerk_i = None
+            self.bewerk_fase = 0
+            self.f = 0
+            self.timer.stop()
+            if os.path.exists(p['npz']):
+                self.info, self.resultaten = laad_context(p['npz'])
+            else:
+                self.info, self.resultaten = lege_resultaten(video_pad)
+            if os.path.exists(p['fasen']):
+                self.slagen = laad_fasen_json(p['fasen'])
+            elif self.resultaten and self.resultaten[0].lm_data is not None:
+                self.slagen = automatische_fasen(self.resultaten, self.info, args.rotatie)
+            else:
+                self.slagen = []
+            self.vul_lijst()
+            self.status.showMessage(f'geladen: {os.path.basename(video_pad)}', 4000)
 
         def vul_lijst(self):
             self.lijst.blockSignals(True)
             self.lijst.clear()
-            for i, s in enumerate(slagen):
+            for i, s in enumerate(self.slagen):
                 pct = duw_pct(s)
                 vlag = '  [GEWIJZIGD]' if s.get('corrected') else ''
                 item = QListWidgetItem(
-                    f"slag {i:>2} {s['been']:<6} f{s['positioning_start']}-{s['end_frame']}  "
-                    f"duw f{s['pushing_start']}–f{s['endpush_start']}  "
-                    f"efficientie {pct if pct is not None else '—'}%{vlag}")
+                    f"slag {i:>2} {s.get('been', '?'):<6} f{s.get('positioning_start', '?')}-"
+                    f"{s.get('end_frame', '?')}  efficientie {pct if pct is not None else '—'}%{vlag}")
                 if s.get('corrected'):
                     item.setBackground(Qt.yellow)
                 if i == self.bewerk_i:
-                    item.setText(item.text() + '  << BEWERKEN (1/2/3/4) >>')
+                    item.setText(item.text() + '  << BEWERKEN >>')
                     item.setBackground(Qt.red)
                 self.lijst.addItem(item)
             self.lijst.blockSignals(False)
+
+        def maak_rapport(self):
+            if self.video_pad is None or not self.info:
+                self.status.showMessage('geen video geladen', 3000)
+                return
+            p = video_paden(self.video_pad)
+            self.status.showMessage('rapport wordt gegenereerd (overlayvideo kan even duren)…')
+            QApplication.processEvents()
+            try:
+                csv_pad, mp4 = rapport(self.slagen, self.info, self.resultaten,
+                                       p['rapport'], self.video_pad)
+            except Exception as e:
+                self.status.showMessage(f'rapport mislukt: {e}', 6000)
+                return
+            self.opslaan(stil=True)
+            self.status.showMessage(f'rapport: {csv_pad} + {mp4}', 8000)
+
+        def opslaan(self, stil=False):
+            if self.video_pad is None:
+                return
+            p = video_paden(self.video_pad)
+            os.makedirs(os.path.dirname(p['fasen']), exist_ok=True)
+            data = {'video': self.video_pad, 'fps': self.info.fps,
+                    'rotatie_graden': args.rotatie, 'strokes': self.slagen}
+            with open(p['fasen'], 'w') as fh:
+                json.dump(data, fh, indent=1)
+            if not stil:
+                self.status.showMessage(f'opgeslagen: {p["fasen"]}', 5000)
+
+        def klik_slag(self, item):
+            self.timer.stop()
+            self.f = self.slagen[self.lijst.row(item)].get('positioning_start', self.f)
+            self.toon()
 
         def toggle_bewerk(self):
             if self.bewerk_i is not None:
@@ -440,19 +656,18 @@ def run_gui(args):
             else:
                 row = self.lijst.currentRow()
                 if row < 0:
-                    row = slag_index_op_frame(self.f)
+                    row = slag_index_in(self.slagen, self.f)
                     if row is None:
-                        vorige = [i for i, s in enumerate(slagen)
-                                  if s['positioning_start'] <= self.f]
-                        row = vorige[-1] if vorige else (0 if slagen else None)
+                        vorige = [i for i, s in enumerate(self.slagen)
+                                  if s.get('positioning_start', 0) <= self.f]
+                        row = vorige[-1] if vorige else (0 if self.slagen else None)
                 if row is None:
                     self.status.showMessage('geen slagen — druk N voor een nieuwe slag', 4000)
-                    self.toon()
                     return
                 self.lijst.setCurrentRow(row)
                 self.bewerk_i = row
                 self.bewerk_fase = 0
-                self.f = slagen[row]['positioning_start']
+                self.f = self.slagen[row]['positioning_start']
                 self.timer.stop()
             self.vul_lijst()
             self.toon()
@@ -460,22 +675,23 @@ def run_gui(args):
         def nieuwe_slag(self):
             s = {'been': '?', 'positioning_start': self.f, 'pushing_start': self.f,
                  'endpush_start': self.f, 'end_frame': self.f, 'corrected': True}
-            slagen.append(s)
-            slagen.sort(key=lambda x: x['positioning_start'])
-            self.bewerk_i = slagen.index(s)
+            self.slagen.append(s)
+            self.slagen.sort(key=lambda x: x.get('positioning_start', 0))
+            self.bewerk_i = self.slagen.index(s)
+            self.bewerk_fase = 0
             self.timer.stop()
             self.vul_lijst()
             self.toon()
 
         def zet_fase(self, toets):
             if self.bewerk_i is None:
-                i = slag_index_op_frame(self.f)
+                i = slag_index_in(self.slagen, self.f)
                 if i is None:
                     self.status.showMessage('geen slag op dit frame — E of N eerst', 3000)
                     return
                 self.bewerk_i = i
                 self.bewerk_fase = 0
-            s = slagen[self.bewerk_i]
+            s = self.slagen[self.bewerk_i]
             s[FASEN_KEYS[toets]] = self.f
             s['corrected'] = True
             self.bewerk_fase = min(3, int(toets))
@@ -484,98 +700,82 @@ def run_gui(args):
 
         def ongedaan(self):
             if self.bewerk_i is not None:
-                s = slagen[self.bewerk_i]
-                vers = automatische_fasen(resultaten, info, args.rotatie)
-                for v in vers:
-                    if v['positioning_start'] == s['positioning_start']:
-                        corrected = s.get('corrected')
-                        s.update(v)
-                        s['corrected'] = False
-                        break
+                s = self.slagen[self.bewerk_i]
+                if self.resultaten and self.resultaten[0].lm_data is not None:
+                    vers = automatische_fasen(self.resultaten, self.info, args.rotatie)
+                    for v in vers:
+                        if v['positioning_start'] == s['positioning_start']:
+                            s.update(v)
+                            s['corrected'] = False
+                            break
                 self.vul_lijst()
                 self.toon()
 
-        def opslaan(self):
-            data = {'video': args.input, 'fps': info.fps, 'rotatie_graden': args.rotatie,
-                    'strokes': slagen}
-            with open(args.uit, 'w') as fh:
-                json.dump(data, fh, indent=1)
-            self.status.showMessage(f'opgeslagen: {args.uit}', 5000)
-
-        def klik_slag(self, item):
-            self.timer.stop()
-            self.f = slagen[self.lijst.row(item)]['positioning_start']
-            self.toon()
-
         def toon(self):
+            if self.video_pad is None or not self.info:
+                return
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.f)
             ok, fr = self.cap.read()
             if not ok:
                 self.timer.stop()
                 return
-            r = resultaten[self.f] if self.f < len(resultaten) else None
-            duw_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else \
-                (slagen[slag_index_op_frame(self.f)] if slag_index_op_frame(self.f) is not None else None)
-            duw_kant = ('l' if duw_slag['been'] == 'links' else 'r') if duw_slag and duw_slag['been'] in ('links', 'rechts') else None
-            fr = teken_hulplijnen(fr, r, info.w, info.h, duw_kant)
-            bewerk_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else None
-            if bewerk_slag is not None:
-                # definieer-modus: banner toont de fase die je NU definieert (1→2→3→4)
-                volgorde = list(FASEN_KEYS.values())
-                fase_key = volgorde[self.bewerk_fase]
-                fase = {'positioning_start': 'positionering', 'pushing_start': 'duw',
-                        'endpush_start': 'eind', 'end_frame': 'eind'}[fase_key]
-                gezet = [k for k in volgorde if k in bewerk_slag]
-                fase_frame = fase_van(bewerk_slag, self.f)
-                fr = teken_fase_banner(
-                    fr, fase, bewerken=True, gezet=len(gezet),
-                    tekst_extra=f"druk {self.bewerk_fase + 1} op frame {self.f}",
-                    fase_frame=fase_frame)
-            else:
-                fase = fase_van(slagen[slag_index_op_frame(self.f)]
-                                if slag_index_op_frame(self.f) is not None else None, self.f)
-                fr = teken_fase_banner(fr, fase, bewerken=False)
-            kleuren = {'positionering': '#e05a00', 'duw': '#00c800', 'eind': '#ff7800', None: '#555'}
+            r = self.resultaten[self.f] if self.f < len(self.resultaten) else None
+            duw_slag = self.slagen[self.bewerk_i] if self.bewerk_i is not None else None
+            if duw_slag is None:
+                i = slag_index_in(self.slagen, self.f)
+                duw_slag = self.slagen[i] if i is not None else None
+            duw_kant = ('l' if duw_slag.get('been') == 'links' else 'r') \
+                if duw_slag and duw_slag.get('been') in ('links', 'rechts') else None
+            fr = teken_hulplijnen(fr, r, self.info.w, self.info.h, duw_kant)
             namen = {'positionering': 'POSITIONERING (inefficiënt)', 'duw': 'DUWFASE (efficiënt)',
                      'eind': 'EIND-DUW (inefficiënt)', None: 'geen fase'}
-            if bewerk_slag is not None:
+            if self.bewerk_i is not None:
                 volgorde = list(FASEN_KEYS.values())
-                fase_key = volgorde[self.bewerk_fase]
-                gezet = [k for k in volgorde if k in bewerk_slag]
-                fase_frame = fase_van(bewerk_slag, self.f)
-                self.fase_label.setText(
-                    f"DEFINIEER slag {self.bewerk_i}: {namen[fase]} — druk {self.bewerk_fase + 1} "
-                    f"({len(gezet)}/4 gezet)\ndit frame: {namen[fase_frame]}")
+                fase = {'positioning_start': 'positionering', 'pushing_start': 'duw',
+                        'endpush_start': 'eind', 'end_frame': 'eind'}[volgorde[self.bewerk_fase]]
+                gezet = [kk for kk in volgorde if kk in duw_slag]
+                fr = teken_fase_banner(fr, fase, bewerken=True, gezet=len(gezet),
+                                       tekst_extra=f'druk {self.bewerk_fase + 1} op frame {self.f}',
+                                       fase_frame=fase_van(duw_slag, self.f))
             else:
-                self.fase_label.setText(namen[fase])
-            self.fase_label.setStyleSheet(
-                f'font-size: 20px; font-weight: bold; color: white; background: {kleuren[fase]};')
+                fase = fase_van(duw_slag, self.f)
+                fr = teken_fase_banner(fr, fase, bewerken=False)
+            fr = fase_banden_op_frame(fr, self.slagen, duw_slag)
             schaal = (self.video_label.height() or 700) / fr.shape[0]
             klein = cv2.resize(fr, (int(fr.shape[1] * schaal), int(fr.shape[0] * schaal)))
             rgb = cv2.cvtColor(klein, cv2.COLOR_BGR2RGB)
             self.video_label.setPixmap(QPixmap.fromImage(QImage(rgb.data, rgb.shape[1], rgb.shape[0],
                                                                 rgb.strides[0], QImage.Format_RGB888)))
-            huidige_i = slag_index_op_frame(self.f)
-            tijd = tijdlijn_afbeelding(slagen, info.totaal, huidige_i, self.bewerk_i, self.f,
+            tijd = tijdlijn_afbeelding(self.slagen, self.info.totaal,
+                                       slag_index_in(self.slagen, self.f), self.bewerk_i, self.f,
                                        w=max(600, self.video_label.width()))
             rgbt = cv2.cvtColor(tijd, cv2.COLOR_BGR2RGB)
             self.tijd_label.setPixmap(QPixmap.fromImage(QImage(rgbt.data, rgbt.shape[1], rgbt.shape[0],
                                                                rgbt.strides[0], QImage.Format_RGB888)))
             self.lijst.blockSignals(True)
-            if huidige_i is not None and self.bewerk_i is None:
-                self.lijst.setCurrentRow(huidige_i)
-            self.lijst.blockSignals(False)
-            bewerk_tekst = ''
             if self.bewerk_i is not None:
-                s = slagen[self.bewerk_i]
-                bewerk_tekst = (f'   BEWERKEN slag {self.bewerk_i} ('
-                                + ', '.join(f'{FASEN_NAAM[v]}={s[v]}' for k, v in FASEN_KEYS.items() if v in s)
-                                + ')')
-            self.status.showMessage(f'frame {self.f}/{info.totaal} '
-                                    f'({self.f / (info.fps or 30):.2f}s){bewerk_tekst}')
+                self.lijst.setCurrentRow(self.bewerk_i)
+            elif duw_slag is not None:
+                self.lijst.setCurrentRow(self.slagen.index(duw_slag))
+            self.lijst.blockSignals(False)
+            if self.bewerk_i is not None:
+                volgorde = list(FASEN_KEYS.values())
+                fase_naam = {'positioning_start': 'POSITIONERING (inefficiënt)',
+                             'pushing_start': 'DUWFASE (efficiënt)',
+                             'endpush_start': 'EIND-DUW (inefficiënt)',
+                             'end_frame': 'EINDE SLAG'}[volgorde[self.bewerk_fase]]
+                gezet = [kk for kk in volgorde if kk in duw_slag]
+                self.fase_label.setText(
+                    f'DEFINIEER slag {self.bewerk_i}: {fase_naam} — druk {self.bewerk_fase + 1} '
+                    f'({len(gezet)}/4 gezet)\ndit frame: {namen[fase_van(duw_slag, self.f)]}')
+            else:
+                self.fase_label.setText(namen[fase_van(duw_slag, self.f)])
+            self.status.showMessage(
+                f'{os.path.basename(self.video_pad)}  frame {self.f}/{self.info.totaal} '
+                f'({self.f / (self.info.fps or 30):.2f}s)')
 
         def volgende(self):
-            if self.f < info.totaal - 1:
+            if self.info and self.f < (self.info.totaal or 1) - 1:
                 self.f += 1
                 self.toon()
             else:
@@ -587,19 +787,19 @@ def run_gui(args):
                 self.f = max(0, self.f - 1)
                 self.toon()
             elif k == Qt.Key_Right:
-                self.f = min(self.f + 1, info.totaal - 1)
+                self.f = min(self.f + 1, (self.info.totaal or 1) - 1)
                 self.toon()
             elif k == Qt.Key_Up:
                 self.f = max(0, self.f - 10)
                 self.toon()
             elif k == Qt.Key_Down:
-                self.f = min(self.f + 10, info.totaal - 1)
+                self.f = min(self.f + 10, (self.info.totaal or 1) - 1)
                 self.toon()
             elif k == Qt.Key_Space:
                 if self.timer.isActive():
                     self.timer.stop()
                 else:
-                    self.timer.start(int(1000 / (info.fps or 30)))
+                    self.timer.start(int(1000 / (self.info.fps or 30)))
             elif k == Qt.Key_E:
                 self.toggle_bewerk()
             elif k == Qt.Key_N:
@@ -608,13 +808,15 @@ def run_gui(args):
                 self.zet_fase(ev.text())
             elif k == Qt.Key_U:
                 self.ongedaan()
+            elif k == Qt.Key_R:
+                self.maak_rapport()
             elif k == Qt.Key_S:
                 self.opslaan()
             elif k == Qt.Key_Escape:
                 if self.bewerk_i is not None:
                     self.bewerk_i = None
                     self.bewerk_fase = 0
-                    self.status.showMessage('Redifine-modus afgebroken', 3000)
+                    self.status.showMessage('Redefine-modus afgebroken', 3000)
                     self.vul_lijst()
                     self.toon()
             elif k == Qt.Key_Q:
@@ -627,9 +829,10 @@ def run_gui(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Fasen-marker v3')
-    parser.add_argument('--input', required=True)
-    parser.add_argument('--npz', required=True)
+    parser.add_argument('--input', default=None)
+    parser.add_argument('--npz', default=None)
     parser.add_argument('--uit', default='fasen.json')
+    parser.add_argument('--map', default=None, help='werkbank: map met videos + npz/ + fasen/')
     parser.add_argument('--rotatie', type=float, default=10.0)
     parser.add_argument('--dump', action='store_true')
     parser.add_argument('--rook', default=None)
