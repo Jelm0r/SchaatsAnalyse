@@ -435,7 +435,7 @@ def rapport(slagen, info, resultaten, out_dir, video_pad):
     return csv_pad, mp4
 
 
-def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
+def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None, doel=None):
     """Mini-skelet (incl. schouders/hoofd) + heupas + vooruit-as + been-assen + kantelhoeken."""
     lm = r.lm_data if r is not None else None
     if lm is None:
@@ -462,6 +462,14 @@ def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
         neus = rp(0)
         if r.raw_lm[0][2] > 0.3:
             cv2.circle(frame, neus, 7, (255, 255, 255), 1)
+    # gekozen doelpositie (kies-schaatser): doorlopende kruis-marker
+    if doel is not None and w and h:
+        px, py = int(doel[0] * w), int(doel[1] * h)
+        L = int(0.08 * h) or 20
+        cv2.line(frame, (px - L, py), (px + L, py), (0, 255, 0), 3)
+        cv2.line(frame, (px, py - L), (px, py + L), (0, 255, 0), 3)
+        cv2.circle(frame, (px, py), int(0.11 * h) or 28, (0, 255, 0), 3)
+
     # COM-proxy: gemiddelde van beide heupen + hoofd (neus)
     neus = None
     if getattr(r, 'raw_lm', None) is not None and w and h and r.raw_lm[0][2] > 0.3:
@@ -609,6 +617,7 @@ def run_gui(args):
             self.timer.timeout.connect(self.volgende)
             self.bewerk_i = None
             self.bewerk_fase = 0
+            self.doel = None
 
             # links: videolijst
             self.videolijst = QListWidget()
@@ -639,7 +648,6 @@ def run_gui(args):
             self.video_label = KlikLabel(' kies een video…')
             self.video_label.setAlignment(Qt.AlignCenter)
             self.video_label.klik_callback = self.video_klik
-            self.video_label.klik_modus_bind = lambda v: setattr(self.video_label, 'klik_modus', v)
             self.tijd_label = QLabel()
             self.tijd_label.setFixedHeight(40)
             midden = QVBoxLayout()
@@ -783,6 +791,7 @@ def run_gui(args):
                 return
             self.bewerk_i = None
             self.bewerk_fase = 0
+            self.doel = None
             self.f = 0
             self.timer.stop()
             if os.path.exists(p['npz']):
@@ -912,7 +921,9 @@ def run_gui(args):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.kies_modus = False
             self.video_label.klik_modus = False
+            self.doel = doel
             self.vul_videolijst()
+            self.toon()
             self.status.showMessage(
                 f'doel gezet op {doel} — heranalyse gestart op PinkBox, npz volgt via sync (daarna A)',
                 10000)
@@ -1031,7 +1042,12 @@ def run_gui(args):
                 duw_slag = self.slagen[i] if i is not None else None
             duw_kant = ('l' if duw_slag.get('been') == 'links' else 'r') \
                 if duw_slag and duw_slag.get('been') in ('links', 'rechts') else None
-            fr = teken_hulplijnen(fr, r, self.info.w, self.info.h, duw_kant)
+            fr = teken_hulplijnen(fr, r, self.info.w, self.info.h, duw_kant, doel=self.doel)
+            if self.kies_modus:
+                cv2.rectangle(fr, (self.info.w // 2 - 380, 10), (self.info.w // 2 + 380, 96),
+                              (0, 255, 0), -1)
+                cv2.putText(fr, 'KIES SCHAATSER: KLIK OP DE SCHAATSER', (self.info.w // 2 - 350, 72),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 0, 0), 4)
             namen = {'positionering': 'POSITIONERING (inefficiënt)', 'duw': 'DUWFASE (efficiënt)',
                      'eind': 'EIND-DUW (inefficiënt)', None: 'geen fase'}
             if self.bewerk_i is not None:
