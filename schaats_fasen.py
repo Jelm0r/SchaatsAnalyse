@@ -245,6 +245,85 @@ def laad_fasen_json(pad):
         return json.load(fh).get('strokes', [])
 
 
+def hervorm_resultaten(resultaten, info, target_n):
+    """Landmark-reeks hersamplen naar `target_n` frames (bv. 2x-RIFE-video).
+
+    Meettechnisch zijn hersamplede frames geen nieuwe metingen — ze zijn een
+    tijd-interpolatie van de gemeten frames, net als de geinterpolerde beelden.
+    """
+    import numpy as np
+    if not resultaten or target_n <= len(resultaten):
+        return info, resultaten
+    n = len(resultaten)
+    arr = np.array([r.raw_lm if r.raw_lm is not None else np.full((33, 3), np.nan)
+                    for r in resultaten], dtype=float)          # (n, 33, 3)
+    xs = np.arange(n)
+    xs2 = np.linspace(0, n - 1, target_n)
+    arr2 = np.empty((target_n, 33, 3), dtype=float)
+    for i in range(33):
+        for ch in range(3):
+            kolom = arr[:, i, ch]
+            geldig = ~np.isnan(kolom)
+            if geldig.sum() >= 2:
+                arr2[:, i, ch] = np.interp(xs2, xs[geldig], kolom[geldig])
+            else:
+                arr2[:, i, ch] = kolom[0] if n else np.nan
+
+    gev = np.array([r.pose_gevonden for r in resultaten], dtype=float)
+    gev2 = np.interp(xs2, xs, gev) >= 0.5
+    bocht = np.array([r.bocht for r in resultaten], dtype=float)
+    bocht2 = np.interp(xs2, xs, bocht) >= 0.5
+    horizon = np.array([r.horizon_deg for r in resultaten], dtype=float)
+    horizon2 = np.interp(xs2, xs, horizon)
+    mid = np.array([(r.middellijn_dev[0] if r.middellijn_dev else 0,
+                     r.middellijn_dev[1] if r.middellijn_dev else 0) for r in resultaten], dtype=float)
+    mid2 = np.stack([np.interp(xs2, xs, mid[:, 0]), np.interp(xs2, xs, mid[:, 1])], axis=1)
+
+    info2 = sa.VideoInfo(w=info.w, h=info.h, fps=(info.fps * target_n / n), totaal=target_n)
+    uit = []
+    for i in range(target_n):
+        r = sa.FrameResultaat(frame_nr=i, tijd=i / (info2.fps or 60.0))
+        lm = arr2[i]
+        if np.isnan(lm).all():
+            r.lm_data = None
+        else:
+            r.lm_data = maak_lm_data(lm, info.w, info.h)
+        r.pose_gevonden = bool(gev2[i])
+        r.bocht = bool(bocht2[i])
+        r.horizon_deg = float(horizon2[i])
+        r.middellijn_dev = (float(mid2[i, 0]), float(mid2[i, 1]))
+        r.raw_lm = lm
+        uit.append(r)
+    # heupmidden-baan opnieuw voor de rijrichting-lijn
+    for i, r in enumerate(uit):
+        pts = []
+        for j in range(max(0, i - 24), min(target_n, i + 25)):
+            lm = uit[j].lm_data
+            if lm is not None:
+                pts.append(((lm['l_heup'][0] + lm['r_heup'][0]) / 2.0,
+                            (lm['l_heup'][1] + lm['r_heup'][1]) / 2.0))
+        r.heup_hist = pts if len(pts) >= 2 else None
+    if info2.fps and uit:
+        sa.verwerk_afgeleiden(uit, info2.w or 1, info2.h or 1, info2.fps, 9, 0.015)
+    return info2, uit
+
+
+def maak_lm_data(lm, w, h):
+    def pt(i):
+        return (int(round(lm[i][0] * w)), int(round(lm[i][1] * h)))
+
+    d = {
+        'l_heup': pt(sa.L_HIP), 'r_heup': pt(sa.R_HIP),
+        'l_knie': pt(sa.L_KNEE), 'r_knie': pt(sa.R_KNEE),
+        'l_enkel': pt(sa.L_ANKLE), 'r_enkel': pt(sa.R_ANKLE),
+        'l_hiel': pt(sa.L_HEEL), 'r_hiel': pt(sa.R_HEEL),
+        'l_teen': pt(sa.L_TOE), 'r_teen': pt(sa.R_TOE),
+        'vis_l_enkel': float(lm[sa.L_ANKLE][2]), 'vis_r_enkel': float(lm[sa.R_ANKLE][2]),
+        'vis_l_knie': float(lm[sa.L_KNEE][2]), 'vis_r_knie': float(lm[sa.R_KNEE][2]),
+    }
+    return d
+
+
 def lege_resultaten(video_pad, fps=None):
     """Frames zonder landmarks: handmatige annotatie van een onbewerkte video."""
     cap = cv2.VideoCapture(video_pad)
@@ -604,6 +683,10 @@ def run_gui(args):
             self.toon()
 
         def laad_video(self, video_pad):
+            stem2x = os.path.splitext(os.path.basename(video_pad))[0] + '_2x.mp4'
+            alternatief = os.path.join(self.map, '2x', stem2x)
+            if os.path.exists(alternatief):
+                video_pad = alternatief
             self.video_pad = video_pad
             p = video_paden(video_pad)
             os.makedirs(os.path.join(self.map, 'npz'), exist_ok=True)
@@ -618,6 +701,10 @@ def run_gui(args):
             self.timer.stop()
             if os.path.exists(p['npz']):
                 self.info, self.resultaten = laad_context(p['npz'])
+                n_vid = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                if n_vid and self.info.totaal and n_vid != self.info.totaal:
+                    self.info, self.resultaten = hervorm_resultaten(
+                        self.resultaten, self.info, n_vid)
             else:
                 self.info, self.resultaten = lege_resultaten(video_pad)
             if os.path.exists(p['fasen']):
