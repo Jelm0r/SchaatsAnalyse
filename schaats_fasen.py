@@ -344,6 +344,17 @@ def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
         neus = rp(0)
         if r.raw_lm[0][2] > 0.3:
             cv2.circle(frame, neus, 7, (255, 255, 255), 1)
+    # COM-proxy: gemiddelde van beide heupen + hoofd (neus)
+    neus = None
+    if getattr(r, 'raw_lm', None) is not None and w and h and r.raw_lm[0][2] > 0.3:
+        neus = (int(r.raw_lm[0][0] * w), int(r.raw_lm[0][1] * h))
+    com = None
+    if neus is not None:
+        com = (int((lm['l_heup'][0] + lm['r_heup'][0] + neus[0]) / 3.0),
+               int((lm['l_heup'][1] + lm['r_heup'][1] + neus[1]) / 3.0))
+    if com is not None:
+        cv2.circle(frame, com, 6, (255, 100, 0), -1)   # oranje-rode stip: zwaartepunt-proxy
+
     # been-as (magenta): alleen op het duwbeen, door midden(enkel,teen) en de knie
     for kant in ([duw_kant] if duw_kant in ('l', 'r') else []):
         enkel = lm[f'{kant}_enkel']
@@ -356,6 +367,12 @@ def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
         eind = (int(knie[0] + 1.5 * dxl), int(knie[1] + 1.5 * dyl))
         cv2.line(frame, voetm, eind, (255, 0, 255), 2)
         cv2.circle(frame, voetm, 4, (255, 0, 255), -1)
+        # tweede lijn (blauw): door hetzelfde voetmidden en de zwaartepunt-proxy,
+        # verlengd voorbij de COM — de hoek tussen magenta en blauw is de kandidaat-feature
+        if com is not None:
+            dcx, dcy = com[0] - voetm[0], com[1] - voetm[1]
+            eind2 = (int(com[0] + 0.8 * dcx), int(com[1] + 0.8 * dcy))
+            cv2.line(frame, voetm, eind2, (255, 100, 0), 2)
 
     lh, rh = lm['l_heup'], lm['r_heup']
     cv2.line(frame, lh, rh, (0, 255, 255), 2)
