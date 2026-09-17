@@ -106,7 +106,11 @@ def hoek_verschil(a, b):
 
 
 def laad_context(npz_pad):
+    import numpy as np
     info, resultaten = sa.laad_landmarks(npz_pad)
+    raw = np.load(npz_pad, allow_pickle=True)['landmarks']   # (n, 33, 3), genormaliseerd
+    for i, r in enumerate(resultaten):
+        r.raw_lm = raw[i] if i < len(raw) else None
     sa.verwerk_afgeleiden(resultaten, info.w, info.h, info.fps, 5, 0.015)
     n = len(resultaten)
     for i, r in enumerate(resultaten):
@@ -202,8 +206,8 @@ def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None, fase_
     return fr
 
 
-def teken_hulplijnen(frame, r):
-    """Mini-skelet + heupas + loodrechte vooruit-as + rijrichting + kantelhoeken."""
+def teken_hulplijnen(frame, r, w=None, h=None):
+    """Mini-skelet (incl. schouders/hoofd) + heupas + vooruit-as + been-assen + kantelhoeken."""
     lm = r.lm_data if r is not None else None
     if lm is None:
         return frame
@@ -213,22 +217,43 @@ def teken_hulplijnen(frame, r):
             cv2.line(frame, pa, pb, (255, 255, 255), 1)
             for p in (pa, pb):
                 cv2.circle(frame, p, 3, (255, 255, 255), -1)
+    # schouders + hoofd uit de ruwe landmarks (genormaliseerd → pixels)
+    if getattr(r, 'raw_lm', None) is not None and w and h:
+        def rp(idx):
+            return (int(r.raw_lm[idx][0] * w), int(r.raw_lm[idx][1] * h))
+        ls, rs = rp(11), rp(12)                      # L/R schouder
+        if r.raw_lm[11][2] > 0.3 and r.raw_lm[12][2] > 0.3:
+            cv2.line(frame, ls, rs, (255, 255, 255), 1)
+            for p in (ls, rs):
+                cv2.circle(frame, p, 3, (255, 255, 255), -1)
+            for sidx, heup in ((11, lm['l_heup']), (12, lm['r_heup'])):
+                if r.raw_lm[sidx][2] > 0.3:
+                    cv2.line(frame, rp(sidx), (lm['l_heup'] if sidx == 11 else lm['r_heup']),
+                             (255, 255, 255), 1)
+        neus = rp(0)
+        if r.raw_lm[0][2] > 0.3:
+            cv2.circle(frame, neus, 7, (255, 255, 255), 1)
+    # been-as per been (magenta): door midden(enkel,teen) en de knie, verlengd boven de knie
+    for kant, y in (('l', 0), ('r', 0)):
+        enkel = lm[f'{kant}_enkel']
+        teen = lm[f'{kant}_teen']
+        knie = lm[f'{kant}_knie']
+        voetm = (int((enkel[0] + teen[0]) / 2.0), int((enkel[1] + teen[1]) / 2.0))
+        dxl, dyl = knie[0] - voetm[0], knie[1] - voetm[1]
+        if abs(dxl) + abs(dyl) < 5:
+            continue
+        eind = (int(knie[0] + 1.5 * dxl), int(knie[1] + 1.5 * dyl))
+        cv2.line(frame, voetm, eind, (255, 0, 255), 2)
+        cv2.circle(frame, voetm, 4, (255, 0, 255), -1)
+
     lh, rh = lm['l_heup'], lm['r_heup']
-    mid = ((lh[0] + rh[0]) / 2.0, (lh[1] + rh[1]) / 2.0)
-    L = math.hypot(rh[0] - lh[0], rh[1] - lh[1]) or 1.0
     cv2.line(frame, lh, rh, (0, 255, 255), 2)
+    L = math.hypot(rh[0] - lh[0], rh[1] - lh[1]) or 1.0
+    mid = ((lh[0] + rh[0]) / 2.0, (lh[1] + rh[1]) / 2.0)
     hoek = math.atan2(rh[1] - lh[1], rh[0] - lh[0]) + math.pi / 2
     dx, dy = math.cos(hoek) * L, math.sin(hoek) * L
     cv2.line(frame, (int(mid[0] - dx), int(mid[1] - dy)), (int(mid[0] + dx), int(mid[1] + dy)),
              (255, 255, 0), 2)
-    if getattr(r, 'heup_hist', None) and len(r.heup_hist) >= 2:
-        (x0, y0), (x1, y1) = r.heup_hist[0], r.heup_hist[-1]
-        d = math.hypot(x1 - x0, y1 - y0)
-        if d > 3:
-            s = L * 1.5 / d
-            cv2.line(frame, (int(mid[0] - (x1 - x0) * s), int(mid[1] - (y1 - y0) * s)),
-                     (int(mid[0] + (x1 - x0) * s), int(mid[1] + (y1 - y0) * s)),
-                     (0, 255, 0), 2)
     for kant, y in (('l', 30), ('r', 58)):
         u = schaats_techniek.kantelhoek(lm, kant, 0.0)
         if u:
@@ -283,7 +308,7 @@ def main_rook(npz_pad, video_pad, uit_png, frame_nr=100, rotatie=10.0):
     cap.release()
     if not ok:
         raise SystemExit(f'frame {frame_nr} onleesbaar')
-    fr = teken_hulplijnen(fr, r)
+    fr = teken_hulplijnen(fr, r, info.w, info.h)
     lijn = tijdlijn_afbeelding(slagen, info.totaal, speelkop=frame_nr, w=fr.shape[1])
     combined = np.vstack([fr, lijn])
     cv2.imwrite(uit_png, combined)
@@ -487,7 +512,7 @@ def run_gui(args):
                 self.timer.stop()
                 return
             r = resultaten[self.f] if self.f < len(resultaten) else None
-            fr = teken_hulplijnen(fr, r)
+            fr = teken_hulplijnen(fr, r, info.w, info.h)
             bewerk_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else None
             if bewerk_slag is not None:
                 # definieer-modus: banner toont de fase die je NU definieert (1→2→3→4)
