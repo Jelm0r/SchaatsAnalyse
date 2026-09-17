@@ -45,6 +45,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -902,8 +903,8 @@ def run_gui(args):
             if pm is None or not pm.width():
                 return
             px, py = label_pos.x(), label_pos.y()
-            if not (0 <= px < pm.width() and 0 <= py < pm.height()):
-                return
+            px = max(0, min(pm.width() - 1, px))
+            py = max(0, min(pm.height() - 1, py))
             doel = (round(px / pm.width(), 4), round(py / pm.height(), 4))
             stem = os.path.splitext(os.path.basename(self.video_pad))[0]
             req = json.dumps({'stem': stem, 'doel': list(doel)})
