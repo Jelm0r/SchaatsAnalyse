@@ -610,7 +610,14 @@ def run_gui(args):
                 self.ongedaan()
             elif k == Qt.Key_S:
                 self.opslaan()
-            elif k in (Qt.Key_Escape, Qt.Key_Q):
+            elif k == Qt.Key_Escape:
+                if self.bewerk_i is not None:
+                    self.bewerk_i = None
+                    self.bewerk_fase = 0
+                    self.status.showMessage('Redifine-modus afgebroken', 3000)
+                    self.vul_lijst()
+                    self.toon()
+            elif k == Qt.Key_Q:
                 self.close()
 
     venster = Venster()
