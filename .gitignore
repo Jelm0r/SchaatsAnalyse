@@ -34,5 +34,5 @@ Thumbs.db
 # Build-artefacten van de exe (EXE.md stap 3/4)
 build/
 dist/
-_versie.py
+_version.py
 *-setup.exe

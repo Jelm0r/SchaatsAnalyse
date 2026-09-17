@@ -1,111 +1,115 @@
-﻿; ===========================================================================
-;  installer.iss — Inno Setup-recept voor SchaatsAnalyse (EXE.md stap 4).
+; ===========================================================================
+;  installer.iss — Inno Setup recipe for SkateAnalysis (EXE.md step 4).
 ;
-;  Verpakt de PyInstaller-uitvoer uit `dist\SchaatsAnalyse\` (stap 3) plus de drie
-;  modellen tot één download: `dist\SchaatsAnalyse-setup.exe`.
+;  Packages the PyInstaller output from `dist\SkateAnalysis\` (step 3) plus the three
+;  models into one download: `dist\SkateAnalysis-setup.exe`.
 ;
-;  Bouwen gaat via `bouw.bat`, dat achtereenvolgens de versiestempel maakt,
-;  PyInstaller draait, de modellen naast de exe zet en dit script compileert. Los:
+;  Building goes through `build.bat`, which in order creates the version stamp, runs
+;  PyInstaller, puts the models next to the exe and compiles this script. Standalone:
 ;
-;      "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DVersie=2026-08-25.a4be1f2b installer.iss
+;      "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /DVersion=2026-08-25.a4be1f2b installer.iss
 ;
-;  Vijf keuzes die verklaring verdienen:
+;  Five choices that deserve an explanation:
 ;
-;  1. **PrivilegesRequired=lowest** — installeert naar {localappdata}\Programs\SchaatsAnalyse.
-;     Twee redenen: geen beheerdersrechten nodig (de trainers zitten op werk-laptops), en
-;     de installatiemap is schrijfbaar, zodat de terugval in `_onnx_pad` (stap 1.4) niet
-;     meteen nodig is. Werkt die map ooit tóch niet, dan schrijft de app naar `data_dir()`.
-;  2. **Alles uit `dist\SchaatsAnalyse` in één regel**, dus inclusief de modellen die
-;     `bouw.bat` daar al neerzet. Geen tweede kopieerroute die uit de rtmlib-cache plukt:
-;     dan zou de installer iets anders kunnen bevatten dan de map die je zojuist getest hebt.
-;     De `#if`-controles hieronder weigeren te compileren als er een model ontbreekt — anders
-;     zou de app bij de eerste analyse stilzwijgend 178 MB gaan downloaden (zie stap 1.5).
-;  3. **Niets uit `%LOCALAPPDATA%\SchaatsAnalyse` of uit de bibliotheek wordt aangeraakt**,
-;     ook niet bij verwijderen. Daar staan het logboek, `config.json` (met het pad naar de
-;     Drive-map) en eventueel een zelf gemaakte ONNX-export; de trainingsdata staat in Drive.
-;     Verwijderen van de app mag nooit trainingsdata raken, en een herinstallatie hoort de
-;     bibliotheek gewoon terug te vinden.
-;  4. **`SetupLogging=yes`** — zelfde gedachte als het logboek uit stap 2: gaat de installatie
-;     bij een collega mis, dan staat er een `Setup Log*.txt` in `%TEMP%` om naar te vragen.
-;  5. **Geen versie-nummer in de bestandseigenschappen** (`VersionInfoVersion`): dat veld eist
-;     `x.y.z.w` en onze stempel is een datum + commit-hash. Die staat wél als AppVersion in
-;     "Apps en onderdelen", en dat is de plek waar je hem zoekt.
+;  1. **PrivilegesRequired=lowest** — installs to {localappdata}\Programs\SkateAnalysis.
+;     Two reasons: no admin rights needed (the trainers are on work laptops), and the
+;     install folder is writable, so the fallback in `_onnx_path` (step 1.4) isn't
+;     immediately needed. If that folder ever turns out not to be writable after all,
+;     the app writes to `data_dir()` instead.
+;  2. **Everything from `dist\SkateAnalysis` in one line**, so including the models
+;     `build.bat` already put there. No second copy route pulling from the rtmlib
+;     cache: that could make the installer contain something different from the
+;     folder you just tested. The `#if` checks below refuse to compile if a model is
+;     missing — otherwise the app would silently start downloading 178 MB on the
+;     first analysis (see step 1.5).
+;  3. **Nothing in `%LOCALAPPDATA%\SkateAnalysis` or in the library is touched**,
+;     not even on uninstall. That's where the log file, `config.json` (with the path
+;     to the Drive folder) and possibly a self-made ONNX export live; the training
+;     data lives in Drive. Removing the app must never touch training data, and a
+;     reinstall should just find the library again.
+;  4. **`SetupLogging=yes`** — same idea as the log file in step 2: if the install
+;     goes wrong for a colleague, there's a `Setup Log*.txt` in `%TEMP%` to ask for.
+;  5. **No version number in the file properties** (`VersionInfoVersion`): that field
+;     requires `x.y.z.w` and our stamp is a date + commit hash. It does show up as
+;     AppVersion in "Apps and features", which is where you'd look for it.
 ;
-;  De exe is niet gesigneerd: SmartScreen meldt bij de eerste start "Windows heeft uw pc
-;  beschermd" (Meer informatie → Toch uitvoeren). Dat hoort in INSTALLEREN.md (stap 6).
+;  The exe isn't signed: SmartScreen shows "Windows protected your PC" on first launch
+;  (More info → Run anyway). That belongs in INSTALL.md (step 6).
 ; ===========================================================================
 
-#define Naam "SchaatsAnalyse"
-#define ExeNaam "SchaatsAnalyse.exe"
-#define Uit AddBackslash(SourcePath) + "dist\SchaatsAnalyse"
+#define Name "SkateAnalysis"
+#define ExeName "SkateAnalysis.exe"
+#define Out AddBackslash(SourcePath) + "dist\SkateAnalysis"
 
-; De versiestempel komt van `maak_versie.py --toon` via bouw.bat (/DVersie=...). Los
-; compileren mag ook; dan staat er "onbekend" in Apps en onderdelen — de analyses zelf
-; houden hun eigen stempel uit `_versie.py`, dat is een losse weg.
-#ifndef Versie
-  #define Versie "onbekend"
+; The version stamp comes from `make_version.py --show` via build.bat (/DVersion=...).
+; Compiling standalone works too; then "Apps and features" shows "unknown" — the
+; analyses themselves keep their own stamp from `_version.py`, that's a separate path.
+#ifndef Version
+  #define Version "unknown"
 #endif
 
-; ── Compileren weigeren als de build niet compleet is ──────────────────────────
-#if !FileExists(AddBackslash(Uit) + ExeNaam)
-  #error dist\SchaatsAnalyse\SchaatsAnalyse.exe ontbreekt — draai eerst bouw.bat (stap 3).
+; ── Refuse to compile if the build isn't complete ──────────────────────────
+#if !FileExists(AddBackslash(Out) + ExeName)
+  #error dist\SkateAnalysis\SkateAnalysis.exe is missing — run build.bat first (step 3).
 #endif
-#if !FileExists(AddBackslash(Uit) + "yolo26x-pose.pt")
-  #error yolo26x-pose.pt ontbreekt in dist\SchaatsAnalyse — zonder dit model downloadt de app 126 MB bij het eerste gebruik.
+#if !FileExists(AddBackslash(Out) + "yolo26x-pose.pt")
+  #error yolo26x-pose.pt is missing from dist\SkateAnalysis — without this model the app downloads 126 MB on first use.
 #endif
-#if !FileExists(AddBackslash(Uit) + "yolo26x-pose-dml.onnx")
-  #error yolo26x-pose-dml.onnx ontbreekt in dist\SchaatsAnalyse — zonder deze export valt de detectiepass terug op de CPU (2,2x trager).
+#if !FileExists(AddBackslash(Out) + "yolo26x-pose-dml.onnx")
+  #error yolo26x-pose-dml.onnx is missing from dist\SkateAnalysis — without this export the detection pass falls back to the CPU (2.2x slower).
 #endif
-; Deze naam staat als RTMPOSE_LOKAAL in schaats_yolo.py; heet het bestand anders, dan
-; pakt de app stilzwijgend de URL en downloadt 178 MB bij het eerste gebruik.
-#if !FileExists(AddBackslash(Uit) + "rtmpose-x-halpe26-384x288.onnx")
-  #error rtmpose-x-halpe26-384x288.onnx ontbreekt in dist\SchaatsAnalyse — zonder dit model downloadt de app 178 MB bij het eerste gebruik.
+; This name is RTMPOSE_LOCAL in skate_yolo.py; if the file has a different name, the
+; app silently falls back to the URL and downloads 178 MB on first use.
+#if !FileExists(AddBackslash(Out) + "rtmpose-x-halpe26-384x288.onnx")
+  #error rtmpose-x-halpe26-384x288.onnx is missing from dist\SkateAnalysis — without this model the app downloads 178 MB on first use.
 #endif
 
 [Setup]
-; Deze GUID is de identiteit van de app: hij bepaalt of een tweede installatie een
-; upgrade is of een tweede kopie. Nooit wijzigen.
+; This GUID is the app's identity: it determines whether a second install is an
+; upgrade or a second copy. Never change it.
 AppId={{81C5E169-E35C-4FA6-93F1-58D66B23270E}
-AppName={#Naam}
-AppVersion={#Versie}
-AppVerName={#Naam} {#Versie}
-AppPublisher={#Naam}
-DefaultDirName={autopf}\{#Naam}
-DefaultGroupName={#Naam}
-; Niemand wil een startmenumap kiezen.
+AppName={#Name}
+AppVersion={#Version}
+AppVerName={#Name} {#Version}
+AppPublisher={#Name}
+DefaultDirName={autopf}\{#Name}
+DefaultGroupName={#Name}
+; Nobody wants to pick a Start Menu folder.
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-; De bundel is 64-bits (torch, onnxruntime, Qt); PySide6 vraagt Windows 10 of nieuwer.
+; The bundle is 64-bit (torch, onnxruntime, Qt); PySide6 requires Windows 10 or newer.
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#SourcePath}dist
-OutputBaseFilename={#Naam}-setup
-SetupIconFile={#SourcePath}schaatsanalyse.ico
-UninstallDisplayIcon={app}\{#ExeNaam}
-UninstallDisplayName={#Naam}
-; De 1,3 GB bestaat voor de helft uit modellen (.pt is al een zip, .onnx zijn ruwe
-; gewichten): reken op weinig winst daarop en op een compileerslag van tientallen minuten.
+OutputBaseFilename={#Name}-setup
+SetupIconFile={#SourcePath}skateanalysis.ico
+UninstallDisplayIcon={app}\{#ExeName}
+UninstallDisplayName={#Name}
+; Half of the 1.3 GB is models (.pt is already a zip, .onnx are raw weights): expect
+; little further gain there and a compile pass of tens of minutes.
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 SetupLogging=yes
 
 [Languages]
+; The wizard stays in Dutch: the actual trainers using this installer are
+; Dutch-speaking (see INSTALL.md), regardless of the source code's language.
 Name: "nl"; MessagesFile: "compiler:Languages\Dutch.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-; De hele uitvoermap van PyInstaller inclusief `_internal` en de drie modellen die
-; bouw.bat ernaast heeft gezet. `app_dir()` is bevroren de map van de exe, dus de app
-; vindt de modellen hier zonder configuratie.
-Source: "{#Uit}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The whole PyInstaller output folder including `_internal` and the three models
+; build.bat put next to it. `app_dir()` is, when frozen, the exe's own folder, so the
+; app finds the models here with no configuration.
+Source: "{#Out}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#Naam}"; Filename: "{app}\{#ExeNaam}"
-Name: "{autodesktop}\{#Naam}"; Filename: "{app}\{#ExeNaam}"; Tasks: desktopicon
+Name: "{autoprograms}\{#Name}"; Filename: "{app}\{#ExeName}"
+Name: "{autodesktop}\{#Name}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#ExeNaam}"; Description: "{cm:LaunchProgram,{#StringChange(Naam, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#StringChange(Name, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

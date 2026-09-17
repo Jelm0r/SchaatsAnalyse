@@ -1,743 +1,744 @@
-# Roadmap SchaatsAnalyse
+# SkateAnalysis Roadmap
 
-Plan voor de volgende ontwikkelfase, in volgorde van bouwen. Gemaakte keuzes (juli 2026):
+Plan for the next development phase, in build order. Decisions made (July 2026):
 
-- **Delen**: één gedeelde cloudmap (OneDrive/Dropbox/netwerkschijf) met daarin een SQLite-bestand + mediabestanden. Geen server, geen accounts.
-- **Video's**: worden mee-gekopieerd naar de gedeelde map, zodat elke trainer de analyse mét beeld kan terugkijken.
-- **Schaal**: één team (±5–30 schaatsers, 1–5 trainers). Ontwerp mag daarop leunen; geen rechten-/rollensysteem nodig.
-- **Skelet-editor**: correcties vloeien uit naar buurframes met een **instelbaar venster** (0 = alleen het bewerkte frame).
-- **Opnameopstelling (aanname sinds juli 2026)**: er wordt **altijd recht van voren** gefilmd en de camera staat **altijd precies horizontaal**. Daardoor vervalt de noodzaak van camerakanteling-correctie (horizon) en perspectiefcorrectie in de dagelijkse workflow. Fases 5 en 7 blijven staan als **nice-to-have** voor eventuele latere opstellingen (schuine/schommelende camera), maar zijn **nu geen prioriteit**.
+- **Sharing**: one shared cloud folder (OneDrive/Dropbox/network drive) containing a SQLite file + media files. No server, no accounts.
+- **Videos**: copied along into the shared folder, so every trainer can watch the analysis together with the footage.
+- **Scale**: one team (±5–30 skaters, 1–5 trainers). The design can lean on that; no permissions/roles system needed.
+- **Skeleton editor**: corrections flow out to neighboring frames with an **adjustable window** (0 = only the edited frame).
+- **Recording setup (assumption since July 2026)**: skaters are **always filmed straight-on from the front** and the camera is **always exactly horizontal**. That removes the need for camera-tilt correction (horizon) and perspective correction from the daily workflow. Phases 5 and 7 remain as **nice-to-haves** for a possible later setup (tilted/wobbling camera), but are **not a priority right now**.
 
-De fases bouwen op elkaar: 0 → 1 → 2 kunnen niet van volgorde wisselen; 3 (skelet-editor) en 4 (delen) zijn daarna onafhankelijk van elkaar te bouwen. Fase 6 (sneller analyseren) staat los van de rest en kan op elk moment, ook eerder. Fase 5 (horizon-tracking) en 7 (perspectiefcorrectie) zijn onder de vaste opnameopstelling **nice-to-have** (zie hierboven); fase 7 deelt bouwstenen met fase 5 (lijnen aanwijzen/tracken) en omvat de horizoncorrectie als speciaal geval. **Fase 8** (fragmenten knippen in de app + de opnames zelf in de bibliotheek, aangevraagd 10 augustus 2026) stond eveneens los en is **af sinds 11 augustus 2026**; hij leunt aan de analysekant volledig op de bestaande batch-flow uit fase 1 en voegde daar één schemabump aan toe (`bronvideo`, v3) voor de werklijst van nog niet geknipte opnames. Daarmee is de **eerstvolgende** fase weer fase 6 (sneller analyseren) of fase 2 (profielweergave, zodra de meting af is).
-
----
-
-## Fase 0 — Voorbereiding: resultaten serialiseerbaar maken ✅
-
-> **Af (16 juli 2026)** — geverifieerd op een echte video via de GUI: opslaan, GUI herstarten, terugladen → identieke tabel/grafiek/overlay, in een seconde i.p.v. een volledige detectie.
->
-> **Wat er staat:**
-> - `schaats_analyse.py`, sectie "Serialisatie (fase 0)" vóór `segmenteer_afzetten`: `resultaten_naar_arrays()` / `arrays_naar_resultaten()` + `sla_landmarks_op()` / `laad_landmarks()` (`np.savez_compressed`).
-> - CLI: `--save-npz PAD` (landmarks wegschrijven na de analyse) en `--from-npz PAD` (detectie overslaan, alleen afgeleiden herberekenen + overlay tekenen; model niet nodig).
-> - GUI: knoppen "Landmarks opslaan (.npz)" (datapaneel) en "Landmarks laden (.npz)..." (startpagina). **Tijdelijk steigerwerk** — fase 1 vervangt het handmatig kiezen van bestanden door de bibliotheek; de functies eronder blijven gelijk.
-> - `_analyse_klaar` is gesplitst: het weergave-deel is nu `_toon_resultaten(info, resultaten, events, bron=None)`, gedeeld door een verse en een geladen analyse. **Dit is de naad die fase 1 hergebruikt.**
->
-> **Afwijkingen van het plan hieronder:**
-> - Stap 2's "plain landmark-type" bleek al te bestaan (`Landmark`-namedtuple, `schaats_analyse.py` regel ~51, al gebruikt door de YOLO-backend) — geen nieuw type nodig.
-> - `arrays_naar_resultaten(arrays)` neemt géén `info`-argument: de video-meta (w/h/fps/totaal) gaat mee ín het `.npz` en komt er als `VideoInfo` weer uit → `(VideoInfo, resultaten)`. Terugladen vereist de video dus niet.
-> - Stap 4 klopte: `verwerk_afgeleiden()` had geen verborgen afhankelijkheid van de detectie-pass.
->
-> **Niet meegeserialiseerd:** de perspectiefkalibratie (fase 7). Bij laden staat die dus uit — onschadelijk onder de frontale-camera-aanname.
-
-Alles hierna staat of valt met het kunnen **opslaan en terugladen** van een analyse. Nu leeft de `FrameResultaat`-lijst alleen in het geheugen van de GUI, en het `lm`-veld bevat een MediaPipe-landmarkobject dat niet direct naar schijf kan.
-
-**Te bouwen (in `schaats_analyse.py`):**
-
-1. `resultaten_naar_arrays(resultaten)` → dict met numpy-arrays:
-   - `landmarks`: `(n_frames, 33, 3)` float32 — genormaliseerde x, y, visibility (z gebruiken we nergens);
-   - `pose_gevonden`: `(n_frames,)` bool; `horizon_deg`: `(n_frames,)` float32.
-   - Afgeleiden (been/hoek/gewicht/events) **niet** opslaan als bron van waarheid: die zijn herberekenbaar uit de landmarks via `verwerk_afgeleiden()` + `segmenteer_afzetten()`. Wel cachen (zie fase 1) voor snelle weergave.
-2. `arrays_naar_resultaten(arrays, info)` → verse `FrameResultaat`-lijst met een **plain landmark-type** (bv. een klein `Landmark`-dataclassje met `x/y/visibility`) i.p.v. het MediaPipe-object. Alle bestaande code (`get_landmarks`, `teken_alle_landmarks`, smoothing) leest alleen `.x/.y/.visibility`, dus dit werkt zonder verdere aanpassing — wel even verifiëren. De YOLO-backend (`_coco_naar_landmarks`) maakt al eigen landmark-objecten, dus dit trekt beide backends gelijk.
-3. Opslag als **`.npz`** (`np.savez_compressed`): een video van 3000 frames is ± 1–2 MB. Los bestand naast de video, níet als blob in SQLite — houdt de database klein en cloudsync-vriendelijk.
-4. `verwerk_afgeleiden()` moet los aanroepbaar zijn op een teruggeladen lijst (is hij in essentie al — controleren dat er geen verborgen afhankelijkheid van de detectie-pass is).
-
-**Klaar wanneer:** een analyse wegschrijven naar `.npz`, GUI herstarten, terugladen en identieke tabel/grafiek/overlay zien — zonder de video opnieuw te analyseren.
+The phases build on each other: 0 → 1 → 2 can't swap order; 3 (skeleton editor) and 4 (sharing) can then be built independently of each other. Phase 6 (faster analysis) is independent of the rest and can happen any time, even earlier. Phase 5 (horizon tracking) and 7 (perspective correction) are, under the fixed recording setup, **nice-to-haves** (see above); phase 7 shares building blocks with phase 5 (marking/tracking lines) and includes horizon correction as a special case. **Phase 8** (trimming fragments in the app + the recordings themselves in the library, requested 10 August 2026) was likewise independent and has been **done since 11 August 2026**; on the analysis side it leans entirely on the existing batch flow from phase 1 and added one schema bump (`source_video`, v3) for the work list of not-yet-trimmed recordings. That makes the **next** phase either phase 6 (faster analysis) or phase 2 (profile view, once the measurement is done).
 
 ---
 
-## Fase 1 — Profielen + database ✅
+## Phase 0 — Preparation: making results serializable ✅
 
-> **Af (18 juli 2026)** — zelftest (`python schaats_db.py`) + headless GUI-rooktest groen in beide venvs; volledige cyclus (schaatser aanmaken → analyseren → heropenen) werkt.
+> **Done (16 July 2026)** — verified on a real video through the GUI: save, restart the GUI, reload → identical table/graph/overlay, in a second instead of a full detection run.
 >
-> **Wat er staat:** `schaats_db.py` (config, schema `user_version=1`, CRUD, `sla_analyse_op` met video+npz eerst en DB-insert als laatste stap, zelftest); GUI-startpagina = bibliotheek (schaatsers links, analyses rechts uit de events-cache, dubbelklik = openen, hernoemen/verwijderen met bevestiging); `NieuweAnalyseDialog`; `AnalyseWorker` slaat na de analyse automatisch op (in de workerthread, met "Opslaan in bibliotheek..."-fase); heropenen via de fase 0-naad met de **opgeslagen** `smooth_n`/`threshold` uit `instellingen_json`. De fase 0-steigerknoppen (npz opslaan/laden) zijn weg.
+> **What's there:**
+> - `skate_analysis.py`, section "Serialization (phase 0)" before `segment_pushes`: `results_to_arrays()` / `arrays_to_results()` + `save_landmarks()` / `load_landmarks()` (`np.savez_compressed`).
+> - CLI: `--save-npz PATH` (write out landmarks after the analysis) and `--from-npz PATH` (skip detection, only recompute derivatives + draw the overlay; no model needed).
+> - GUI: buttons "Save landmarks (.npz)" (data panel) and "Load landmarks (.npz)..." (start page). **Temporary scaffolding** — phase 1 replaces manual file picking with the library; the functions underneath stay the same.
+> - `_analysis_done` is split: the display part is now `_show_results(info, resultaten, events, source=None)`, shared by a fresh and a loaded analysis. **This is the seam phase 1 reuses.**
 >
-> **Afwijkingen van het plan hieronder:**
-> - De instellingen-groupbox verhuisde naar de `NieuweAnalyseDialog` (geen derde stackpagina — de flow was al een keten van modale dialogen).
-> - Uit fase 4 naar voren gehaald (licht): bibliotheekpad-config in `%APPDATA%\SchaatsAnalyse\config.json` + knop "Bibliotheekmap...", én de cloud-veilige SQLite-discipline (journal DELETE, korte verbindingen per aanroep, busy_timeout, relatieve paden met forward slashes). De bibliotheek kan dus nu al in een gedeelde cloudmap (Google Drive/OneDrive/Dropbox) staan; fase 4 voegt alleen nog trainersnaam + conflictdetectie toe.
-> - Faalt alléén het opslaan, dan blijft de (lange) analyse zichtbaar met een waarschuwing — hij is dan alleen niet bewaard.
-> - ~~De perspectiefkalibratie wordt (net als in fase 0) niet geserialiseerd~~ — **achterhaald sinds 11 augustus 2026**: de kalibratie-invoer (de nagetrokken lijnen + parameters) gaat mee in `instellingen_json` en de camerastand wordt bij het openen herberekend. Zie fase 7 hieronder. Analyses van vóór die datum krijgen nog wel de oude melding.
-> - Besloten open vragen: video wordt altijd gekopieerd (origineel blijft staan, bestandsnaam behouden in de uuid-map); geen import van oude losse analyses.
+> **Deviations from the plan below:**
+> - Step 2's "plain landmark type" turned out to already exist (the `Landmark` namedtuple, `skate_analysis.py` line ~51, already used by the YOLO backend) — no new type needed.
+> - `arrays_to_results(arrays)` takes **no** `info` argument: the video metadata (w/h/fps/total) travels inside the `.npz` and comes back out as `VideoInfo` → `(VideoInfo, resultaten)`. Reloading therefore doesn't require the video.
+> - Step 4 held up: `process_derivatives()` had no hidden dependency on the detection pass.
+>
+> **Not serialized:** the perspective calibration (phase 7). It's off on load — harmless under the frontal-camera assumption.
 
-**Doel:** elke schaatser een profiel; elke analyse hoort bij een profiel.
+Everything after this stands or falls on being able to **save and reload** an analysis. Right now the `FrameResult` list only lives in the GUI's memory, and the `lm` field holds a MediaPipe landmark object that can't be written to disk directly.
 
-### Opslagstructuur (de "bibliotheek")
+**To build (in `skate_analysis.py`):**
 
-Eén map, later te delen via de cloud (fase 4). Pad instelbaar; standaard lokaal, bv. `Documenten\SchaatsAnalyse`:
+1. `results_to_arrays(resultaten)` → dict of numpy arrays:
+   - `landmarks`: `(n_frames, 33, 3)` float32 — normalized x, y, visibility (z is unused anywhere);
+   - `pose_found`: `(n_frames,)` bool; `horizon_deg`: `(n_frames,)` float32.
+   - Derivatives (leg/angle/weight/events) **not** saved as the source of truth: they're recomputable from the landmarks via `process_derivatives()` + `segment_pushes()`. They are cached (see phase 1) for fast display.
+2. `arrays_to_results(arrays, info)` → a fresh `FrameResult` list with a **plain landmark type** (e.g. a small `Landmark` dataclass with `x/y/visibility`) instead of the MediaPipe object. All existing code (`get_landmarks`, `draw_all_landmarks`, smoothing) only reads `.x/.y/.visibility`, so this works without further changes — worth verifying, though. The YOLO backend (`_coco_to_landmarks`) already builds its own landmark objects, so this brings both backends in line.
+3. Storage as **`.npz`** (`np.savez_compressed`): a 3000-frame video is ± 1–2 MB. A separate file next to the video, not a blob in SQLite — keeps the database small and cloud-sync-friendly.
+4. `process_derivatives()` must be callable on its own on a reloaded list (it essentially already is — check there's no hidden dependency on the detection pass).
+
+**Done when:** writing an analysis to `.npz`, restarting the GUI, reloading it, and seeing an identical table/graph/overlay — without re-analyzing the video.
+
+---
+
+## Phase 1 — Profiles + database ✅
+
+> **Done (18 July 2026)** — self-test (`python skate_db.py`) + headless GUI smoke test green in both venvs; the full cycle (create skater → analyze → reopen) works.
+>
+> **What's there:** `skate_db.py` (config, schema `user_version=1`, CRUD, `save_analysis` with video+npz first and the DB insert as the last step, self-test); GUI start page = the library (skaters on the left, analyses on the right from the events cache, double-click = open, rename/delete with confirmation); `NewAnalysisDialog`; `AnalysisWorker` automatically saves after the analysis (in the worker thread, with a "Saving to library..." phase); reopening via the phase-0 seam with the **saved** `smooth_n`/`threshold` from `settings_json`. The phase-0 scaffolding buttons (save/load npz) are gone.
+>
+> **Deviations from the plan below:**
+> - The settings group box moved into `NewAnalysisDialog` (no third stack page — the flow was already a chain of modal dialogs).
+> - Pulled forward from phase 4 (lightly): library-path config in `%APPDATA%\SchaatsAnalyse\config.json` + a "Library folder..." button, and the cloud-safe SQLite discipline (journal DELETE, short per-call connections, busy_timeout, relative paths with forward slashes). The library can therefore already live in a shared cloud folder (Google Drive/OneDrive/Dropbox); phase 4 only adds trainer name + conflict detection.
+> - Only if saving itself fails does the (long) analysis stay visible with a warning — it's then just not saved.
+> - ~~The perspective calibration is not serialized (like phase 0)~~ — **superseded since 11 August 2026**: the calibration input (the traced lines + parameters) travels in `settings_json` and the camera pose is recomputed on open. See phase 7 below. Analyses from before that date still get the old message.
+> - Settled open questions: video is always copied (the original stays put, filename kept in the uuid folder); no import of old loose analyses.
+
+**Goal:** every skater gets a profile; every analysis belongs to a profile.
+
+### Storage layout (the "library")
+
+One folder, shareable later via the cloud (phase 4). Path configurable; local by default, e.g. `Documents\SkateAnalysis`:
 
 ```
-<bibliotheek>/
-  schaats.db                 ← SQLite: profielen, analyses, events-cache
+<library>/
+  skate.db                   ← SQLite: profiles, analyses, events cache
   media/
-    <analyse-id>/
-      video.mp4              ← gekopieerd origineel (naam behouden mag ook)
-      landmarks.npz          ← gesmoothte landmarks (fase 0)
-      landmarks_ruw.npz      ← idem, vóór handmatige edits (fase 3)
+    <analysis-id>/
+      video.mp4              ← copied original (keeping the name is fine)
+      landmarks.npz           ← smoothed landmarks (phase 0)
+      landmarks_raw.npz       ← same, before manual edits (phase 3)
 ```
 
-`analyse-id` = een UUID, zodat twee trainers nooit botsende mapnamen maken.
+`analysis-id` = a UUID, so two trainers never create clashing folder names.
 
-### Databaseschema (stdlib `sqlite3`, werkt in beide venvs, geen nieuwe dependency)
+### Database schema (stdlib `sqlite3`, works in both venvs, no new dependency)
 
 ```sql
-schaatser(id, naam, geboortejaar, notities, aangemaakt_op)
-analyse(id TEXT PRIMARY KEY,          -- UUID, tevens mapnaam onder media/
-        schaatser_id, titel, datum,
-        video_bestand,                 -- relatief pad binnen de bibliotheek
-        w, h, fps, totaal_frames,
-        backend,                       -- 'yolo' | 'mediapipe'
-        instellingen_json,             -- doel_punt, horizon, smooth, ...
-        aangemaakt_door,               -- trainersnaam (vrije tekst, zie fase 4)
-        bewerkt,                       -- 0/1: zijn er handmatige skelet-edits
-        aangemaakt_op)
-afzet_event_cache(analyse_id, idx, been, start_frame, eind_frame,
-                  hoek, min_hoek, max_hoek, opmerking)
+skater(id, name, birth_year, notes, created_at)
+analysis(id TEXT PRIMARY KEY,          -- UUID, also the folder name under media/
+        skater_id, title, date,
+        video_file,                     -- relative path within the library
+        w, h, fps, total_frames,
+        backend,                        -- 'yolo' | 'mediapipe'
+        settings_json,                  -- target_point, horizon, smooth, ...
+        created_by,                     -- trainer name (free text, see phase 4)
+        edited,                         -- 0/1: are there manual skeleton edits
+        created_at)
+push_event_cache(analysis_id, idx, leg, start_frame, end_frame,
+                  angle, min_angle, max_angle, note)
 ```
 
-`afzet_event_cache` is puur voor snelle lijstweergave ("laatste analyse: gem. 42°") zonder eerst de `.npz` te laden; bij openen van een analyse wordt alles vers herberekend uit de landmarks.
+`push_event_cache` is purely for fast list display ("last analysis: avg. 42°") without loading the `.npz` first; opening an analysis recomputes everything fresh from the landmarks.
 
-Nieuwe module **`schaats_db.py`**: `open_db(pad)` (maakt schema aan indien nodig), CRUD voor schaatsers/analyses, `sla_analyse_op(...)` (kopieert video + schrijft npz + insert in één transactie), `laad_analyse(id)`. Houd alle SQL hier; GUI praat alleen met deze module.
+New module **`skate_db.py`**: `open_db(path)` (creates the schema if needed), CRUD for skaters/analyses, `save_analysis(...)` (copies the video + writes the npz + inserts in one transaction), `load_analysis(id)`. Keep all SQL here; the GUI only talks to this module.
 
-### GUI-wijzigingen (`schaats_gui.py`)
+### GUI changes (`skate_gui.py`)
 
-- **Nieuwe startpagina = bibliotheek**: links de schaatserslijst (+ knop "nieuwe schaatser"), rechts de analyses van de geselecteerde schaatser (datum, titel, aantal afzetten, gem. hoek uit de cache). Dubbelklik → analyse openen.
-- **"Nieuwe analyse"-flow**: schaatser kiezen (of aanmaken) → video kiezen → bestaande `DoelKiezer` → `AnalyseWorker` draait → bij `klaar` automatisch opslaan in de bibliotheek → analyse-weergave openen. De huidige weergavepagina blijft vrijwel ongewijzigd; alleen leest `cap_weergave` voortaan de gekopieerde video uit `media/<id>/`.
-- **Aanhaakpunt uit fase 0**: een analyse openen = `laad_landmarks()` + `verwerk_afgeleiden()` + `segmenteer_afzetten()` → `_toon_resultaten(...)`. Die weg werkt al (de tijdelijke "Landmarks laden"-knop doet precies dit); fase 1 vervangt alleen de bestandsdialoog door de bibliotheekselectie en haalt daarna beide tijdelijke knoppen weg.
-- Analyse hernoemen/verwijderen (verwijderen = DB-rij + mediamap, met bevestiging).
-- Video-kopie kan bij grote bestanden even duren → in de worker-thread doen, niet op de UI-thread.
+- **New start page = the library**: the skater list on the left (+ a "new skater" button), that skater's analyses on the right (date, title, number of pushes, avg. angle from the cache). Double-click → open the analysis.
+- **"New analysis" flow**: choose (or create) a skater → choose a video → the existing `TargetPicker` → `AnalysisWorker` runs → on `done` automatically save to the library → open the analysis view. The existing view page stays largely unchanged; only `cap_display` now reads the copied video from `media/<id>/`.
+- **Seam from phase 0**: opening an analysis = `load_landmarks()` + `process_derivatives()` + `segment_pushes()` → `_show_results(...)`. That path already works (the temporary "Load landmarks" button does exactly this); phase 1 only swaps the file dialog for the library selection and then removes both temporary buttons.
+- Rename/delete an analysis (delete = DB row + media folder, with confirmation).
+- Video copying can take a while for large files → do it in the worker thread, not the UI thread.
 
-**Klaar wanneer:** volledige cyclus werkt — schaatser aanmaken, video analyseren, afsluiten, heropenen, analyse uit het profiel terugkijken.
-
----
-
-## Fase 2 — Profielweergave verrijken
-
-> **Wachten op de meting (besloten 8 augustus 2026).** Deze fase gaat over het *duiden* van de schaatstechniek: voortgang over tijd, notities, export. Dat heeft pas waarde als de onderliggende meting klopt — een voortgangsgrafiek van hoeken die nog verschuiven bij elke verbetering aan de tracking is misleidend, en oude analyses zouden er anders in staan dan nieuwe. Fase 2 wordt daarom **pas opgepakt als de analyse af is**; het is technisch een kleine klus, maar niet de volgende.
-
-Klein maar waardevol vervolg op fase 1 (kan ook later):
-
-- **Voortgang over tijd**: grafiekje per schaatser met de gemiddelde/beste afzethoek per analyse-datum (data zit al in `afzet_event_cache`).
-- Notitieveld per analyse ("linkerbocht geoefend, wind tegen").
-- CSV-export per schaatser (alle analyses) naast de bestaande per-analyse-export.
+**Done when:** the full cycle works — create a skater, analyze a video, close, reopen, watch the analysis back from the profile.
 
 ---
 
-## Extra — Appversie per analyse + info-tabje ✅
+## Phase 2 — Enrich the profile view
 
-> **Af (6 augustus 2026)** — zelftest (`python schaats_db.py`) groen in beide venvs, versie handmatig getoetst tegen `git log -1`, en een headless rooktest van de dialoog + de bibliotheek-tooltip (ook met een analyse van vóór deze functie).
->
-> **Doel:** tijdens het ontwikkelen wijzigt de trackinglogica regelmatig; van een opgeslagen analyse moet je achteraf kunnen zien met welke versie van de app hij is gemaakt, zodat een vreemde meting te verklaren is ("dit is met de oude L/R-fixer gedaan").
->
-> **Wat er staat:** `schaats_db.app_versie()` leest de git-repo naast het script (`git log -1 --abbrev=8 --format=%h%x09%cs` + `git status --porcelain -uno`) en levert `{commit, datum, vuil, label}`, één keer per proces gecacht; buiten een repo is alles leeg. `sla_analyse_op` zet `app_versie`, `app_commit` én de volledige `backend_naam` zelf in `instellingen_json` (`setdefault`, dus een caller die het invult wint) — één plek, dus enkele analyse, batch en zelftest leggen het alle drie vast zonder eraan te denken. Nieuw in de GUI: knop **"ℹ Info..."** op twee plekken — in de transportbalk naast "Bewerken"/"⇄ Vergelijk met..." (geopende analyse) en op de startpagina naast "Openen" (geselecteerde rij, dus zonder de analyse te hoeven openen) → `AnalyseInfoDialog` met titel, schaatser, analysedatum, maker, appversie, backend, videoformaat, of er handmatig bewerkt is, en de instellingen (smoothing, drempel, bocht overslaan, horizon, perspectief; de heavy-model-rij alleen bij een MediaPipe-analyse, want de YOLO-backend heeft één model en negeert die vlag). De waarden zijn selecteerbaar zodat de hash te kopiëren is. De bibliotheeklijst toont de versie als tweede regel in de bestaande titel-tooltip.
->
-> **Keuzes:** de openstaande vraag hash-vs-label is **allebei geworden, maar allebei automatisch**: het label is `commitdatum · korte hash` (`2026-08-05 · 7e013fb7`), met een `+` als er ongecommitte wijzigingen waren. De commitdatum is het leesbare deel voor een trainer, de hash het precieze deel om `git show` op te doen. Een handmatig opgehoogde `APP_VERSIE`-constante is bewust geschrapt: die loopt juist tijdens snel ontwikkelen achter en liegt dan. Untracked bestanden tellen niet als "vuil" — video's en npz's naast de code zeggen niets over de gedraaide logica. Verder kreeg `schaats_db` een `analyse_meta()` (DB-rij + geparste instellingen, **zonder** het npz te lezen) en levert `lijst_analyses` de instellingen mee; de Info-knop haalt zijn meta daar vers op in plaats van een kopie op `MainWindow` te laten leven.
->
-> **Bewust niet:** geen schemabump en geen eigen kolom — dit hangt in het bestaande JSON-veld. Analyses van vóór deze wijziging krijgen dus met terugwerkende kracht geen versie; die tonen "onbekend (van vóór deze functie)" en houden in de bibliotheek precies hun oude tooltip. De versie wordt bij een handmatige skelet-edit níet bijgewerkt: hij zegt waarmee de analyse *gedraaid* is (dat een analyse bewerkt is, staat apart in de dialoog).
+> **Waiting on the measurement (decided 8 August 2026).** This phase is about *interpreting* skating technique: progress over time, notes, export. That's only valuable once the underlying measurement is solid — a progress graph of angles that still shift with every tracking improvement is misleading, and old analyses would end up looking different from new ones. Phase 2 is therefore only picked up **once the analysis is finished**; it's technically a small job, but not the next one.
+
+Small but worthwhile follow-up to phase 1 (can also come later):
+
+- **Progress over time**: a small graph per skater with the average/best push angle per analysis date (the data's already in `push_event_cache`).
+- A notes field per analysis ("practiced left corners, headwind").
+- CSV export per skater (all analyses) alongside the existing per-analysis export.
 
 ---
 
-## Extra — Bibliotheeklijst: videoduur i.p.v. afzetten/hoek ✅
+## Extra — App version per analysis + info tab ✅
 
-> **Af (6 augustus 2026)** — headless rooktest van de bibliotheekpagina in de YOLO-venv (kolommen, rij-knoppen, rijhoogte) + `python schaats_db.py` groen.
+> **Done (6 August 2026)** — self-test (`python skate_db.py`) green in both venvs, version manually checked against `git log -1`, and a headless smoke test of the dialog + the library tooltip (also with an analysis from before this feature).
 >
-> Uitgevoerd zoals hieronder beschreven, met twee toevoegingen die uit het gebruik kwamen:
-> - **Duur én afzetten in één kolom**: `"5,4s (4 afzetten)"` (boven de minuut `"1:23 (12 afzetten)"` — "83,2s" leest niemand als anderhalve minuut). Het aantal afzetten hoefde dus niet weg; het staat alleen niet meer op de plek van de eerste blik. Formattering in `_duur_tekst()` (`schaats_gui.py`); `lijst_analyses()` levert er alleen `totaal_frames`+`fps` extra voor aan.
-> - **De per-analyse knoppen verhuizen naar de rij zelf** (`_maak_rij_knoppen` → `setCellWidget` in de vierde kolom): "Openen", "ℹ Info...", "Hernoemen...", "Verwijderen" horen bij één analyse, terwijl "Nieuwe analyse..."/"Batch-analyse..."/"Vergelijk schaatsers..." bibliotheek-breed zijn — die stonden onderin op één rij door elkaar. Elke knop draagt zijn eigen analyse-id mee (default-argument in de lambda, anders krijgt elke rij de laatste lus-waarde), dus een klik werkt op zijn eigen rij en niet op de toevallige tabelselectie. `_hernoem_analyse`/`_verwijder_analyse` kregen daarvoor `(aid, titel)`-argumenten met de oude selectie-route als terugval. Bijvangst: de knoppenrij onderin ging van zeven naar drie knoppen, waarmee het **venster-minimum van 1738 → 1406 px** breed zakt (gemeten headless).
-
-**Doel:** de analysetabel op de startpagina (`tabel_analyses`) toont nu "aantal afzetten" en "gem. hoek" per rij. Die twee kolommen zijn niet waar de trainer op eerste oogopslag naar kijkt; bruikbaarder is **hoe lang de video duurt** (seconden), en de gemiddelde hoek mag helemaal weg.
-
-**Aanpak:**
-
-- **Duur i.p.v. aantal afzetten**: de duur (`totaal_frames / fps`) staat al in de `analyse`-tabel (fase 1-schema, kolommen `totaal_frames`+`fps`), dus dit is een pure weergavewijziging in `lijst_analyses()` (`schaats_db.py`) + de kolomopbouw in `schaats_gui.py` — geen schemabump, geen nieuwe berekening. Formatteren als `m:ss` (of `s` bij korte clips).
-- **Gem. hoek-kolom weghalen**: kolom uit `tabel_analyses` schrappen. De onderliggende berekening (`AVG(hoek)` met de `ONVOLLEDIG_MARKERS`-filtering in `lijst_analyses`) mag blijven bestaan voor fase 2's voortgangsgrafiek — alleen de kolom in déze tabel verdwijnt.
-- **Aantal afzetten**: blijft eventueel bruikbaar elders (bv. als tooltip), maar is als kolom niet meer nodig zodra duur er staat — te beslissen of hij helemaal weg mag of blijft staan naast de duur.
-
-**Klaar wanneer:** de bibliotheektabel toont per analyse titel/datum/duur (en evt. aantal afzetten), zonder de gemiddelde-hoek-kolom.
+> **Goal:** during development the tracking logic changes regularly; for a saved analysis you need to be able to see afterward which version of the app it was made with, so a strange measurement can be explained ("this was done with the old L/R fixer").
+>
+> **What's there:** `skate_db.app_version()` reads the git repo next to the script (`git log -1 --abbrev=8 --format=%h%x09%cs` + `git status --porcelain -uno`) and returns `{commit, date, dirty, label}`, cached once per process; outside a repo everything is empty. `save_analysis` sets `app_version`, `app_commit` and the full `backend_name` itself in `settings_json` (`setdefault`, so a caller that fills them in wins) — one place, so a single analysis, a batch, and the self-test all record all three without having to think about it. New in the GUI: an **"ℹ Info..."** button in two places — in the transport bar next to "Edit"/"⇄ Compare with..." (the open analysis) and on the start page next to "Open" (the selected row, so without having to open the analysis) → `AnalysisInfoDialog` with title, skater, analysis date, creator, app version, backend, video format, whether it's been manually edited, and the settings (smoothing, threshold, skip corner, horizon, perspective; the heavy-model row only for a MediaPipe analysis, since the YOLO backend has one model and ignores that flag). The values are selectable so the hash can be copied. The library list shows the version as a second line in the existing title tooltip.
+>
+> **Choices:** the open question of hash-vs-label became **both, but both automatic**: the label is `commit-date · short hash` (`2026-08-05 · 7e013fb7`), with a `+` if there were uncommitted changes. The commit date is the readable part for a trainer, the hash the precise part for running `git show`. A manually bumped `APP_VERSION` constant was deliberately dropped: it lags behind during fast development and then lies. Untracked files don't count as "dirty" — videos and npz files next to the code say nothing about the logic that ran. `skate_db` also got an `analysis_meta()` (the DB row + parsed settings, **without** reading the npz), and `list_analyses` includes the settings; the Info button fetches its metadata there fresh instead of a copy living on `MainWindow`.
+>
+> **Deliberately not done:** no schema bump and no dedicated column — this rides on the existing JSON field. Analyses from before this change therefore get no version retroactively; those show "unknown (from before this feature)" and keep exactly their old tooltip in the library. The version is **not** updated on a manual skeleton edit: it records what version the analysis was **run** with (that an analysis has been edited is shown separately in the dialog).
 
 ---
 
-## Extra — Bochtdetectie: de bocht wordt niet meer geanalyseerd ✅
+## Extra — Library list: video duration instead of pushes/angle ✅
 
-> **Af (5 augustus 2026)** — buiten de fasering. De bocht kostte analysetijd zonder ooit een bruikbare meting op te leveren; dat is nu beide opgelost.
+> **Done (6 August 2026)** — headless smoke test of the library page (columns, row buttons, row height) in the YOLO venv + `python skate_db.py` green.
 >
-> **Wat het signaal is:** `bocht_ratio` in `schaats_analyse.py` = **heupbreedte / romplengte** (schoudermidden→heupmidden), in pixels. Schaalvrij, net als `_strek_ratio` — en juist gevoelig voor de rotatie om de verticale as die de bocht maakt: frontaal staan de heupen naast elkaar, in de bocht achter elkaar terwijl de romp even lang blijft. **Gemeten over alle 22 analyses in de bibliotheek:** 18 frontale clips komen nooit onder 0,57 (mediaan 0,75–1,20); het bochtdeel van vier lange clips zit op 0,21–0,24. Marge ruim 3×. Vier alternatieve noemers (femur, heel been, schouderbreedte, combinaties) gaven allemaal minder scheiding (1,7–2,7×). De classificatie (`bepaal_bocht_reeks`, recept van `bepaal_horizon_reeks`: Hampel → Savitzky–Golay → hysterese 0,40 in / 0,50 uit → runs < 0,6 s weg) markeert op die 18 frontale clips **nul** frames als bocht.
+> Implemented as described below, with two additions that came out of using it:
+> - **Duration and push count in one column**: `"5.4s (4 pushes)"` (above a minute, `"1:23 (12 pushes)"` — nobody reads "83.2s" as a minute and a half). So the push count didn't need to disappear; it just no longer sits where the eye lands first. Formatting in `_duration_text()` (`skate_gui.py`); `list_analyses()` only needs to supply `total_frames`+`fps` extra for it.
+> - **The per-analysis buttons move onto the row itself** (`_make_row_buttons` → `setCellWidget` in the fourth column): "Open", "ℹ Info...", "Rename...", "Delete" belong to one analysis, while "New analysis..."/"Batch analysis..."/"Compare skaters..." are library-wide — those used to sit together in one row at the bottom. Each button carries its own analysis id (a default argument in the lambda, otherwise every row would capture the last loop value), so a click acts on its own row rather than the table's incidental selection. `_rename_analysis`/`_delete_analysis` were given `(aid, title)` arguments for that, with the old selection route as a fallback. Side effect: the bottom button row went from seven buttons to three, which brings the **window minimum from 1738 → 1406 px** wide (measured headless).
+
+**Goal:** the analysis table on the start page (`tabel_analyses`) currently shows "number of pushes" and "avg. angle" per row. Those two columns aren't what a trainer looks at first; **how long the video runs** (seconds) is more useful, and the average angle can go away entirely.
+
+**Approach:**
+
+- **Duration instead of push count**: the duration (`total_frames / fps`) is already in the `analysis` table (phase 1 schema, columns `total_frames`+`fps`), so this is a pure display change in `list_analyses()` (`skate_db.py`) + the column setup in `skate_gui.py` — no schema bump, no new calculation. Format as `m:ss` (or `s` for short clips).
+- **Remove the avg. angle column**: drop the column from `tabel_analyses`. The underlying calculation (`AVG(angle)` with the `INCOMPLETE_MARKERS` filtering in `list_analyses`) can stay for phase 2's progress graph — only the column in *this* table disappears.
+- **Push count**: might still be useful elsewhere (e.g. as a tooltip), but isn't needed as a column once duration is there — to be decided whether it disappears entirely or stays alongside the duration.
+
+**Done when:** the library table shows title/date/duration (and optionally push count) per analysis, without the average-angle column.
+
+---
+
+## Extra — Corner detection: the corner is no longer analyzed ✅
+
+> **Done (5 August 2026)** — outside the phasing. The corner cost analysis time without ever producing a usable measurement; both problems are now solved.
 >
-> **Waar de tijdwinst zit:** `_BochtWacht` in `schaats_yolo.py`. De detectiepass is ~94% van de analysetijd, dus die moest de bocht overslaan — en dat kon niet met `model.track(source=pad, stream=True)`, want ultralytics leest en infereert daar zelf elk frame. De lus leest de frames nu zelf (decoderen is verwaarloosbaar, en zo blijft de framenummering exact) en infereert in de bocht nog maar elke ~0,3 s, precies zoals voorgesteld. De wacht gaat overslaan na 0,5 s bochtbewijs (iemand in beeld, maar gedraaid) of 3 s zonder enige meetbare persoon — die 3 s ligt bewust boven het langste detectiegat op een recht stuk in de bibliotheek (2,1 s, IMG_9001). Omstanders langs de boarding staan frontaal in beeld en zouden de analyse eeuwig op vol tempo houden; daarom telt alleen een persoon die beweegt **of groeit** (een schaatser die recht op de camera af komt verplaatst in beeld nauwelijks maar wordt ~18%/s groter).
+> **What the signal is:** `corner_ratio` in `skate_analysis.py` = **hip width / torso length** (shoulder midpoint→hip midpoint), in pixels. Scale-free, like `_extension_ratio` — and specifically sensitive to the rotation around the vertical axis that a corner causes: frontal, the hips sit side by side; in the corner they sit front-to-back while the torso stays the same length. **Measured over all 22 analyses in the library:** 18 frontal clips never dip below 0.57 (median 0.75–1.20); the corner section of four long clips sits at 0.21–0.24. Margin over 3×. Four alternative denominators (femur, whole leg, shoulder width, combinations) all gave less separation (1.7–2.7×). The classification (`determine_corner_sequence`, following the recipe of `determine_horizon_sequence`: Hampel → Savitzky–Golay → hysteresis 0.40 in / 0.50 out → runs < 0.6 s cleared) marks **zero** frames as corner on those 18 frontal clips.
 >
-> **Waarom het overslaan veilig is:** de verfijningspass vult detectiegaten tot `GAP_VUL_S` (1,0 s) met geïnterpoleerde bboxes en schat de pose daar alsnog top-down. De gaten die het overslaan achterlaat zijn 0,33 s, dus ruim daarbinnen. De bocht wordt daarom **bepaald op de ruwe pass-1-landmarks, vóór de verfijning**: heeft de wacht een stuk ónterecht overgeslagen, dan meldt het eerstvolgende controleframe binnen 0,33 s een frontale schaatser en draait de detectiepass meteen weer op vol tempo. Te veel overslaan kost dus (bijna) geen dekking, te weinig overslaan alleen tijd.
+> **Where the time savings come from:** `_CornerGuard` in `skate_yolo.py`. The detection pass is ~94% of the analysis time, so it had to skip the corner — and that couldn't be done with `model.track(source=path, stream=True)`, since ultralytics reads and infers every frame itself there. The loop now reads the frames itself (decoding is negligible, and this way the frame numbering stays exact) and only infers roughly every 0.3 s in the corner, exactly as proposed. The guard starts skipping after 0.5 s of corner evidence (someone in frame, but turned) or 3 s with nobody measurable at all — that 3 s deliberately sits above the longest detection gap on a straight section in the library (2.1 s, IMG_9001). Bystanders along the boarding stand frontal in view and would keep the analysis at full speed forever; that's why only a person who's moving **or** growing counts (a skater heading straight at the camera barely shifts in frame but grows ~18%/s).
 >
-> **Een controleframe telt niet als meting.** Het frame dat in de overslaan-stand nog wél geïnfereerd wordt, krijgt een skelet — maar het staat midden in een stuk dat verder niet bekeken is, dus de buurframes die een afzet moeten aantonen ontbreken. `_detecteer_alles` levert die frames daarom mee in `buiten_meting`, en `_bocht_met_controleframes` houdt ze na elke classificatie op `bocht=True`. Hun óórdeel telt wél (ze mogen de bocht beëindigen — daarvoor zijn ze er), hun eigen hoek niet. Zonder die regel zou zo'n frame zichzelf op z'n eigen heupstand kunnen vrijpleiten: midden in een bocht draait een schaatser af en toe kort bijna frontaal.
+> **Why the skipping is safe:** the refinement pass fills detection gaps up to `GAP_FILL_S` (1.0 s) with interpolated bboxes and still estimates the pose there top-down. The gaps the skipping leaves behind are 0.33 s, well within that. The corner is therefore **determined on the raw pass-1 landmarks, before refinement**: if the guard wrongly skipped a stretch, the next check frame within 0.33 s reports a frontal skater and the detection pass immediately returns to full speed. Too much skipping costs (almost) no coverage; too little skipping only costs time.
 >
-> **Gemeten (5 aug 2026):**
+> **A check frame doesn't count as a measurement.** The frame that still gets inferred in skip mode gets a skeleton — but it sits in the middle of a stretch that otherwise wasn't looked at, so the neighboring frames a push would need to prove itself are missing. `_detect_all` therefore returns those frames in `excluded`, and `_corner_with_check_frames` keeps them at `corner=True` after each classification. Their *verdict* still counts (they're allowed to end the corner — that's what they're there for), their own angle doesn't. Without that rule, such a frame could clear itself on its own hip stance: mid-corner a skater sometimes briefly turns almost frontal.
+>
+> **Measured (5 Aug 2026):**
 >
 > | | | |
 > |---|---|---|
-> | **"Kim tempo"** (888 frames, 52% bocht) | 2266 s → **1253 s** | **45% sneller** (1,8×) |
-> | ... afzetten | 32 → 16 | de vijf hoeken van 74–87° aan het eind (de bocht) zijn weg |
-> | ... rechte stuk (frame 0–427) | landmarks **identiek** (mediaan 0,00 px) | alleen de laatste 7 frames vóór de bocht wijken af |
-> | **"Schaats frontaal"** (kruisende schaatsers) | bocht aan vs. uit: **byte-identiek** | 0 frames als bocht gemarkeerd |
-> | **"7e ronde"** (staand telefoonbeeld) | 0 bocht, dekking 100%, zelfde 5 afzetten | geen rotatieprobleem door de eigen leeslus |
-> | **De eigen leeslus zelf** | met bocht uit: **byte-identiek aan de opgeslagen analyse** | `model.track(source=...)` vervangen verandert niets |
+> | **"Kim tempo"** (888 frames, 52% corner) | 2266 s → **1253 s** | **45% faster** (1.8×) |
+> | ... pushes | 32 → 16 | the five angles of 74–87° at the end (the corner) are gone |
+> | ... straight section (frame 0–427) | landmarks **identical** (median 0.00 px) | only the last 7 frames before the corner differ |
+> | **"Schaats frontaal"** (crossing skaters) | corner on vs. off: **byte-identical** | 0 frames marked as corner |
+> | **"7e ronde"** (portrait phone footage) | 0 corner, 100% coverage, same 5 pushes | no rotation problem from the own read loop |
+> | **The own read loop itself** | with corner off: **byte-identical to the saved analysis** | replacing `model.track(source=...)` changes nothing |
 >
-> De hoekverschillen die op het rechte stuk van Kim tempo overblijven (tot 3,8°, één afzet minder) komen **niet** uit de detectie maar uit de meetlogica: de geschatte slagperiode (`STREK_MIN_SLAG_FRAC`) en de L/R-alternatiecontrole liepen voorheen mede over bochtruis. Zet je de bochtvlag op de ópgeslagen landmarks, dan komt er exact dezelfde eventlijst uit — dus dit is winst, geen afwijking.
+> The angle differences left over on the straight section of Kim tempo (up to 3.8°, one fewer push) don't come from detection but from the measurement logic: the estimated stroke period (`EXTENSION_MIN_STROKE_FRAC`) and the L/R alternation check used to run partly over corner noise too. Setting the corner flag on the already-saved landmarks produces the exact same event list — so this is a gain, not a deviation.
 >
-> **Wat "bocht" betekent voor de meting:** één regel in `verwerk_afgeleiden` — een bochtframe krijgt geen `lm_data`. Been-toewijzing, afzet-voltooiing en event-segmentatie bouwen hun segmenten allemaal op "pose én lm_data", dus zij zien de bocht vanzelf als een detectiegat; aan de meetlogica is niets veranderd. Het skelet blijft wél getekend, met "BOCHT — niet gemeten" in beeld. Dat markeren i.p.v. hard afkappen is nodig omdat sommige clips juist ín de bocht beginnen (laatste slagen van de vorige ronde) en omdat een video met meerdere rondjes zo elk recht stuk blijft opleveren.
+> **What "corner" means for the measurement:** one line in `process_derivatives` — a corner frame gets no `lm_data`. Leg assignment, push completion, and event segmentation all build their segments on "pose and lm_data", so they automatically see the corner as a detection gap; nothing about the measurement logic changed. The skeleton is still drawn, with "CORNER — not measured" on screen. Marking instead of hard-cutting is needed because some clips start right **in** the corner (the last strokes of the previous lap), and because a video with multiple laps this way keeps producing every straight section.
 >
-> **Bestaande analyses** veranderen niet vanzelf: hun npz kent de vlag niet en bij het openen wordt die niet alsnog berekend. Wil je zo'n analyse tóch schoon, dan doet de knop **"Bocht bepalen"** dat zonder opnieuw te analyseren — de landmarks van de hele clip staan er immers al in. Hij laat eerst zien wat het met de tabel doet en vraagt dan pas; op "Kim tempo" is dat 32 → 16 afzetten in een fractie van een seconde i.p.v. 21 minuten. Bewust een knop en geen automatisme: het verandert wat de trainer eerder gezien heeft.
+> **Existing analyses** don't change on their own: their npz doesn't know the flag and it isn't computed retroactively on open. If you do want such an analysis cleaned up, the **"Determine corner"** button does that without re-analyzing — the landmarks for the whole clip are already there. It shows what it would do to the table first and only then asks; on "Kim tempo" that's 32 → 16 pushes in a fraction of a second instead of 21 minutes. Deliberately a button, not an automatism: it changes what the trainer already saw.
 >
-> **Verder:** `FrameResultaat.bocht` gaat mee in het npz (oude npz's laden ongewijzigd — de runtime-skip valt niet uit landmarks te herleiden, dus die moet bewaard); checkbox **"Bocht overslaan (sneller)"** (standaard aan) in beide analyse-dialogen; de dekkingsteller telt bochtframes niet als openstaand werk en "⏭ Volgend gat" springt er niet in; `python schaats_eval.py bocht analyse.npz` print het signaal + de gevonden segmenten. CLI: `--no-bocht`.
+> **Further:** `FrameResult.corner` travels in the npz (old npz files load unchanged — the runtime skip can't be derived from landmarks, so it has to be stored); checkbox **"Skip corner (faster)"** (on by default) in both analysis dialogs; the coverage counter doesn't count corner frames as outstanding work and "⏭ Next gap" doesn't jump into them; `python skate_eval.py corner analysis.npz` prints the signal + the found segments. CLI: `--no-corner`.
 >
-> **Nog open:** de drempels zijn geijkt op vier TV-clips die in de bocht eindigen. Er is nog **geen clip uit de eigen opstelling die ín de bocht begint** — zodra die er is, met `schaats_eval.py bocht` narekenen en `BOCHT_IN`/`BOCHT_UIT` zo nodig bijstellen. `BOCHT_MIN_BEWEGING` (de omstander-filter) is het meest waarschijnlijke tweede afstelpunt.
+> **Still open:** the thresholds are calibrated on four TV clips that end in the corner. There's still **no clip from our own setup that starts in the corner** — once there is one, recheck with `skate_eval.py corner` and adjust `CORNER_IN`/`CORNER_OUT` if needed. `CORNER_MIN_MOVEMENT` (the bystander filter) is the most likely second thing to tune.
 
 ---
 
-## Extra — Batch-analyse ✅
+## Extra — Batch analysis ✅
 
-> **Af (20 juli 2026)** — buiten de fasering, bovenop de fase 1-flow. Meerdere video's in één keer analyseren.
+> **Done (20 July 2026)** — outside the phasing, on top of the phase 1 flow. Analyze several videos at once.
 >
-> **Wat er staat:** `BatchAnalyseDialog` (video's + per rij schaatser/titel + gedeelde instellingen) en `BatchWorker` (`QThread`) in `schaats_gui.py`. De doel-/horizon-keuze gebeurt vooraf per video in `_nieuwe_batch_analyse`; daarna draait de hele rij onbewaakt en slaat elke analyse zelf op via `sla_analyse_op`. Eén mislukte clip stopt de batch niet (gemeld, rest loopt door); "Stop na deze video" = nette stop tussen clips. Geen roadmap-fase, wel logisch vervolg op de bibliotheek — vandaar hier genoteerd.
+> **What's there:** `BatchAnalysisDialog` (videos + a skater/title per row + shared settings) and `BatchWorker` (`QThread`) in `skate_gui.py`. The target/horizon choice happens up front, per video, in `_new_batch_analysis`; the whole row then runs unattended and each analysis saves itself via `save_analysis`. One failed clip doesn't stop the batch (it's reported, the rest continues); "Stop after this video" = a clean stop between clips. Not a roadmap phase, but a logical follow-on to the library — noted here for that reason.
 
 ---
 
-## Extra — Vergelijk schaatsers (twee analyses naast elkaar) ✅
+## Extra — Compare skaters (two analyses side by side) ✅
 
-> **Af (27 juli 2026)** — buiten de fasering. Twee opgeslagen analyses naast elkaar om schaatsers (of dezelfde schaatser op twee momenten) te vergelijken.
+> **Done (27 July 2026)** — outside the phasing. Two saved analyses side by side to compare skaters (or the same skater at two points in time).
 >
-> **Voorwerk — videopaneel uitgefactoreerd.** Alle afspeel-state zat als losse `self.*`-attributen in `MainWindow`, dus twee spelers naast elkaar was onmogelijk. Nieuwe `VideoSpeler(QWidget)` met eigen capture/timer/zoom/pan en alle bediening; `MainWindow` benadert `video_info`/`resultaten`/`huidige_idx` nog via read-only properties, zodat de bestaande editor- en tabelcode ongewijzigd bleef. De skelet-editor haakt in via `overlay_tekenaar` + `op_muis_druk/_beweeg/_los` (plain callables); pannen blijft in de speler, vóór de callback, zodat de voorrangsregel per constructie klopt. Analysepagina werkt daarna identiek — inclusief een meegenomen fix: `slider.setRange` in `laad()` staat nu in `blockSignals`, zodat een korte analyse na een lange geen spook-seek meer geeft.
+> **Groundwork — the video panel factored out.** All playback state lived as loose `self.*` attributes on `MainWindow`, so two players side by side was impossible. A new `VideoPlayer(QWidget)` with its own capture/timer/zoom/pan and all the controls; `MainWindow` still reaches `video_info`/`resultaten`/`huidige_idx` through read-only properties, so the existing editor and table code stayed unchanged. The skeleton editor hooks in via `overlay_drawer` + `on_mouse_press/_move/_release` (plain callables); panning stays inside the player, ahead of the callback, so the priority rule holds by construction. The analysis page then works identically — including a fix that came along for the ride: `slider.setRange` in `load()` is now wrapped in `blockSignals`, so a short analysis after a long one no longer produces a phantom seek.
 >
-> **Wat er staat:** knop "Vergelijk schaatsers..." op de startpagina → derde pagina met twee `VergelijkKant`-widgets (kop, eigen `VideoSpeler`, "Kies analyse...", sync-punt, minimale afzettabel `#`/`Been`/`Hoek` met grijze markering voor onvolledige afzetten). `AnalyseKiezer` (schaatser → analyse) wordt tweemaal gebruikt bij het openen en per kant om te wisselen. Elke kant is los af te spelen; **"Start alles"** speelt beide vanaf hun sync-punt via **één masterklok** die het doelframe per kant uit de wandkloktijd × de eigen fps berekent — zelfcorrigerend en correct bij verschillende fps (twee losse timers zouden binnen seconden uit de pas lopen). Standaard ¼×. Gedeelde laadhelper `_laad_analyse_data` raakt geen `MainWindow`-state aan, zodat de vergelijking de instellingen van de geopende analyse niet overschrijft.
+> **What's there:** a "Compare skaters..." button on the start page → a third page with two `CompareSide` widgets (header, own `VideoPlayer`, "Choose analysis...", sync point, a minimal push table `#`/`Leg`/`Angle` with gray highlighting for incomplete pushes). `AnalysisPicker` (skater → analysis) is used twice on open and per side to switch. Each side can be played independently; **"Start all"** plays both from their sync point via **one master clock** that computes the target frame per side from wall-clock time × its own fps — self-correcting and correct across different fps (two separate timers would drift apart within seconds). Default ¼×. The shared load helper `_load_analysis_data` touches no `MainWindow` state, so comparing doesn't overwrite the settings of the currently open analysis.
 >
-> **Bewust nog niet:** sync-punten worden niet opgeslagen (geen DB-kolom, zou een schemabump + migratie kosten); geen gecombineerde statistiek of grafiek over de twee kanten heen; de tabel is opzet minimaal — eerst kijken wat een trainer in de praktijk mist.
+> **Deliberately not yet:** sync points aren't saved (no DB column, would need a schema bump + migration); no combined statistic or graph across the two sides; the table is deliberately minimal — see what a trainer actually misses in practice first.
 
 ---
 
-## Extra — Automatische zoom ✅
+## Extra — Automatic zoom ✅
 
-> **Af (28 juli 2026)** — het programma bepaalt de zoom zelf: de schaatser staat de hele clip helemaal in beeld met wat lucht eromheen. Buiten de fasering; hoorde bij de drie losse verbeterpunten van 27 juli.
+> **Done (28 July 2026)** — the program determines the zoom itself: the skater stays fully in frame with some air around them for the whole clip. Outside the phasing; part of the three loose improvement points from 27 July.
 >
-> **Waarom:** gemeten over de bibliotheek wordt een schaatser tijdens een clip 1,4–5,8× groter in beeld. Eén vaste zoomfactor klopt dus hooguit een paar seconden en de trainer zat tijdens het afspelen aan de slider. De trainer wil de kadering ook niet zélf hoeven kiezen — dat is werk dat het programma kan doen.
+> **Why:** measured across the library, a skater grows 1.4–5.8× larger in frame over the course of a clip. One fixed zoom factor is therefore only right for a few seconds, and the trainer ended up riding the slider during playback. The trainer also doesn't want to have to choose the framing themselves — that's work the program can do.
 >
-> **Wat er staat:** `kader_reeks()` in `schaats_analyse.py` berekent bij het laden één keer offline per frame `(midden, straal)` van de schaatser — vooraf i.p.v. online, zodat scrubben exact dezelfde uitsnede geeft als ernaartoe afspelen. In `VideoSpeler` staan `_zoom` (ingesteld, 1–5×) en `_zoom_eff` (toegepast, tot 8×) los van elkaar; met de checkbox **"Automatische zoom"** (standaard uit) volgt `_zoom_eff` uit de kaderstraal plus 15% marge, en volgt de uitsnede het kader-middelpunt. Zolang de automaat aan staat zijn de zoom-slider en "Passend" uitgeschakeld; aan het muiswiel draaien neemt de zoom weer over. Zit in `VideoSpeler`, dus de vergelijkpagina heeft het per kant — twee schaatsers op verschillende afstand worden zo pas echt vergelijkbaar. Zie CLAUDE.md (bullet "Automatische zoom") voor de details.
+> **What's there:** `box_sequence()` in `skate_analysis.py` computes, once at load time, an offline per-frame `(center, radius)` of the skater — up front rather than online, so scrubbing gives exactly the same crop as playing toward it. In `VideoPlayer`, `_zoom` (set, 1–5×) and `_zoom_eff` (applied, up to 8×) are kept separate; with the **"Automatic zoom"** checkbox (off by default), `_zoom_eff` follows the box radius plus 15% margin, and the crop follows the box center point. As long as the automation is on, the zoom slider and "Fit" are disabled; turning the mouse wheel hands control back. It lives in `VideoPlayer`, so the compare page gets it per side too — two skaters at different distances only really become comparable this way. See CLAUDE.md (the "Automatic zoom" bullet) for details.
 >
-> **Wat de meting uitwees (op echte analyses, alle frames nagelopen):**
-> - Kaderen om `torso_centroid` verspilt een kwart van het beeld (dat punt ligt hoog in het lichaam) — vandaar het midden van álle zichtbare landmarks: beeldvulling 0,40 → 0,56.
-> - Alleen smoothen vlakt de piek af en dan valt een uitgestrekt been buiten beeld; eerst een lopend maximum over één slag, dán smoothen. Resultaat: geen enkel frame met de schaatser buiten de uitsnede, bij < 2% zoomverandering per frame.
-> - `KADER_POLY=1` i.p.v. de gedeelde `SMOOTH_POLY=2`: de kwadratische randfit extrapoleert de slag-golf en zit 15% mis op het eerste frame (lineair: 3%).
-> - Het plafond hoort niet op de videoresolutie te zitten maar op de vergroting op het scherm: staande telefoonclips staan in een liggend paneel al gekrompen en mogen ver inzoomen, 4K-liggend nauwelijks.
-> - Bij een lang detectiegat hield het kader de laatst bekende stand vast — dat leverde een 8×-uitvergroting van de plek waar de schaatser wás (zichtbaar op de eerste seconde van IMG_9002). Nu gaat het kader na `KADER_GAT_S` vloeiend open tot het volledige beeld.
+> **What the measurement showed (on real analyses, every frame checked):**
+> - Framing around `torso_centroid` wastes a quarter of the frame (that point sits high in the body) — hence the center of all *visible* landmarks instead: frame fill 0.40 → 0.56.
+> - Smoothing alone flattens the peak, and then an outstretched leg falls outside the crop; first a running maximum over one stroke, then smoothing. Result: no frame with the skater outside the crop, at < 2% zoom change per frame.
+> - `BOX_POLY=1` instead of the shared `SMOOTH_POLY=2`: the quadratic edge fit extrapolates the stroke wave and is 15% off on the first frame (linear: 3%).
+> - The ceiling shouldn't sit on the video resolution but on the on-screen magnification: portrait phone clips already sit shrunk inside a landscape panel and may zoom in a lot, landscape 4K barely at all.
+> - On a long detection gap the box held its last known framing — that produced an 8× close-up of the spot where the skater *used to be* (visible in the first second of IMG_9002). Now the box smoothly opens up to the full frame after `BOX_GAP_S`.
 >
-> **Bewust niet:** geen persistentie (zoomstand en checkbox horen bij het kijken, niet bij de analyse); geen automatische keuze wanneer de automaat aan moet — dat blijft een vinkje.
+> **Deliberately not done:** no persistence (zoom state and the checkbox belong to watching, not to the analysis); no automatic decision on when the automation should be on — that stays a checkbox.
 
 ---
 
-## Extra — Soepeler vergelijken ✅
+## Extra — Smoother comparing ✅
 
-> **Af (28 juli 2026)** — de twee losse verbeterpunten van 27 juli op de vergelijkpagina.
+> **Done (28 July 2026)** — the two loose improvement points from 27 July on the compare page.
 >
-> **Rechtstreeks vergelijken vanuit een geopende analyse:** knop **"⇄ Vergelijk met..."** in de transportbalk van de weergavepagina (naast "Bewerken", via `voeg_bedieningsknop`). De geopende analyse gaat altijd naar de **linkerkant** — vanuit een geopende analyse is er nooit een lege kant om slim over na te denken, dus voorspelbaar is beter — en voor rechts wordt meteen om een analyse gevraagd, voorgeselecteerd op dezelfde schaatser (dus "deze schaatser toen vs. nu" is twee klikken). Stond er rechts al een ándere analyse, dan blijft die staan inclusief sync-punt; annuleren van de kiezer opent de pagina gewoon met alleen links gevuld. De kant laadt de analyse **opnieuw uit de bibliotheek** i.p.v. de resultatenlijst van de weergavepagina te delen: de skelet-editor muteert die `FrameResultaat`-objecten in place. Daarvoor is `_kies_vergelijk_kant` gesplitst in de dialoog en een herbruikbaar `_zet_vergelijk_kant(kant, analyse_id, naam)`; de knop staat uit zolang er geen opgeslagen analyse open is (een niet-bewaarde analyse valt niet uit de bibliotheek te laden).
+> **Comparing directly from an open analysis:** the **"⇄ Compare with..."** button in the transport bar of the view page (next to "Edit", via `add_control_button`). The open analysis always goes to the **left side** — from an open analysis there's never an empty side to be clever about, so predictable is better — and for the right side you're immediately asked for an analysis, preselected on the same skater (so "this skater then vs. now" is two clicks). If the right side already had a different analysis, it stays, sync point included; canceling the picker just opens the page with only the left side filled. The side **reloads the analysis from the library** rather than sharing the view page's result list: the skeleton editor mutates those `FrameResult` objects in place. For that, `_choose_compare_side` was split into the dialog and a reusable `_set_compare_side(side, analysis_id, name)`; the button is disabled as long as there's no saved analysis open (an unsaved analysis can't be loaded from the library).
 >
-> **Eén kant wisselen** bleek er al te zijn: elke `VergelijkKant` had z'n eigen "Kies analyse..."-knop die alleen die kant vervangt (meegekomen met de `VideoSpeler`-refactor, maar nooit uit deze lijst gehaald). Wat er wél bij moest: de knop heet **"Wisselen..."** zodra er een analyse staat, er is een **✕**-knop om een kant leeg te maken (bedraad vanuit de pagina zodat de masterklok eerst losgelaten wordt), en dezelfde analyse opnieuw laden **houdt het sync-punt** — dat hoort bij de video, niet bij het laden. Een andere analyse begint nog steeds op frame 0.
+> **Switching one side** turned out to already exist: every `CompareSide` had its own "Choose analysis..." button that only replaces that side (it came along with the `VideoPlayer` refactor, but was never taken off this list). What did need adding: the button reads **"Switch..."** once a side has an analysis, there's an **✕** button to clear a side (wired from the page so the master clock is released first), and reloading the same analysis **keeps the sync point** — that belongs to the video, not to loading it. A different analysis still starts at frame 0.
 >
-> **Twee ruwe video's naast elkaar (12 september 2026):** het kijkvenster (`BekijkVenster`, Opnames-tab) kan nu ook twee video's tegelijk tonen — twee rijen selecteren, of "➕ Tweede video ernaast..." in het venster — op dezelfde masterklok als deze pagina, die daarvoor als `MasterKlok` uit `MainWindow` is gehaald. Sync-punt per video, één snelheid, geen analyse nodig; punten alleen bij één video. Zie CLAUDE.md.
+> **Two raw videos side by side (12 September 2026):** the viewing window (`ViewWindow`, Recordings tab) can now also show two videos at once — select two rows, or "➕ Second video alongside..." in the window — on the same master clock as this page, which was pulled out of `MainWindow` as `MasterClock` for that reason. A sync point per video, one shared speed, no analysis needed; points only with a single video. See CLAUDE.md.
 
-> **Eén snelheid voor beide kanten:** de snelheidsregelaar per kant is weg (`VideoSpeler(toon_snelheid=False)`); de gedeelde regelaar onderaan de pagina stuurt nu ook het los afspelen van een kant. Twee video's naast elkaar op verschillend tempo laten lopen is precies wat je bij vergelijken níet wilt, en de per-kant combo nodigde daar wel toe uit.
+> **One speed for both sides:** the per-side speed control is gone (`VideoPlayer(show_speed=False)`); the shared control at the bottom of the page now also drives a side playing on its own. Running two videos side by side at different speeds is exactly what you don't want while comparing, and the per-side combo invited exactly that.
 >
-> **Bewust niet:** nog steeds geen opgeslagen sync-punten (zie de sectie hierboven — schemabump); geen derde kant.
+> **Deliberately not done:** still no saved sync points (see above — schema bump); no third side.
 
 ---
 
-## Extra — Kleine schaatser volgen vanaf een getekend kader (kijkglas) ✅
+## Extra — Following a small skater from a drawn box (spyglass) ✅
 
-> **Af (11 september 2026)** — buiten de fasering, op verzoek: "op sommige beelden is de schaatser te klein".
+> **Done (11 September 2026)** — outside the phasing, on request: "on some footage the skater is too small".
 >
-> **Waarom:** de detectiepass (yolo26x-pose op 1280) ziet een schaatser pas vanaf ~80–130 px hoogte (gemeten over de 48 analyses in de bibliotheek). Een schaatser die ver weg begint mist daardoor zijn aanloop — op `00005 8-41` 84–112 frames (3,4–4,5 s), terwijl hij op frame 0 al ~100 px in beeld staat — en `_BochtWacht` zet die aanloop bovendien als "niets te zien" in de skip-stand, zodat hij in de tabel als bocht verschijnt. De verfijningspass (RTMPose op een bbox) werkt op zo'n schaatser wél; het probleem is het vínden van de bbox.
+> **Why:** the detection pass (yolo26x-pose at 1280) only sees a skater from ~80–130 px in height (measured across the 48 analyses in the library). A skater who starts far away therefore loses their run-up — on `00005 8-41`, frames 84–112 (3.4–4.5 s), even though they're already ~100 px in frame at frame 0 — and `_CornerGuard` additionally puts that run-up into skip mode as "nothing to see", so it shows up as corner in the table. The refinement pass (RTMPose on a bbox) does work on such a skater; the problem is *finding* the bbox.
 >
-> **Wat er staat:** in de `DoelKiezer` kun je behalve klikken ook een **kader om de schaatser slepen** (muiswiel zoomt rond de cursor, rechts-slepen pant — op een dialoog van 900 px is zo'n schaatser ~45 px hoog). Dat kader zet in de YOLO-backend het **kijkglas** aan (`_Kijkglas` in `schaats_yolo.py`): in de verfijningspass wordt de bbox van frame naar frame gepropageerd uit de eigen RTMPose-keypoints, vanaf het kader door de aanloop, en vanaf de keten door gaten > `GAP_VUL_S`, de uitloop en de bocht-skips. Geen tweede detector (VRAM; en een YOLO-`predict` tijdens de `track`-sessie voedt ByteTrack met crop-coördinaten). Vangnetten: scorepoort, veto-kleurpoort, plausibiliteit per stap en een koppeltoets (IoU met de keten-bbox waar de run de keten raakt); een run vanaf het kader wordt zonder koppeling verworpen. Het kader staat als `doel_kader` in `instellingen_json` en in de Info-dialoog. Zie CLAUDE.md (punt 7 onder de YOLO-backend en de `DoelKiezer`-bullet).
+> **What's there:** in `TargetPicker`, besides clicking, you can also **drag a box around the skater** (mouse wheel zooms around the cursor, right-drag pans — on a 900 px dialog such a skater is ~45 px tall). That box turns on the **spyglass** in the YOLO backend (`_Spyglass` in `skate_yolo.py`): in the refinement pass the bbox is propagated frame to frame from the RTMPose keypoints themselves, from the box through the run-up, and from the chain through gaps > `GAP_FILL_S`, the tail, and the corner skips. No second detector (VRAM; and a YOLO `predict` during the `track` session feeds ByteTrack crop coordinates). Safety nets: a score gate, a veto color gate, per-step plausibility, and a link test (IoU against the chain bbox where the run meets the chain); a run starting from the box is rejected without a link. The box is stored as `doel_kader` in `settings_json` and shown in the Info dialog. See CLAUDE.md (point 7 under the YOLO backend and the `TargetPicker` bullet).
 >
-> **Gemeten** (A/B met dezelfde code, alleen het kader verschilt): `8-41` dekking 185 → 269/269 en 8 → 12 afzetten, `10-57` 119 → 132/132, `14-48` 120 → 183/183 en 6 → 7 afzetten; koppeling IoU 0,86–0,92; op de gedeelde frames **0,0 px** verschil op knieën en enkels; +5 tot +7 s analysetijd. Visueel nagekeken dat het skelet op de aangewezen schaatser staat, ook op `14-48` waar een tweede schaatser in hetzelfde pak vlak achter hem opduikt.
+> **Measured** (A/B with the same code, only the box differing): `8-41` coverage 185 → 269/269 and 8 → 12 pushes, `10-57` 119 → 132/132, `14-48` 120 → 183/183 and 6 → 7 pushes; link IoU 0.86–0.92; on the shared frames **0.0 px** difference on knees and ankles; +5 to +7 s analysis time. Visually checked that the skeleton sits on the intended skater, even on `14-48` where a second skater in the same suit appears right behind him.
 >
-> **De ondergrens is gemeten en hard:** op `00000 16-14` (schaatser 35–57 px, 7,5 van de 8 s) is RTMPose blind (been-scores 0,1–0,2) en ziet YOLO op een 5× uitvergrote crop alleen sporadisch een blob — onder ~70 px valt er met geen enkele vinder iets te meten. Daarom waarschuwt de app bij zo'n kader (`KADER_MIN_HOOGTE_PX`), volgt hij náást het kijkglas alsnog de grootste beweger (het kader mag nooit slechter uitpakken dan een klik) en meldt hij als het kijkglas de schaatser kwijtraakt. Het advies is dan: het fragment later laten beginnen.
+> **The floor is measured and hard:** on `00000 16-14` (skater 35–57 px, 7.5 of the 8 s) RTMPose is blind (leg scores 0.1–0.2) and YOLO on a 5× magnified crop only sporadically sees a blob — below ~70 px there's nothing to measure with any finder. That's why the app warns on such a box (`BOX_MIN_HEIGHT_PX`), still follows the largest mover alongside the spyglass (the box may never do worse than a click), and reports if the spyglass loses the skater. The advice then is: start the fragment later.
 >
-> **Ook gemeten en afgewezen: een hogere detectieresolutie.** Dezelfde clip met `DETECT_IMGSZ` 1920 (native) en 2560 (1,33× opgeblazen): YOLO vindt de schaatser dan bij ~73 px i.p.v. ~115 px (frame 144 i.p.v. 187 — 1,7 s eerder), maar onder de 73 px op geen enkele resolutie, en daar zit 5,8 van de 8 s van deze clip. Kosten 2,0× resp. 3,2× de detectiepass (0,94 → 1,92 → 3,05 s/frame op DirectML), en op de 4 GB-NVIDIA-laptop past 1280 al nét. De 73–115 px-band die 1920 erbij vindt, dekt het kader + kijkglas op 1280 al gratis. Besluit (11 september 2026): 1280 blijft; geen opt-in gebouwd.
+> **Also measured and rejected: a higher detection resolution.** The same clip with `DETECT_IMGSZ` 1920 (native) and 2560 (1.33× upscaled): YOLO then finds the skater at ~73 px instead of ~115 px (frame 144 instead of 187 — 1.7 s earlier), but nowhere below 73 px at any resolution, and 5.8 of this clip's 8 s sit below that. Costs 2.0× resp. 3.2× the detection pass (0.94 → 1.92 → 3.05 s/frame on DirectML), and 1280 already just barely fits on the 4 GB NVIDIA laptop. The 73–115 px band that 1920 gains is already covered by the box + spyglass at 1280 for free. Decision (11 September 2026): 1280 stays; no opt-in built.
 >
-> **Bewust niet (nog):** het kijkglas zónder kader aanzetten (het zou dan ook de gaten en bocht-skips van elke analyse vullen — een meetwijziging die eerst een eigen A/B verdient); korte gaten ≤ `GAP_VUL_S` op propagatie i.p.v. interpolatie (zelfde reden); een YOLO-herdetectie op een crop als het kijkglas sterft (pas als de meting erom vraagt — `schat` is al een callable); een gouden hoekfout op de aanloopframes (`schaats_eval.py annoteer` op `8-41`).
+> **Deliberately not (yet):** turning the spyglass on without a box (it would then also fill every analysis's gaps and corner skips — a measurement change that deserves its own A/B first); short gaps ≤ `GAP_FILL_S` using propagation instead of interpolation (same reason); a YOLO re-detection on a crop if the spyglass dies (only once the measurement calls for it — `schat` is already a callable); a golden angle error on the run-up frames (`skate_eval.py annotate` on `8-41`).
 
 ---
 
-## Fase 3 — Skelet-editor (punten verslepen) ✅
+## Phase 3 — Skeleton editor (dragging points) ✅
 
-> **Af (20 juli 2026)** — zelftest (`python schaats_db.py`) dekt de opslag-round-trip (bewerken → `landmarks_ruw.npz`-backup + `bewerkt=1` + verse events-cache; herstel origineel → npz terug + `bewerkt=0`); GUI handmatig getest.
+> **Done (20 July 2026)** — self-test (`python skate_db.py`) covers the save round-trip (edit → `landmarks_raw.npz` backup + `edited=1` + a fresh events cache; restore original → npz restored + `edited=0`); GUI tested by hand.
 >
-> **Wat er staat:** "Bewerken"-knop op de weergavepagina (`_toggle_bewerken`) met sleepbare handles per landmark (`_teken_handles`/`_zoek_landmark`/`_handle_straal`), verslepen + uitvloeien naar ± N buurframes met cosinus-afbouw (`_editor_muis_druk`/`_beweeg`/`_los`, `_zet_landmark`, `_uitvloei_frames`), live herberekenen (`_na_edit` → `verwerk_afgeleiden` + `segmenteer_afzetten`, géén smoothing), undo/redo (`_undo`/`_redo`), "herstel origineel". Opslagkant in `schaats_db.py`: `bewaar_bewerkte_landmarks` (npz overschrijven + eenmalige `landmarks_ruw.npz`-backup + `bewerkt=1` + cache), `herstel_originele_landmarks`, `ververs_events_cache`, gedeelde `_schrijf_events_cache`.
+> **What's there:** an "Edit" button on the view page (`_toggle_editing`) with draggable handles per landmark (`_draw_handles`/`_find_landmark`/`_handle_radius`), dragging + flowing out to ± N neighboring frames with a cosine falloff (`_editor_mouse_press`/`_move`/`_release`, `_set_landmark`, `_flow_frames`), live recomputation (`_recompute` → `process_derivatives` + `segment_pushes`, no smoothing), undo/redo (`_undo`/`_redo`), "restore original". Storage side in `skate_db.py`: `save_edited_landmarks` (overwrite the npz + a one-time `landmarks_raw.npz` backup + `edited=1` + cache), `restore_original_landmarks`, `refresh_events_cache`, a shared `_write_events_cache`.
 >
-> **Afwijkingen van het plan hieronder:**
-> - Grijpradius schaalt met de torso-lengte op scherm (`GRIJP_MIN_PX`/`GRIJP_MAX_PX`) i.p.v. een vaste 12 px — leesbaar bij een verre schaatser en op elke zoomstand.
-> - Pixel-correct bewerken op elke zoomstand vroeg eerst de **crop-and-magnify-zoom** (los gebouwd, zelfde commit; zie CLAUDE.md `_toon_pixmap`/`_crop_norm`).
-> - Punten *plaatsen* op frames zónder pose: niet in de eerste versie — **alsnog gebouwd op 31 juli 2026**, zie hieronder.
+> **Deviations from the plan below:**
+> - Grab radius scales with the on-screen torso length (`HANDLE_MIN_PX`/`HANDLE_MAX_PX`) instead of a fixed 12 px — legible for a distant skater and at any zoom level.
+> - Pixel-correct editing at any zoom level first needed **crop-and-magnify zoom** (built separately, same commit; see CLAUDE.md `_show_pixmap`/`_crop_norm`).
+> - *Placing* points on frames without a pose: not in the first version — **built afterward, 31 July 2026**, see below.
 
-> **Aanvulling: skelet plaatsen op een frame zonder pose (31 juli 2026)** — headless rooktest (klikreeks, undo/redo, annuleren, wegnavigeren) + `python schaats_db.py` groen.
+> **Addition: placing a skeleton on a frame without a pose (31 July 2026)** — headless smoke test (click sequence, undo/redo, canceling, navigating away) + `python skate_db.py` green.
 >
-> **Waarom:** een frame zonder pose breekt in `bepaal_afzet_uit_strek` de stand-run af en levert `ONV_AFGEKAPT` — twee ontbrekende frames kosten zo een hele afzetmeting. Kan de trainer het gat met de hand dichten, dan komt de meting terug. Dat is de eigenlijke opbrengst; het skelet zelf is maar het middel.
+> **Why:** a frame without a pose breaks the stance run in `determine_push_from_extension` and produces `INCOMPLETE_TRUNCATED` — two missing frames can cost a whole push measurement that way. If the trainer can close the gap by hand, the measurement comes back. That's the actual payoff; the skeleton itself is just the means.
 >
-> **Wat er staat:** in de bewerk-modus is op een gat-frame **"➕ Maak skelet"** actief. Normaal gesproken wordt het skelet dan **overgenomen van de buurframes** (`maak_voorvulling` in `schaats_analyse.py`: interpoleren bij een kort gat, kopiëren bij een lang gat) en corrigeer je het met de gewone sleep-editor — één manier van werken voor álle frames. Alleen als er níets over te nemen valt (nergens in de analyse een pose) is er ook niets te verslepen; dan vraagt het programma de punten één voor één in vaste volgorde (schouders, heupen, knieën, enkels — `PLAATS_VOLGORDE`, 8 klikken) met het gevraagde punt als oranje ring-met-kruisdraad in beeld. Zoomen en pannen blijven beschikbaar — muiswiel zoomt en **rechts-slepen pant** (nieuw in `VideoSpeler`, ook op de vergelijkpagina). Statusbalk-teller **"Skelet: 123 van 126 frames"** plus een knop **"⏭ Volgend gat"**. Undo/redo maakt een geplaatst skelet in één stap ongedaan. Zie CLAUDE.md voor de details.
+> **What's there:** in edit mode, **"➕ Make skeleton"** is active on a gap frame. Normally the skeleton is then **taken over from the neighboring frames** (`make_prefill` in `skate_analysis.py`: interpolate on a short gap, copy on a long gap) and you correct it with the regular drag editor — one way of working for **every** frame. Only if there's nothing to take over (no pose anywhere in the analysis) is there also nothing to drag; then the program asks for the points one at a time in a fixed order (shoulders, hips, knees, ankles — `PLACEMENT_ORDER`, 8 clicks) with the requested point shown as an orange ring-with-crosshair. Zooming and panning stay available — the mouse wheel zooms and **right-drag pans** (new in `VideoPlayer`, also on the compare page). Status-bar counter **"Skeleton: 123 of 126 frames"** plus a **"⏭ Next gap"** button. Undo/redo reverts a placed skeleton in one step. See CLAUDE.md for details.
 >
-> **Keuzes:** slepen boven klikken — een klikreeks van acht namen lezen is bewerkelijker dan een skelet bijstellen dat er al ongeveer goed staat, en het houdt de bediening gelijk aan die van elk ander frame. 8 punten en niet 33 in de klikreeks — precies wat de metingen gebruiken plus de torso waar grijpradius en auto-zoom op rekenen; hiel/teen blijven op visibility 0, net als bij de YOLO-backend zonder RTMPose. Een klikreeks vastleggen kan pas als heup/knie/enkel van beide benen staan (anders komt er een 0°-hoek in de tabel), en wegnavigeren zonder ook maar één klik annuleert i.p.v. de voorvulling stilzwijgend als meting vast te leggen.
+> **Choices:** dragging over clicking — reading eight names during a click sequence is more work than adjusting a skeleton that's already roughly right, and it keeps the controls the same as for any other frame. 8 points, not 33, in the click sequence — exactly what the measurements use, plus the torso that grab radius and auto-zoom rely on; heel/toe stay at visibility 0, just like the YOLO backend without RTMPose. A click sequence can only be committed once hip/knee/ankle of both legs are set (otherwise a 0° angle would land in the table), and navigating away without a single click cancels rather than silently committing the prefill as a measurement.
 >
-> **Bewust niet:** geen "vul het hele gat in één keer"-knop (interpoleren over een gat is precies wat de detector al niet kon); geen persistente markering welk frame handmatig is (de groene ringen zijn per sessie).
+> **Deliberately not done:** no "fill the whole gap at once" button (interpolating over a gap is exactly what the detector already couldn't do); no persistent marker for which frame was hand-placed (the green rings are per session).
 
-**Doel:** na een analyse kleine detectiefoutjes repareren door landmarkpunten te verslepen; werkt op elke uit de database geladen analyse.
+**Goal:** after an analysis, fix small detection errors by dragging landmark points; works on any analysis loaded from the database.
 
-### Interactie
+### Interaction
 
-- **Bewerk-knop** op de weergavepagina zet de editor aan: afspelen pauzeert, alle landmarks van het huidige frame krijgen sleepbare handles (cirkeltjes; grijpradius ± 12 px op schermresolutie).
-- Muis-events op het videolabel: widget-coördinaten → frame-coördinaten terugrekenen (let op de schaling/letterboxing van het weergavelabel — dit omrekenpad bestaat al half in `DoelKiezer`/`HorizonKiezer`, herbruikbaar maken).
-- Slepen werkt op de **gesmoothte** landmarks (wat je ziet is wat je bewerkt); de smoothing-stap wordt na een edit dus níet opnieuw gedraaid, anders wordt de correctie meteen weer weggepoetst.
-- Versleepte punten krijgen `visibility = 1.0` (een handmatig gezet punt is per definitie betrouwbaar) en een markering "handmatig" zodat ze in de overlay een ander randje kunnen krijgen.
+- An **Edit button** on the view page turns the editor on: playback pauses, every landmark of the current frame gets a draggable handle (small circles; grab radius ± 12 px at screen resolution).
+- Mouse events on the video label: convert widget coordinates → frame coordinates (mind the scaling/letterboxing of the view label — this conversion path already half exists in `TargetPicker`/`HorizonPicker`, worth making reusable).
+- Dragging works on the **smoothed** landmarks (what you see is what you edit); the smoothing step is therefore **not** re-run after an edit, otherwise the correction would immediately be smoothed away again.
+- Dragged points get `visibility = 1.0` (a manually set point is by definition reliable) and a "manual" marker so they can get a different outline in the overlay.
 
-### Uitvloeien naar buurframes (instelbaar)
+### Flowing out to neighboring frames (adjustable)
 
-- Spinbox "uitvloeien: ± N frames" (default 8, 0 = alleen dit frame).
-- De verplaatsing (delta-x, delta-y van dát punt) wordt over het venster gewogen toegepast met een cosinus-afbouw: frame op afstand `k` krijgt `delta * 0.5*(1+cos(pi*k/N))`. Geen sprong in de beweging, en op afstand N is het effect precies 0.
-- Uitvloeien stopt bij een detectiegat (frames zonder pose) — niet over gaten heen smeren, zelfde principe als de smoothing.
+- A "flow out: ± N frames" spinbox (default 8, 0 = this frame only).
+- The displacement (delta-x, delta-y of that point) is applied over the window with a cosine falloff: a frame at distance `k` gets `delta * 0.5*(1+cos(pi*k/N))`. No jump in the motion, and at distance N the effect is exactly 0.
+- Flowing out stops at a detection gap (frames without a pose) — never smear across gaps, same principle as the smoothing.
 
-### Herberekenen + opslaan
+### Recomputing + saving
 
-- Na elke drop (muisknop los): `verwerk_afgeleiden()` + `segmenteer_afzetten()` opnieuw over de resultatenlijst → tabel, grafiek en HUD verversen live. Dit is puur numpy-werk over reeds gedetecteerde landmarks, ruim snel genoeg.
-- **Undo/redo**-stack (bewaar per edit: landmark-index, venster, deltas) — bij handwerk op 12 px-punten ga je gegarandeerd een keer missen.
-- **Opslaan**: gewijzigde landmarks → `landmarks.npz` overschrijven; het origineel staat in `landmarks_ruw.npz` (aangemaakt bij de eerste edit) zodat er een knop **"herstel origineel"** kan zijn. `analyse.bewerkt = 1` in de DB en de events-cache verversen.
+- After every drop (mouse button released): rerun `process_derivatives()` + `segment_pushes()` over the results list → table, graph, and HUD refresh live. This is pure numpy work over already-detected landmarks, plenty fast.
+- An **undo/redo** stack (store per edit: landmark index, window, deltas) — doing manual work on 12 px points, you will miss at least once.
+- **Saving**: changed landmarks → overwrite `landmarks.npz`; the original lives in `landmarks_raw.npz` (created on the first edit) so there can be a **"restore original"** button. `analysis.edited = 1` in the DB, and refresh the events cache.
 
-**Klaar wanneer:** een zichtbaar fout kniepunt in één sleepbeweging corrigeren, de hoektabel direct zien bijwerken, opslaan, heropenen — correctie staat er nog; "herstel origineel" zet alles terug.
+**Done when:** correcting an obviously wrong knee point in one drag motion, seeing the angle table update immediately, saving, reopening — the correction is still there; "restore original" reverts everything.
 
 ---
 
-## Fase 4 — Delen met meerdere trainers (gedeelde cloudmap) ✅
+## Phase 4 — Sharing with multiple trainers (shared cloud folder) ✅
 
-> **Af (20 juli 2026)** — de bibliotheek staat bij dit team in een **Google Drive**-map (Mirror). Zelftest (`python schaats_db.py`) uitgebreid met de v1→v2-migratie, conflictkopie-detectie en de aangemaakt_door/video_bytes-round-trip; headless GUI-rooktest groen in de YOLO-venv.
+> **Done (20 July 2026)** — this team's library lives in a **Google Drive** folder (Mirror). Self-test (`python skate_db.py`) extended with the v1→v2 migration, conflict-copy detection, and the created_by/video_bytes round-trip; headless GUI smoke test green in the YOLO venv.
 >
-> **Wat er staat:**
-> - **Trainersnaam**: knop "Jouw naam..." op de startpagina (naast "Vernieuwen"), bewaard in `config.json` (`trainer_naam`, per gebruiker — niet in de gedeelde map). Gaat als `analyse.aangemaakt_door` mee bij nieuwe én batch-analyses (via `AnalyseWorker`/`BatchWorker`), en verschijnt als tooltip "Aangemaakt door …" op de titel in de analysetabel.
-> - **Conflictdetectie** (`schaats_db.detecteer_conflictkopieen`): bij het openen/wisselen van een bibliotheek en bij "Vernieuwen" wordt gewaarschuwd als er naast `schaats.db` andere `*.db`-bestanden staan (conflictkopie van de syncer, bv. `schaats-DESKTOP.db`). Detectie, geen preventie — de trainer ruimt handmatig op.
-> - **Vernieuwen-knop**: leest de bibliotheek opnieuw van schijf (`_vernieuw_bibliotheek`) zodat analyses van collega's zichtbaar worden zonder herstart; herhaalt ook de conflictcheck.
-> - **Video-sync-check**: schema-migratie naar `user_version=2` voegt `analyse.video_bytes` toe (grootte van de gekopieerde video bij het opslaan). Bij het openen bepaalt `video_sync_status()` of de video ontbreekt (nog niet gedownload) of onvolledig is (kleiner dan opgeslagen → cloud synct nog) en toont een nette melding i.p.v. een halve video te laden. Oude analyses (v1, `video_bytes` NULL) slaan de groottecheck over.
+> **What's there:**
+> - **Trainer name**: a "Your name..." button on the start page (next to "Refresh"), stored in `config.json` (`trainer_name`, per user — not in the shared folder). Travels along as `analysis.created_by` on both new and batch analyses (via `AnalysisWorker`/`BatchWorker`), and shows up as a "Created by …" tooltip on the title in the analysis table.
+> - **Conflict detection** (`skate_db.detect_conflict_copies`): opening/switching a library, and "Refresh", warns if there are other `*.db` files next to `skate.db` (a conflict copy from the syncer, e.g. `skate-DESKTOP.db`). Detection, not prevention — the trainer cleans it up by hand.
+> - **Refresh button**: rereads the library from disk (`_refresh_library`) so colleagues' analyses become visible without a restart; also repeats the conflict check.
+> - **Video sync check**: a schema migration to `user_version=2` adds `analysis.video_bytes` (the size of the copied video at save time). On open, `video_sync_status()` determines whether the video is missing (not downloaded yet) or incomplete (smaller than what was saved → still syncing from the cloud) and shows a clean message instead of loading half a video. Old analyses (v1, `video_bytes` NULL) skip the size check.
 >
-> **Afwijkingen van het plan hieronder:**
-> - De cloud-veilige SQLite-discipline (journal DELETE, korte verbindingen, busy_timeout, relatieve paden) en de bibliotheekpad-config waren al in fase 1 naar voren gehaald — hier bleef alleen trainersnaam, conflictdetectie, vernieuwen en de sync-groottecheck over.
-> - Het optionele lock-bestandje (`media/<id>/.lock`) tegen gelijktijdig bewerken van dezelfde analyse is **bewust niet gebouwd**: het is in de ROADMAP als "desgewenst" gemarkeerd en de kans is bij UUID-mappen + kleine ploeg verwaarloosbaar ("laatste schrijver wint" blijft de geaccepteerde beperking).
+> **Deviations from the plan below:**
+> - The cloud-safe SQLite discipline (journal DELETE, short connections, busy_timeout, relative paths) and the library-path config were already pulled forward in phase 1 — only trainer name, conflict detection, refresh, and the sync size check were left for here.
+> - The optional lock file (`media/<id>/.lock`) against simultaneous editing of the same analysis was **deliberately not built**: the roadmap flagged it as "if desired", and the odds are negligible with UUID folders + a small team ("last writer wins" remains the accepted limitation).
 
-**Doel:** het hele team kijkt in dezelfde bibliotheek.
+**Goal:** the whole team looks at the same library.
 
-### Aanpak
+### Approach
 
-- **Instellingenscherm**: bibliotheekpad kiezen. Elke trainer wijst dezelfde OneDrive-/Dropbox-/netwerkmap aan. Plus een veld "jouw naam" → gaat in `analyse.aangemaakt_door`. Beide onthouden in een lokaal configbestandje (`%APPDATA%\SchaatsAnalyse\config.json` — niet in de gedeelde map, want per gebruiker).
-- Omdat fase 1 alles al relatief t.o.v. de bibliotheekmap opslaat, is delen daarna vooral *configuratie*, geen herbouw. Dit is de reden om die padden-discipline vanaf fase 1 strikt te houden.
+- **Settings screen**: choose the library path. Every trainer points at the same OneDrive/Dropbox/network folder. Plus a "your name" field → goes into `analysis.created_by`. Both remembered in a small local config file (`%APPDATA%\SchaatsAnalyse\config.json` — not in the shared folder, since it's per user).
+- Because phase 1 already stores everything relative to the library folder, sharing afterward is mostly *configuration*, not a rebuild. That's the reason to keep that path discipline strict from phase 1 onward.
 
-### SQLite op een gesynchroniseerde map — de valkuilen en maatregelen
+### SQLite on a synced folder — the pitfalls and countermeasures
 
-SQLite is niet ontworpen voor gelijktijdig schrijven via cloudsync. Op teamschaal is dit prima beheersbaar, mits:
+SQLite isn't designed for concurrent writes via cloud sync. At team scale this is entirely manageable, provided:
 
-1. **Geen WAL-mode** (`journal_mode=DELETE`): WAL maakt `-wal`/`-shm`-nevenbestanden die cloudsyncers half kunnen syncen → corruptiegevaar. DELETE-mode houdt het bij één bestand (plus een kortstondige journal).
-2. **Kort verbinden**: verbinding openen → transactie → direct sluiten, nooit een connectie open laten staan tijdens het browsen. Dan is het DB-bestand vrijwel altijd "in rust" voor de syncer.
-3. `busy_timeout` van een paar seconden voor het zeldzame geval dat twee trainers op hetzelfde moment schrijven via een echte netwerkschijf.
-4. **Conflictdetectie i.p.v. -preventie**: als OneDrive tóch een conflictkopie maakt (`schaats-<pc-naam>.db`), detecteer dat bij het opstarten en waarschuw. Omdat analyses UUID-mappen zijn en trainers zelden binnen dezelfde minuut schrijven, is de praktische kans klein; mediabestanden (video/npz) worden alleen aangemaakt, nooit door twee mensen tegelijk beschreven.
-5. **Vernieuwen-knop** in de bibliotheekweergave (DB opnieuw uitlezen) zodat je nieuwe analyses van een collega ziet zonder herstart. Automatisch pollen hoeft niet.
+1. **No WAL mode** (`journal_mode=DELETE`): WAL creates `-wal`/`-shm` side files that cloud syncers can sync only partially → corruption risk. DELETE mode keeps it to a single file (plus a short-lived journal).
+2. **Short connections**: open a connection → transaction → close immediately, never leave a connection open while browsing. That way the DB file is almost always "at rest" for the syncer.
+3. A `busy_timeout` of a few seconds for the rare case where two trainers write at the same moment over a real network drive.
+4. **Conflict detection instead of prevention**: if OneDrive does create a conflict copy anyway (`skate-<pc-name>.db`), detect it on startup and warn. Since analyses are UUID folders and trainers rarely write within the same minute, the practical odds are small; media files (video/npz) are only ever created, never written to by two people at once.
+5. A **Refresh button** in the library view (reread the DB) so you see a colleague's new analyses without restarting. No need for automatic polling.
 
-### Bewust geaccepteerde beperkingen (bij deze schaal oké)
+### Deliberately accepted limitations (fine at this scale)
 
-- Geen accounts/rechten: iedereen met de map kan alles zien én verwijderen.
-- "Laatste schrijver wint" bij het tegelijk bewerken van precies dezelfde analyse (bv. beiden in de skelet-editor) — zeldzaam; desgewenst mitigeren met een simpel lock-bestandje (`media/<id>/.lock` met trainersnaam) dat een waarschuwing toont.
-- Grote video's syncen traag; wie net een analyse van een collega opent terwijl de video nog bin­nenkomt, krijgt een nette melding "video nog niet gesynchroniseerd" (bestaat het bestand + klopt de bestandsgrootte).
+- No accounts/permissions: anyone with the folder can see and delete everything.
+- "Last writer wins" when editing exactly the same analysis at the same time (e.g. both in the skeleton editor) — rare; can be mitigated if desired with a simple lock file (`media/<id>/.lock` with the trainer's name) that shows a warning.
+- Large videos sync slowly; whoever opens a colleague's analysis while the video is still coming in gets a clean "video not synced yet" message (checks whether the file exists + whether the file size matches).
 
-**Upgradepad**: mocht het later tóch clubbreed worden (accounts, rechten, tegelijk schrijven), dan is de stap naar een gehoste Postgres (bv. Supabase) beperkt tot het vervangen van `schaats_db.py` + uploaden van de media — de rest van de app merkt daar niets van. Dáárom alle SQL in één module houden.
+**Upgrade path**: should this ever need to become club-wide (accounts, permissions, concurrent writes), the step to a hosted Postgres (e.g. Supabase) is limited to swapping out `skate_db.py` + uploading the media — the rest of the app notices nothing. That's the reason to keep all SQL in one module.
 
 ---
 
-## Fase 5 — Betere stabilisatie: horizon via twee getrackte punten
+## Phase 5 — Better stabilization: horizon via two tracked points
 
-> **Nice-to-have (niet nu).** Sinds juli 2026 is de aanname dat de camera **altijd precies horizontaal** staat — dan is er geen camerakanteling om te corrigeren en is deze fase overbodig. Bewaard voor een eventuele latere opstelling met een schuine/schommelende camera; pas oppakken als die situatie zich echt voordoet.
+> **Nice-to-have (not now).** Since July 2026 the assumption is that the camera is **always exactly horizontal** — then there's no camera tilt to correct and this phase is unnecessary. Kept for a possible later setup with a tilted/wobbling camera; only pick this up once that situation actually arises.
 
-**Doel:** de auto-horizon betrouwbaarder maken. De huidige `bepaal_horizon_reeks()` doet per frame een Hough-lijndetectie op het onderste beeld — die pakt soms de verkeerde lijn (boarding-reclame, schaduwrand). Nieuw idee: de gebruiker wijst in het eerste frame **twee punten aan die in werkelijkheid horizontaal van elkaar staan** (bv. twee markeringen op de boarding); die twee punten worden door de hele video getrackt en de hoek van hun verbindingslijn ís per frame de camerakanteling.
+**Goal:** make the auto-horizon more reliable. The current `determine_horizon_sequence()` runs a Hough line detection on the bottom of the frame per frame — it sometimes grabs the wrong line (boarding ads, a shadow edge). New idea: the user marks **two points in the first frame that are, in reality, horizontally apart** (e.g. two markings on the boarding); those two points are tracked through the whole video, and the angle of the line connecting them **is**, per frame, the camera tilt.
 
-### Interactie
+### Interaction
 
-- Derde horizon-modus naast "vast" en "automatisch per frame": **"track twee punten"**. De bestaande `HorizonKiezer`-dialoog wordt uitgebreid: de gebruiker klikt twee punten (zoals nu al een lijn getekend wordt), maar kiest nu "volg deze punten door de video".
-- Kies-tips in de dialoog: punten op **stilstaande, contrastrijke** details (boardingrand, lijnovergang, pilaar) die de hele video in beeld blijven — niet op ijs (spiegelend) of op personen.
+- A third horizon mode next to "fixed" and "automatic per frame": **"track two points"**. The existing `HorizonPicker` dialog gets extended: the user clicks two points (as a line is already drawn today), but now chooses "track these points through the video".
+- Tips in the dialog: pick points on **stationary, high-contrast** details (boarding edge, a line transition, a pillar) that stay in frame the whole video — not on ice (reflective) or on people.
 
-### Techniek
+### Technique
 
-1. **Tracking**: sparse Lucas–Kanade optical flow (`cv2.calcOpticalFlowPyrLK`) per punt, met een **forward-backward-check** (punt terug-tracken; wijkt de terugreis > 1–2 px af → frame als onbetrouwbaar markeren). LK is subpixel-nauwkeurig en goedkoop (verwaarloosbaar naast de pose-detectie).
-2. **Fallback per punt**: faalt LK (occlusie — bv. de schaatser schuift vóór het punt langs), dan template-matching (`cv2.matchTemplate`) in een zoekvenster rond de voorspelde positie; lukt ook dat niet → frame overslaan en later interpoleren.
-3. **Hoekreeks**: per frame `atan2(dy, dx)` van de twee getrackte punten, minus de hoek in het referentieframe (de aangeklikte stand = per definitie 0°... nee: = de wáre horizontaal, dus de gemeten hoek is direct de kanteling). Daarna dezelfde opschoning die er al is: Hampel-uitschieters + Savitzky–Golay (`bepaal_horizon_reeks`-machinerie hergebruiken), resultaat per frame in `r.horizon_deg` — de rest van de pijplijn (aftrek in `bereken_hoek_tov_ijs`, meekantelende ijslijn in de overlay) werkt dan ongewijzigd.
-4. **Punt raakt uit beeld** (pannende camera): detecteren wanneer een punt de framerand nadert en dan **overdragen op verse ankerpunten** — `cv2.goodFeaturesToTrack` in dezelfde beeldband zoekt nieuwe contrastrijke punten, die de op dat moment geldende hoekcalibratie erven. Zo blijft de meting doorlopen zonder dat de gebruiker opnieuw hoeft te klikken. Dit is de lastigste stap; eerste versie mag hem weglaten en gewoon waarschuwen + de laatste hoek vasthouden.
-5. Als aparte, snelle video-pass geïntegreerd in `fase_voortgang()` (zoals de bestaande auto-horizon-pass), in beide backends.
+1. **Tracking**: sparse Lucas–Kanade optical flow (`cv2.calcOpticalFlowPyrLK`) per point, with a **forward-backward check** (track the point back; if the return trip deviates > 1–2 px, mark the frame as unreliable). LK is subpixel-accurate and cheap (negligible next to pose detection).
+2. **Fallback per point**: if LK fails (occlusion — e.g. the skater slides in front of the point), template matching (`cv2.matchTemplate`) in a search window around the predicted position; if that fails too → skip the frame and interpolate later.
+3. **Angle sequence**: per frame, `atan2(dy, dx)` of the two tracked points, minus the angle in the reference frame (the clicked stance = by definition the true horizontal, so the measured angle is directly the tilt). Then the same cleanup that already exists: Hampel outliers + Savitzky–Golay (reuse the `determine_horizon_sequence` machinery), result per frame in `r.horizon_deg` — the rest of the pipeline (subtraction in `calculate_angle_to_ice`, the tilting ice line in the overlay) then works unchanged.
+4. **A point leaves the frame** (panning camera): detect when a point nears the frame edge and then **hand off to fresh anchor points** — `cv2.goodFeaturesToTrack` in the same image band looks for new high-contrast points, which inherit the angle calibration valid at that moment. That way the measurement keeps running without the user having to click again. This is the hardest step; a first version may skip it and simply warn + hold the last angle.
+5. As a separate, fast video pass integrated into `phase_progress()` (like the existing auto-horizon pass), in both backends.
 
-**Klaar wanneer:** op een testvideo met zichtbaar schommelende camera geeft de getrackte-puntenmodus een vloeiende, geloofwaardige `horizon_deg`-reeks (witte ijslijn in de overlay blijft op de echte ijsrand liggen), ook wanneer de schaatser één van de punten kort passeert.
-
----
-
-## Fase 6 — Sneller analyseren (meer uit de CPU/iGPU halen)
-
-**Doel:** de YOLO-analyse (nu ~2 s/frame op CPU met yolo26x-pose op 1280) fors versnellen. Hardware hier: **Ryzen 7 7735U** (8 cores/16 threads) met **geïntegreerde Radeon 680M** — geen NVIDIA, dus geen CUDA; de realistische route is geoptimaliseerde CPU-inference en eventueel de iGPU via DirectML.
-
-> **Voorwerk: gemeten op de doelmachine (19 juli 2026).** Er is een profileringssessie geweest op "Schaats frontaal.MOV" (1920×1080, torch 2.12.1+**cpu**, onnxruntime CPU-only). De uitkomsten staan hieronder omdat ze de volgorde van deze fase omkeren; ze zijn nooit in code omgezet, dus fase 6 is nog volledig open.
->
-> **Waar de tijd zit:** detectiepass yolo11x-pose @1280 = **~2333 ms/frame = 94% van de rekentijd**; RTMPose-verfijning ~140 ms/bbox (alleen op doelframes). Alles wat niet de detectiepass is, valt in de ruis.
->
-> **Doodlopend: meer hardware inzetten.** Beide netten zijn **geheugenbandbreedte-gebonden**, niet rekengebonden. Gemeten: yolo11x@1280 is **vlak van 1 → 16 threads** (~1950 ms/frame — meer threads doet niets); twee processen tegelijk kosten elk ~3080 ms (samen dus maar **1,3×**); vier processen elk ~7000 ms (langzamer dan serieel). RTMPose gedraagt zich hetzelfde (~1,3× bij twee processen). Multiprocessing, threading en het opschroeven van thread-instellingen leveren dus **hooguit ~1,3×** — dat is de reden dat stap 6 hieronder van "quick win" naar "waarschijnlijk zinloos" is verplaatst.
->
-> **De lever: het detectiemodel verkleinen.** Gemeten per frame @1280: `yolo11m` = 810 ms (**2,9×** sneller dan x), `yolo11n` = 162 ms (**14×**, maar 5 van 6 detecties). Op de hele pijplijn is dat ruwweg 2,6× (m) tot 8× (n). Dit kan omdat de pass-1-keypoints **tóch worden overschreven** door de RTMPose-verfijning (`verfijnd.get(f)` wint; pass-1 `lm` is alleen terugval): de detectiepass hoeft alleen bbox + track-ID + torso-kleur + centroid te leveren. Het risico zit dus **niet** in hoekprecisie maar in **detectiedekking van de doelschaatser, tracking-robuustheid en het kleurhistogram** — precies wat `schaats_eval.py` meet. Verkleinen van `DETECT_IMGSZ` (1280 → 960) halveert de detectiekost ongeveer, maar raakt hetzelfde risico: 1280 was juist gekozen omdát 640 verre/bewegingsonscherpe schaatsers helemaal miste.
->
-> **Sindsdien wél gebeurd, buiten deze lijst om:** de swap naar `yolo26x-pose` (21 jul 2026) gaf ~12% en kostte niets aan nauwkeurigheid (standbeen-hoekfout 1,34° vs 1,54° tegen de gouden referentie = gelijk binnen ruis), en de **bochtdetectie** (5 aug 2026) haalde 45% van de tijd weg op een clip die voor de helft bocht is. Dat laatste is feitelijk stap 2's "frames overslaan"-idee, toegepast op de plek waar het gratis was.
->
-> **Niet gemeten, dus nog steeds schatting:** OpenVINO-export en DirectML op de iGPU (stap 4). Die getallen hieronder komen uit de literatuur, niet uit een test op deze machine.
-
-In oplopende moeite, cumulatief te stapelen — na elke stap meten met een vaste testvideo (zie meetprotocol hieronder). **Volgorde na de meting van juli 2026: stap 3 eerst** — dat is de enige stap waar een groot getal onder ligt; 1 en 2 zijn randwerk op de 6% die níet de detectiepass is.
-
-1. **Batch-inference in de verfijningspass** (`_verfijn_landmarks`): de crops worden nu één voor één door `model.predict()` gehaald; ultralytics accepteert een lijst beelden. Crops verzamelen en in batches van bv. 8–16 voorspellen → minder overhead per frame, betere corebenutting. Weinig code, geen kwaliteitsverlies. *Let op: de verfijning is maar ~6% van de looptijd, dus dit is hoogstens een paar procent op het geheel — en de "betere corebenutting" is bij een bandbreedte-gebonden net twijfelachtig.*
-2. **Prefetch-thread voor het videolezen**: `cv2.VideoCapture.read()` + resize in een aparte thread met een kleine queue, zodat decoderen en inference elkaar overlappen i.p.v. afwisselen. Geldt voor alle passes (detectie, verfijning, auto-horizon). *Sinds de bochtdetectie (aug 2026) leest `_detecteer_alles` de frames zelf i.p.v. via `model.track(source=...)`, dus deze stap kan nu ook op de detectiepass.*
-
-   **Aanpalende kans, gemeten bij de bochtdetectie:** de verfijningspass vult detectiegaten tot `GAP_VUL_S` (1,0 s) met geïnterpoleerde bboxes en herstelt daar de pose. Op het rechte stuk 1 op de N frames overslaan in pass 1 zou dus grotendeels door pass 2 opgevangen worden — de bocht-wacht doet precies dat al in de bocht. Alleen te doen mét het meetprotocol ernaast: hier gaat het wél om frames waarop gemeten wordt.
-3. **Lichter model voor de detectiepass, x voor de verfijning** — ⭐ **begin hier**: pass 1 hoeft alleen bboxes/track-IDs en globale keypoints te leveren; de nauwkeurige hoeken komen uit de crop-pass. `yolo26m-pose` (of zelfs `s`) op 1280 voor pass 1 + RTMPose/`yolo26x-pose` voor de crops. **Gemeten voorspelling** (zie voorwerk): m ≈ 2,6×, n ≈ 8× op de hele pijplijn — verreweg het grootste getal in dit lijstje, en de enige stap die de 94% raakt. **Wel valideren** dat pass 1 de verre/bewegingsonscherpe schaatser nog vindt (dat was de reden voor 1280 × x): op de testvideo controleren dat de dekking 100% blijft, de events identiek zijn én de doelkeuze/stitching niet verslechtert (`yolo11n` miste in de meting 1 op 6 detecties — daar breekt eerst de tracking, niet de hoek). Het kleurhistogram hangt aan de bbox-kwaliteit, dus `_splits_op_kleur` en `_stik_keten` zijn de plekken waar een te klein model zich als eerste wreekt. Één A/B-run met de gouden referentie beslist dit.
-4. **Geëxporteerd model i.p.v. PyTorch**: `model.export(format=...)` van ultralytics en dan inferen met:
-   - **OpenVINO** (`format="openvino"`): geoptimaliseerde CPU-runtime, werkt ook op AMD-CPU's; typisch 1.5–3× sneller dan torch-CPU, zelfde gewichten dus zelfde output (kleine numerieke afwijkingen).
-   - **ONNX Runtime + DirectML** (`format="onnx"`, `onnxruntime-directml`): draait op de Radeon-iGPU. Potentieel de grootste sprong, maar iGPU-drivers/DirectML zijn de wisselvalligste van dit lijstje — als experiment plannen, met CPU-pad als terugval.
-   Beide passen in `schaats_yolo.py` achter een klein abstractielaagje rond `model.track`/`model.predict`; ByteTrack-tracking blijft via ultralytics werken met een geëxporteerd model.
-5. **GUI-keuze "snel / nauwkeurig"**: instelbaar profiel op de startpagina (snel = m-model + kleinere `DETECT_IMGSZ`; nauwkeurig = huidige instellingen). De gebruiker kiest per video of het om een snelle indruk of een precieze meting gaat.
-6. **Quick wins** — grotendeels achterhaald door de meting; wat er nog van over is, in aflopende zin:
-   - **Energiemodus op "Beste prestaties"** (Instellingen → Systeem → Energie en batterij → Energiemodus, **niet** `powercfg`: op deze Windows-11-installatie bestaat er maar één schema, "Gebalanceerd", en de prestatiestand is een overlay uit de Instellingen-app). *Nagekeken 8 aug 2026: de machine stond op "Gebalanceerd" terwijl hij aan de lader hing.* De 7735U is een 15 W-chip met configureerbare TDP tot 28 W; een lager aanhoudend pakketvermogen drukt óók de fabric-/geheugencontrollerklok, en dát is precies de bottleneck. **De enige knop in deze stap waar realistisch 10–30% in kan zitten, en nooit gemeten.** Eén omzetting + één testrun.
-   - **`cv2.setNumThreads(2)` tijdens de YOLO-pass.** De profilering van juli mat yolo *in isolatie*; in de echte pijplijn concurreren decoderen, resizen en het kleurhistogram om dezelfde cores. Twee regels, verwacht enkele procenten, geen risico voor de meting.
-   - **Procesprioriteit boven normaal** voor de analyse-worker. Marginaal, gratis.
-   - **Defender-uitsluiting op de bibliotheekmap.** Raakt de inference niet, wél het wegschrijven: `sla_analyse_op` kopieert de hele video en die wordt meegescand. Gevoelde wachttijd, geen analysetijd.
-   - ~~`torch.set_num_threads(16)`~~ — **afgevoerd**: de threadschaling is vlak van 1 → 16, er valt geen corebenutting te winnen.
-
-   **Twee doodlopende wegen, expliciet genoteerd zodat ze niet opnieuw onderzocht worden:**
-   - **Geheugen upgraden kan niet en hoeft niet.** *Nagekeken 8 aug 2026:* 4× 4 GB **LPDDR5-6400 gesoldeerd op het moederbord** (16 GB, volle busbreedte). Geen single-channel-vergissing te repareren, geen SODIMM te vervangen — het geheugensubsysteem draait al op spec. Daarmee is de bandbreedte-bottleneck een gegeven, geen defect.
-   - **Meerdere video's uit een batch tegelijk draaien.** Logische gedachte, maar precies het gemeten scenario: twee processen samen 1,3×, vier processen langzamer dan serieel. `BatchWorker` draait ze één voor één en dat moet zo blijven.
-
-**Meetprotocol**: één vaste testvideo ("Schaats frontaal.MOV"), per stap noteren: totale analysetijd, pose-dekking (%), en of de afzet-events (aantal, been-volgorde, hoeken ±1°) gelijk blijven aan de referentie-run. Versnelling die de meting verandert is geen versnelling. Voor een modelswap komt daar `python schaats_eval.py vergelijk oud.npz nieuw.npz` + de gouden referentie bij — vergelijk dan wel **onbewerkte** analyses (`analyse.bewerkt = 0`), want een met de hand gezet skelet telt in de dekkingsmetric als detectie.
-
-**Verwachting (bijgesteld op de meting van juli 2026)**: stap 3 is de hoofdprijs — **2,6× (m-model) tot 8× (n-model)**, mits de dekking overeind blijft. Stap 4 (OpenVINO) daar theoretisch 1,5–3× bovenop, maar ongetest op deze machine. Stappen 1 en 2 hooguit een paar procent, want ze raken de 6% die niet de detectiepass is. Stap 6 is één uitzondering waard: de **energiemodus** raakt wél de bottleneck (pakketvermogen → geheugenklok) en kan 10–30% zijn — begin daar zelfs mee, want het kost geen regel code. De eerder genoteerde "1,5–2× uit 1+2+6" was een schatting van vóór de profilering en is te optimistisch gebleken.
-
-**Klaar wanneer:** de totale analysetijd van de testvideo minstens gehalveerd is zónder verlies van dekking of meetkwaliteit, en de snelste acceptabele configuratie als default staat.
+**Done when:** on a test video with a visibly wobbling camera, the tracked-points mode gives a smooth, believable `horizon_deg` sequence (the white ice line in the overlay stays on the real ice edge), even when the skater briefly passes one of the points.
 
 ---
 
-## Fase 7 — Perspectiefcorrectie via baanlijnen
+## Phase 6 — Faster analysis (getting more out of the CPU/iGPU)
 
-> **Nice-to-have voor de dagelijkse workflow, maar de validatie loopt (aug 2026).** Sinds juli 2026 is de aanname dat er **altijd recht van voren** wordt gefilmd met een **horizontale** camera. Onder die opstelling kijkt de camera nagenoeg loodrecht op het bewegingsvlak en is de perspectiefvertekening klein, dus de dagelijkse workflow heeft deze correctie niet nodig. Stappen 1 en 2 (wiskundekern + koppeling aan pijplijn en GUI) staan er en zijn opt-in; sinds 11 augustus 2026 wordt de kalibratie ook **bewaard en hergebruikt**. Wat rest is stap 3, de validatie op echt materiaal — en dát materiaal is er nu wél (zie "Stand van zaken" onderaan deze fase).
+**Goal:** substantially speed up the YOLO analysis (currently ~2 s/frame on CPU with yolo26x-pose at 1280). Hardware here: a **Ryzen 7 7735U** (8 cores/16 threads) with an **integrated Radeon 680M** — no NVIDIA, so no CUDA; the realistic route is optimized CPU inference and possibly the iGPU via DirectML.
 
-**Probleem:** de afzet- en kniehoek worden nu gemeten in het **beeldvlak** — de 2D-projectie van het been. Dat klopt alleen als de camera loodrecht op het bewegingsvlak van het been kijkt. Staat de camera niet midden in de baan (of komt de schaatser niet recht op de camera af), dan kijk je onder een schuine hoek en verkort het perspectief het been in één richting: de gemeten hoek wijkt structureel af van de echte, en — verraderlijker — de afwijking **verandert met de positie van de schaatser in beeld**. Dezelfde afzet lijkt dan aan het begin van de passage een andere hoek te hebben dan aan het eind. De bestaande horizoncorrectie repareert alleen camerarotatie om de kijkas (roll), niet deze vertekening.
+> **Groundwork: measured on the target machine (19 July 2026).** A profiling session was run on "Schaats frontaal.MOV" (1920×1080, torch 2.12.1+**cpu**, onnxruntime CPU-only). The findings below are noted here because they reverse the order of this phase; they were never turned into code, so phase 6 is still fully open.
+>
+> **Where the time goes:** the detection pass yolo11x-pose @1280 = **~2333 ms/frame = 94% of the compute time**; RTMPose refinement ~140 ms/bbox (only on target frames). Everything that isn't the detection pass is noise.
+>
+> **Dead end: throwing more hardware at it.** Both nets are **memory-bandwidth bound**, not compute bound. Measured: yolo11x@1280 is **flat from 1 → 16 threads** (~1950 ms/frame — more threads does nothing); two processes at once each cost ~3080 ms (together only **1.3×**); four processes each ~7000 ms (slower than serial). RTMPose behaves the same (~1.3× with two processes). Multiprocessing, threading, and tuning thread settings therefore give **at most ~1.3×** — the reason step 6 below moved from "quick win" to "probably pointless".
+>
+> **The lever: shrink the detection model.** Measured per frame @1280: `yolo11m` = 810 ms (**2.9×** faster than x), `yolo11n` = 162 ms (**14×**, but 5 of 6 detections). Over the whole pipeline that's roughly 2.6× (m) to 8× (n). This is possible because the pass-1 keypoints are **overwritten anyway** by the RTMPose refinement (`verfijnd.get(f)` wins; the pass-1 `lm` is only a fallback): the detection pass only has to deliver bbox + track ID + torso color + centroid. The risk therefore sits **not** in angle precision but in **detection coverage of the target skater, tracking robustness, and the color histogram** — exactly what `skate_eval.py` measures. Shrinking `DETECT_IMGSZ` (1280 → 960) roughly halves the detection cost but hits the same risk: 1280 was specifically chosen *because* 640 completely missed distant/motion-blurred skaters.
+>
+> **Happened since, outside this list:** the swap to `yolo26x-pose` (21 Jul 2026) gained ~12% and cost nothing in accuracy (stance-leg angle error 1.34° vs. 1.54° against the golden reference — equal within noise), and **corner detection** (5 Aug 2026) removed 45% of the time on a clip that's half corner. The latter is effectively step 2's "skip frames" idea, applied where it was free.
+>
+> **Not measured, so still an estimate:** OpenVINO export and DirectML on the iGPU (step 4). Those numbers below come from the literature, not a test on this machine.
 
-**Kernidee:** de lijnen in het ijs zijn rechte, evenwijdige lijnen met bekende onderlinge afstand (standaard baanbreedte ± 4 m). Daaruit is de camerastand t.o.v. het ijsvlak te kalibreren, en met die kalibratie kunnen de hoeken per frame worden teruggerekend naar het echte, onvertekende vlak.
+In increasing order of effort, cumulative — after each step, measure with a fixed test video (see the measurement protocol below). **Order after the July 2026 measurement: step 3 first** — that's the only step with a big number underneath it; 1 and 2 are edge work on the 6% that isn't the detection pass.
 
-### Stappen
+1. **Batch inference in the refinement pass** (`_refine_landmarks`): crops currently go through `model.predict()` one at a time; ultralytics accepts a list of images. Collect crops and predict in batches of e.g. 8–16 → less overhead per frame, better core utilization. Little code, no quality loss. *Note: refinement is only ~6% of the runtime, so this is at most a few percent overall — and "better core utilization" is questionable for a bandwidth-bound net.*
+2. **A prefetch thread for reading video**: `cv2.VideoCapture.read()` + resize on a separate thread with a small queue, so decoding and inference overlap instead of alternating. Applies to every pass (detection, refinement, auto-horizon). *Since corner detection (Aug 2026), `_detect_all` reads the frames itself instead of via `model.track(source=...)`, so this step can now also apply to the detection pass.*
 
-1. **Lijnen aanwijzen (interactie).** Uitbreiding van de bestaande `HorizonKiezer`-dialoog: de gebruiker trekt op één frame twee (of meer) baanlijnen na die in werkelijkheid evenwijdig lopen in de rijrichting, plus liefst één dwarslijn (start-/finishlijn, bochtmarkering). Optioneel geassisteerd met Hough-detectie (die machinerie bestaat al in `detecteer_ijslijn()`), maar handmatig natrekken is de betrouwbare basis — lijnen op het ijs zijn contrastarm en deels bekrast.
-2. **Kalibratie uit de lijnen.** Evenwijdige lijnen snijden in beeld in een verdwijnpunt; de rijrichting-lijnen geven verdwijnpunt V1, de dwarslijn(en) V2. De lijn V1–V2 is de **verdwijnlijn van het ijsvlak = de ware horizon** (bijvangst: dit vervangt de Hough-horizonhack door iets principiëlers). Met de gebruikelijke aannames (principal point in het beeldmidden, vierkante pixels) volgt uit twee orthogonale verdwijnpunten een schatting van de brandpuntsafstand, en daarmee de volledige **homografie ijsvlak ↔ wereldvlak**. De bekende baanbreedte zet er schaal (meters) op.
-3. **Hoekcorrectie.** De enkel staat (vrijwel) op het ijs → via de homografie is zijn wereldpositie bekend. De knie is een kijkstraal vanuit de camera; om die in 3D te prikken is één extra aanname nodig. Twee kandidaten, te kiezen na experiment:
-   - **(a) Constante onderbeenlengte**: de afstand enkel–knie is per schaatser vast. Kalibreer die lengte op frames waar het been vrijwel loodrecht op de kijkrichting staat (daar is de projectie onvertekend), en snijd daarna per frame de knie-kijkstraal met de bol rond de enkel met die straal. Geometrisch het zuiverst.
-   - **(b) Beenvlak-aanname**: neem aan dat het onderbeen in een verticaal vlak ligt met bekende oriëntatie (bv. de rijrichting uit het getrackte traject, of dwars daarop tijdens de zijwaartse afzet). Eenvoudiger, maar de aanname is bij een schaatsafzet (schuin zijwaarts-achterwaarts) discutabel — daarom eerst op testmateriaal verifiëren welke variant stabieler is.
-   Uit de gereconstrueerde 3D-punten volgt de echte hoek t.o.v. het ijsvlak; die vervangt de beeldvlak-hoek in `bereken_hoek_tov_ijs()`-verband (zelfde plek in de pijplijn als de huidige horizonaftrek, dus stap 2/3 van de kern blijven ongewijzigd).
-4. **Kwaliteitsindicator.** De correctie is groot en gevoelig wanneer de schaatser ver van de camera-as zit; toon per frame (HUD) en per afzet-event (tabel) hoe groot de toegepaste correctie was, en markeer metingen waar de geometrie onbetrouwbaar wordt (been bijna in de kijkrichting — dan is géén enkele correctie nog te redden).
-5. **Bijvangst (gratis erbij):** met een metrische ijsvlak-homografie is de positie van de schaatser op de baan per frame bekend → echte **snelheid (m/s)** en **slaglengte per afzet** in de tabel.
-6. **Camerabeweging.** Eerste versie: alleen **vaste camera (statief)** — één kalibratie voor de hele video. Voor een pannende/schommelende camera moet de homografie per frame meebewegen: de aangewezen lijnen tracken met dezelfde LK-optical-flow-machinerie als fase 5. Dat is een logisch vervolg, geen onderdeel van de eerste versie.
+   **A nearby opportunity, found while doing corner detection:** the refinement pass fills detection gaps up to `GAP_FILL_S` (1.0 s) with interpolated bboxes and recovers the pose there. Skipping 1 in N frames on a straight section in pass 1 would therefore largely be caught by pass 2 — the corner guard already does exactly that in the corner. Only to be done alongside the measurement protocol: this is about frames that are actually being measured.
+3. **A lighter model for the detection pass, x for the refinement** — ⭐ **start here**: pass 1 only needs to deliver bboxes/track IDs and global keypoints; the precise angles come from the crop pass. `yolo26m-pose` (or even `s`) at 1280 for pass 1 + RTMPose/`yolo26x-pose` for the crops. **Measured prediction** (see groundwork): m ≈ 2.6×, n ≈ 8× over the whole pipeline — by far the biggest number on this list, and the only step that touches the 94%. **Must validate** that pass 1 still finds the distant/motion-blurred skater (that was the whole reason for 1280 × x): on the test video, check that coverage stays 100%, the events stay identical, and target selection/stitching doesn't get worse (`yolo11n` missed 1 in 6 detections in the measurement — that's where tracking breaks first, not the angle). The color histogram depends on bbox quality, so `_split_by_color` and `_stitch_chain` are the first places a too-small model shows itself. One A/B run against the golden reference settles this.
+4. **An exported model instead of PyTorch**: ultralytics' `model.export(format=...)`, then infer with:
+   - **OpenVINO** (`format="openvino"`): an optimized CPU runtime, also works on AMD CPUs; typically 1.5–3× faster than torch-CPU, same weights so the same output (small numeric deviations).
+   - **ONNX Runtime + DirectML** (`format="onnx"`, `onnxruntime-directml`): runs on the Radeon iGPU. Potentially the biggest jump, but iGPU drivers/DirectML are the most unpredictable item on this list — plan it as an experiment, with the CPU path as a fallback.
+   Both fit into `skate_yolo.py` behind a small abstraction layer around `model.track`/`model.predict`; ByteTrack tracking keeps working through ultralytics with an exported model.
+5. **A GUI "fast / accurate" choice**: a configurable profile on the start page (fast = m model + a smaller `DETECT_IMGSZ`; accurate = the current settings). The user chooses per video whether they want a quick impression or a precise measurement.
+6. **Quick wins** — largely superseded by the measurement; what's left of them, in descending order:
+   - **Power mode to "Best performance"** (Settings → System → Power & battery → Power mode, **not** `powercfg`: on this Windows 11 install there's only one scheme, "Balanced", and the performance mode is an overlay from the Settings app). *Checked 8 Aug 2026: the machine was on "Balanced" while plugged in.* The 7735U is a 15 W chip with configurable TDP up to 28 W; a lower sustained package power also drags down the fabric/memory-controller clock, and that is exactly the bottleneck. **The only knob on this list where 10–30% is realistically on the table, and never measured.** One toggle + one test run.
+   - **`cv2.setNumThreads(2)` during the YOLO pass.** July's profiling measured yolo *in isolation*; in the real pipeline, decoding, resizing, and the color histogram compete for the same cores. Two lines, expect a few percent, no risk to the measurement.
+   - **Above-normal process priority** for the analysis worker. Marginal, free.
+   - **A Defender exclusion on the library folder.** Doesn't touch inference, but does touch writing: `save_analysis` copies the whole video and that gets scanned along the way. Felt wait time, not analysis time.
+   - ~~`torch.set_num_threads(16)`~~ — **dropped**: thread scaling is flat from 1 → 16, there's no core utilization to gain.
 
-**Klaar wanneer:** dezelfde schaatser die op verschillende plekken in beeld passeert (dichtbij/veraf, links/rechts) krijgt ná correctie een stabiele afzethoek (± 2°), waar de ongecorrigeerde meting zichtbaar met de beeldpositie verloopt. Testopname: één schaatser, meerdere rondjes langs dezelfde vaste camera, hoeken per passage vergelijken.
+   **Two dead ends, explicitly noted here so they aren't investigated again:**
+   - **Upgrading memory can't and doesn't need to happen.** *Checked 8 Aug 2026:* 4× 4 GB **LPDDR5-6400 soldered to the motherboard** (16 GB, full bus width). No single-channel mistake to fix, no SODIMM to swap — the memory subsystem is already running at spec. The bandwidth bottleneck is therefore a given, not a defect.
+   - **Running several videos from a batch at once.** A natural thought, but exactly the measured scenario: two processes together 1.3×, four processes slower than serial. `BatchWorker` runs them one at a time and should keep doing so.
 
-### Stand van zaken (11 augustus 2026)
+**Measurement protocol**: one fixed test video ("Schaats frontaal.MOV"), record per step: total analysis time, pose coverage (%), and whether the push events (count, leg order, angles ±1°) stay equal to the reference run. A speedup that changes the measurement isn't a speedup. For a model swap, add `python skate_eval.py compare old.npz new.npz` + the golden reference — but compare **unedited** analyses (`analysis.edited = 0`), since a hand-placed skeleton counts as a detection in the coverage metric.
 
-**Stappen 1 en 2 zijn af** (7 juli 2026): de wiskundekern `schaats_perspectief.py` met zelftest, en de opt-in koppeling aan beide backends + de GUI. **Stap 3 (validatie op echt materiaal) staat open.**
+**Expectation (revised after the July 2026 measurement)**: step 3 is the main prize — **2.6× (m model) to 8× (n model)**, provided coverage holds up. Step 4 (OpenVINO) is theoretically 1.5–3× on top of that, but untested on this machine. Steps 1 and 2 give at most a few percent, since they touch the 6% that isn't the detection pass. Step 6 has one exception worth doing: the **power mode** does touch the bottleneck (package power → memory clock) and could be 10–30% — start there even, since it costs no code. The earlier estimate "1.5–2× from 1+2+6" was made before the profiling and turned out too optimistic.
 
-**Testmateriaal gevonden.** De juli-video viel af (bewegende camera, geen dwarslijn, frontaal, 4,2 s). Het bruikbare materiaal zijn de **zeven fragmenten die uit `opnames/00005.MTS` geknipt zijn** (`bron_id` 1, titels "00005 8-41" t/m "00005 11-54", bronframes 13015–18106). Nagemeten:
+**Done when:** the total analysis time for the test video is at least halved with no loss of coverage or measurement quality, and the fastest acceptable configuration is the default.
 
-| Eis | Vorige video | Deze zeven fragmenten |
+---
+
+## Phase 7 — Perspective correction via track lines
+
+> **Nice-to-have for the daily workflow, but validation is under way (Aug 2026).** Since July 2026 the assumption is that filming is **always straight-on from the front** with a **horizontal** camera. Under that setup the camera looks nearly perpendicular to the plane of motion and the perspective distortion is small, so the daily workflow doesn't need this correction. Steps 1 and 2 (the math core + hooking it into the pipeline and GUI) are done and opt-in; since 11 August 2026 the calibration is also **saved and reused**. What's left is step 3, validation on real footage — and that footage now exists (see "Status" at the end of this phase).
+
+**Problem:** the push and knee angle are currently measured in the **image plane** — the 2D projection of the leg. That's only correct if the camera looks perpendicular to the leg's plane of motion. If the camera isn't centered on the track (or the skater doesn't come straight at the camera), you're looking at an angle and perspective foreshortens the leg in one direction: the measured angle deviates structurally from the real one, and — more treacherously — the deviation **changes with the skater's position in frame**. The same push can then appear to have a different angle at the start of a pass than at the end. The existing horizon correction only fixes camera rotation around the viewing axis (roll), not this distortion.
+
+**Core idea:** the lines in the ice are straight, parallel lines with a known spacing (standard track width ± 4 m). From that, the camera's pose relative to the ice plane can be calibrated, and with that calibration the angles can be reprojected per frame onto the real, undistorted plane.
+
+### Steps
+
+1. **Marking lines (interaction).** An extension of the existing `HorizonPicker` dialog: on one frame, the user traces two (or more) track lines that in reality run parallel in the direction of travel, plus preferably one cross line (start/finish line, corner marking). Optionally assisted with Hough detection (that machinery already exists in `detect_ice_line()`), but manual tracing is the reliable baseline — lines in the ice are low-contrast and partly scratched.
+2. **Calibration from the lines.** Parallel lines meet in frame at a vanishing point; the direction-of-travel lines give vanishing point V1, the cross line(s) give V2. The line V1–V2 is the **vanishing line of the ice plane = the true horizon** (a bonus: this replaces the Hough horizon hack with something more principled). With the usual assumptions (principal point at the image center, square pixels), two orthogonal vanishing points yield an estimate of the focal length, and with that the full **ice-plane ↔ world-plane homography**. The known track width puts scale (meters) on it.
+3. **Angle correction.** The ankle sits (nearly) on the ice → its world position follows from the homography. The knee is a ray from the camera; pinning it down in 3D needs one extra assumption. Two candidates, to be chosen after experiment:
+   - **(a) Constant lower-leg length**: the ankle–knee distance is fixed per skater. Calibrate that length on frames where the leg is nearly perpendicular to the viewing direction (there the projection is undistorted), then per frame intersect the knee ray with the sphere of that radius around the ankle. Geometrically the cleanest.
+   - **(b) Leg-plane assumption**: assume the lower leg lies in a vertical plane with a known orientation (e.g. the direction of travel from the tracked trajectory, or perpendicular to it during the sideways push). Simpler, but the assumption is debatable for a skating push (diagonally sideways-backward) — verify on test material which variant is more stable first.
+   From the reconstructed 3D points follows the real angle relative to the ice plane; that replaces the image-plane angle at the `calculate_angle_to_ice()` spot (the same place in the pipeline as the current horizon subtraction, so steps 2/3 of the core stay unchanged).
+4. **A quality indicator.** The correction is large and sensitive when the skater is far from the camera axis; show per frame (HUD) and per push event (table) how large the applied correction was, and flag measurements where the geometry becomes unreliable (leg nearly along the viewing direction — then no correction can save it).
+5. **A bonus (free once you're here):** with a metric ice-plane homography, the skater's position on the track per frame is known → real **speed (m/s)** and **stroke length per push** in the table.
+6. **Camera motion.** First version: only a **fixed camera (tripod)** — one calibration for the whole video. For a panning/wobbling camera the homography would need to move per frame: track the marked lines with the same LK optical-flow machinery as phase 5. That's a logical follow-up, not part of the first version.
+
+**Done when:** the same skater passing at different places in frame (near/far, left/right) gets a stable push angle after correction (± 2°), where the uncorrected measurement visibly drifts with frame position. Test recording: one skater, several laps past the same fixed camera, compare angles per pass.
+
+### Status (11 August 2026)
+
+**Steps 1 and 2 are done** (7 July 2026): the math core `skate_perspective.py` with a self-test, and the opt-in hookup into both backends + the GUI. **Step 3 (validation on real footage) is still open.**
+
+**Test material found.** The July video didn't qualify (moving camera, no cross line, frontal, 4.2 s). The usable material is the **seven fragments trimmed from `opnames/00005.MTS`** (`source_id` 1, titles "00005 8-41" through "00005 11-54", source frames 13015–18106). Checked:
+
+| Requirement | Previous video | These seven fragments |
 |---|---|---|
-| Vaste camera | ✗ ~38 px drift (≈2°) | ✅ **0–1 px over 3½ minuut**, alle zeven |
-| Schuine kijkrichting (f zelfkalibreerbaar) | ✗ frontaal | ✅ duidelijk schuin langs de baan |
-| ≥2 rijrichting-lijnen | ✗ 1 | ✅ **3** (blauwe baanlijn, ijs/sneeuw-rand, boardingvoet) |
-| ≥1 dwarslijn | ✗ geen | ✅ met het oog aanwezig (handmatig natrekken; Hough vindt ze niet op bekrast ijs) |
-| Meerdere passages | ✗ één | ✅ **zeven, ~50 tellende afzetten** |
+| Fixed camera | ✗ ~38 px drift (≈2°) | ✅ **0–1 px over 3½ minutes**, all seven |
+| Oblique viewing angle (f self-calibratable) | ✗ frontal | ✅ clearly oblique along the track |
+| ≥2 direction-of-travel lines | ✗ 1 | ✅ **3** (blue track line, ice/snow edge, boarding base) |
+| ≥1 cross line | ✗ none | ✅ visible to the eye (manual tracing; Hough doesn't find them on scratched ice) |
+| Multiple passes | ✗ one | ✅ **seven, ~50 pushes total** |
 
-Twee bevindingen uit dat nameten die het plan sturen:
-- **De vertekening is al zichtbaar in de ongecorrigeerde analyses**: binnen elke passage loopt de afzethoek op naarmate de schaatser dichterbij komt (11-08: 44,4° op enkel-y 319 → 55,5° op y 640; 10-25: 38,0 → 41,9). Er valt dus echt iets te corrigeren.
-- **Maar die drift verschilt sterk per passage over hetzelfde beeldgebied** (+2,7° bij 8-41 tegen +11° bij 11-08), dus een deel is techniekverandering of ruis. De validatie mag daarom niet leunen op "de hoek moet constant worden" en heeft een expliciet nulmodel nodig.
-- **De gebouwkolommen staan zuiver loodrecht in beeld** (0–2 px over 60 px hoogte) → camera-roll ≈ 0. Daaruit volgt dat de verdwijnlijn van het ijsvlak exact horizontaal door V1 loopt; een gratis extra controle op de kalibratie, en een uitwijkroute mocht een dwarslijn ooit ontbreken.
+Two findings from that check that steer the plan:
+- **The distortion is already visible in the uncorrected analyses**: within each pass, the push angle rises as the skater gets closer (11-08: 44.4° at ankle-y 319 → 55.5° at y 640; 10-25: 38.0 → 41.9). So there really is something to correct.
+- **But that drift varies a lot from pass to pass over the same image region** (+2.7° at 8-41 vs. +11° at 11-08), so part of it is technique change or noise. Validation therefore can't lean on "the angle should become constant" and needs an explicit null model.
+- **The building columns stand perfectly vertical in frame** (0–2 px over 60 px height) → camera roll ≈ 0. It follows that the ice plane's vanishing line runs exactly horizontal through V1 — a free extra check on the calibration, and a fallback route should a cross line ever be missing.
 
-**Validatieplan — vier tests, oplopend van goedkoop naar het klaar-criterium:**
-- **A — kalibratie zonder ground truth (eerst).** De standbeen-enkel loopt over het ijs, dus het gereconstrueerde `r.wereld_xy` moet een **rechte lijn** zijn met een gladde snelheid. Rechtheidsresidu + plausibiliteit (tempo ≈ 10–12 m/s, slaglengte 5–8 m, gereconstrueerde heupbreedte vs. opgemeten) keuren de homografie af vóór er iets geannoteerd wordt. Faalt dit, dan is de rest zinloos.
-- **B — robuustheid.** Laat-één-lijn-weg: herkalibreren op wisselende deelverzamelingen van de rijlijnen en meten hoeveel f, horizon en eindhoeken bewegen. Bewegen ze meer dan de geclaimde winst, dan is de kalibratie te wiebelig voor de praktijk.
-- **C — diepte-drift (het klaar-criterium).** Regressie van de afzethoek op de beeldpositie per passage, vóór en na correctie; de helling moet naar nul. Nulmodel: de spreiding binnen één klein beeldgebied is de ruisvloer, en alleen een hellingreductie die daar duidelijk bovenuit komt telt.
-- **D — consistentie tussen passages.** De zeven passages beslaan verschillende laterale banden (x = 31 tot x = 1219); na correctie moet de spreiding van het passage-gemiddelde krimpen. Minst gevoelig voor techniekdrift binnen één passage — en de reden dat één gedeelde kalibratie over alle zeven een harde voorwaarde is (zie hieronder).
+**Validation plan — four tests, cheapest to the done-criterion:**
+- **A — calibration without ground truth (first).** The stance-leg ankle travels over the ice, so the reconstructed `r.wereld_xy` should be a **straight line** with a smooth speed. Straightness residual + plausibility (pace ≈ 10–12 m/s, stroke length 5–8 m, reconstructed hip width vs. measured) rejects the homography before anything gets annotated. If this fails, the rest is pointless.
+- **B — robustness.** Leave-one-line-out: recalibrate on varying subsets of the track lines and measure how much f, the horizon, and the final angles move. If they move more than the claimed gain, the calibration is too wobbly for practice.
+- **C — depth drift (the done criterion).** Regress the push angle on frame position per pass, before and after correction; the slope should go to zero. Null model: the spread within one small image region is the noise floor, and only a slope reduction clearly above that counts.
+- **D — consistency across passes.** The seven passes cover different lateral bands (x = 31 to x = 1219); after correction, the spread of the per-pass average should shrink. Least sensitive to technique drift within a single pass — and the reason one shared calibration across all seven is a hard requirement (see below).
 
-**Afgekeurd als test:** links/rechts-antisymmetrie. Nagerekend: het L−R-verschil is nu al maar −0,9° tot +2,0°, dus geen onderscheidend vermogen.
+**Rejected as a test:** left/right antisymmetry. Checked: the L−R difference is already only −0.9° to +2.0°, so no discriminating power.
 
-**Geen enkele maat nodig voor de hoek (nagemeten 11 augustus 2026).** De trainer wil alleen correcte hoeken, geen snelheid of slaglengte — en dat kán, want de afzethoek is **schaalvrij**: hij volgt uit de richtingen van de lijnen, niet uit hun afstand. Gemeten met 2 baanlijnen + 2 dwarslijnen en `beenvlak`: **0,00° fout of je nu 0,5 m, 4 m of 50 m als lijnafstand invult**. De GUI heeft daarom "Alleen hoeken (geen snelheid/slaglengte)" als **standaard** (`schaal_bekend=False`). Twee dingen die daaruit volgen:
-- **`onderbeen` kan niet zonder echte schaal**: die snijdt met een bol van een lengte in echte meters, dus een verzonnen lijnafstand gaf **49° fout, stilzwijgend**. De dialoog zet de methode daarom vast op `beenvlak` zolang alleen-hoeken aan staat. Voor de A/B van beide methodes (test A/C/D hierboven) moet je het vinkje uitzetten en de echte 4 m invullen.
-- **Bij 3+ baanlijnen telt hun onderlinge afstand wél**, ook bij `beenvlak`: de verdwijnlijn komt dan uit de kruisverhouding. Ongelijk verdeelde lijnen die als gelijk verdeeld worden opgegeven leveren een **weigering** op (f² ≤ 0) — nooit stilzwijgend fout — en met de juiste `rij_offsets` weer 0,00°. `rij_offsets` zit in de module maar niet in de GUI; de foutmelding wijst daarom naar de uitweg: precies **2 baanlijnen + 2 dwarslijnen**, want dan komt V2 uit de dwarslijnen.
+**No length measurement needed for the angle at all (checked 11 August 2026).** The trainer only wants correct angles, not speed or stroke length — and that's possible, because the push angle is **scale-free**: it follows from the directions of the lines, not their spacing. Measured with 2 track lines + 2 cross lines and `leg_plane`: **0.00° error whether you enter 0.5 m, 4 m, or 50 m** as the line spacing. The GUI therefore has "Angles only (no speed/stroke length)" as the **default** (`scale_known=False`). Two things follow from that:
+- **`lower_leg` can't work without a real scale**: it intersects with a sphere of a length in real meters, so a made-up line spacing gave **49° error, silently**. The dialog therefore locks the method to `leg_plane` as long as angles-only is on. For the A/B of both methods (tests A/C/D above) you have to turn the checkbox off and enter the real 4 m.
+- **With 3+ track lines their spacing does matter**, even with `leg_plane`: the vanishing line then comes from the cross-ratio. Unevenly spaced lines entered as evenly spaced produce a **refusal** (f² ≤ 0) — never silently wrong — and with the correct `track_offsets`, 0.00° again. `track_offsets` exists in the module but not in the GUI; the error message therefore points to the way out: exactly **2 track lines + 2 cross lines**, since then V2 comes from the cross lines.
 
-**Eerste praktijktest op `00005 11-23` (11/12 augustus 2026): de correctie maakte de hoeken slechter, en dat is uitgezocht.** Getekend werden 2 baanlijnen + 2 dwarslijnen, "alleen hoeken", methode `beenvlak`. Resultaat: correcties van −22,9° tot +71,2°, statusbalk "onbetrouwbaar". Drie oorzaken, alle drie nagemeten:
-1. **`f` is uit deze camerastand principieel niet te schatten.** De twee dwarslijnen lopen in beeld vrijwel evenwijdig (helling −0,0219 vs −0,0204), dus V2 ligt op **133× de beeldmaat** — praktisch op oneindig, precies het geval waarvoor de moduledocstring `f_px` verplicht stelt. Gevolg: f = 7081 px = 3,3× de beeldbreedte ≈ **17° beeldhoek**, onmogelijk voor zo'n opname. En het is niet alleen fout maar *betekenisloos*: **één lijnuiteinde 5 px verschuiven laat f van 3827 px naar "onmogelijk" springen**. De camera kijkt hier bijna lángs de baan — mijn eerdere inschatting "duidelijk schuin" was verkeerd; hij is schuin genoeg voor een nette V1, maar de dwársrichting ligt vrijwel evenwijdig aan het beeldvlak.
-2. **`beenvlak` is dégenereerd voor precies deze stand.** Die methode legt het onderbeen in een verticaal vlak in de rijrichting; kijkt de camera langs de baan, dan ligt de kijkstraal ín dat vlak (de bestaande `vlak_conditie_deg`-vlag). Gemeten over 164 frames: `beenvlak` markeert er **25–61 als onbetrouwbaar**, `onderbeen` maar **5–7**. De aanbeveling om `beenvlak` te gebruiken (omdat die geen maten nodig heeft) was dus verkeerd voor dit materiaal.
-3. **Maar zelfs met de betere methode wint de correctie niet.** Met f gesweept van 1200 tot 6380 px: ongecorrigeerd is de spreiding van de tellende afzethoeken **sd 1,6°**; het beste gecorrigeerde geval is `onderbeen` met **sd 2,0°**, `beenvlak` blijft op 3,8–7,4°. Op deze clip valt er dus weinig te winnen — logisch, want een camera die langs de baan kijkt heeft juist wéinig perspectiefvertekening (de oorspronkelijke ROADMAP-premisse). Let wel: sd over vier afzetten is een zwak getal, en "consistent" is niet hetzelfde als "correct".
+**First practical test on `00005 11-23` (11/12 August 2026): the correction made the angles worse, and that's been tracked down.** 2 track lines + 2 cross lines were traced, "angles only", method `leg_plane`. Result: corrections from −22.9° to +71.2°, status bar "unreliable". Three causes, all three verified:
+1. **`f` is fundamentally not estimable from this camera pose.** The two cross lines run in frame almost parallel (slope −0.0219 vs. −0.0204), so V2 sits at **133× the image size** — practically at infinity, exactly the case for which the module docstring requires `f_px`. Consequence: f = 7081 px = 3.3× the image width ≈ **17° field of view**, impossible for a recording like this. And it's not just wrong but *meaningless*: **shifting one line endpoint 5 px sends f from 3827 px to "impossible"**. The camera here looks almost along the track — my earlier assessment "clearly oblique" was wrong; it's oblique enough for a clean V1, but the cross direction lies nearly parallel to the image plane.
+2. **`leg_plane` is degenerate for exactly this pose.** That method puts the lower leg in a vertical plane in the direction of travel; if the camera looks along the track, the viewing ray lies *inside* that plane (the existing `plane_condition_deg` flag). Measured over 164 frames: `leg_plane` flags **25–61 as unreliable**, `lower_leg` only **5–7**. The recommendation to use `leg_plane` (because it needs no measurements) was therefore wrong for this material.
+3. **But even with the better method, the correction doesn't win.** Sweeping f from 1200 to 6380 px: uncorrected, the spread of the counted push angles is **sd 1.6°**; the best corrected case is `lower_leg` at **sd 2.0°**, `leg_plane` stays at 3.8–7.4°. On this clip there's little to gain — makes sense, since a camera looking along the track has relatively little perspective distortion to begin with (the original roadmap premise). Note: sd over four pushes is a weak number, and "consistent" isn't the same as "correct".
 
-**Ingebouwde poort naar aanleiding hiervan:** `kalibreer_uit_lijnen` weigert nu de zelfkalibratie van f als het verste verdwijnpunt boven `VP_CONDITIE_MAX` (30× de beeldmaat) ligt, met uitleg dat `f_px` opgegeven moet worden; boven `VP_CONDITIE_WAARSCHUW` (5×) volgt een waarschuwing. Geijkt op de zelftest-camera's, die op 1,0 / 1,5 / 9,3 zitten en allemaal de juiste f leveren. Verder toont de `KalibratieKiezer` het **residu niet meer** bij precies 2+2 lijnen: het stelsel is dan exact bepaald, dus het residu is per constructie 0,00 px en las als "perfect gekalibreerd" — er staat nu dat er géén controle mogelijk is en dat een derde dwarslijn die wél geeft.
+**A gate built in as a result:** `calibrate_from_lines` now refuses self-calibration of f if the farthest vanishing point lies above `VP_CONDITION_MAX` (30× the image size), explaining that `f_px` must be supplied; above `VP_CONDITION_WARN` (5×) it gives a warning. Calibrated against the self-test cameras, which sit at 1.0 / 1.5 / 9.3 and all yield the correct f. The `CalibrationPicker` also no longer shows the **residual** at exactly 2+2 lines: the system is then exactly determined, so the residual is by construction 0.00 px and read as "perfectly calibrated" — it now says no check is possible and that a third cross line would provide one.
 
-**Vervolg is dus: `f_px` los bepalen** (schaakbordkalibratie met dezelfde camcorder/zoomstand, of de cameraspecificatie), en pas daarna opnieuw meten — bij voorkeur op `11-08`, want die passage laat wél duidelijke drift zien (44,4° → 55,5°) terwijl `11-23` ongecorrigeerd al vlak is.
+**The follow-up is therefore: determine `f_px` separately** (a checkerboard calibration with the same camcorder/zoom setting, or the camera spec), and only then measure again — preferably on `11-08`, since that pass does show clear drift (44.4° → 55.5°) while `11-23` is already flat uncorrected.
 
-**Onderbeenlengte vs. heupbreedte.** Voorstel om heupbreedte als anker te gebruiken is nagerekend en afgeraden als liniaal: heupbreedte meet 28–44 px tegen 47–85 px voor het onderbeen (~60%, dus ~1,7× ruisgevoeliger), wordt zelf verkort door romprotatie (dat is precies het `bocht_ratio`-signaal) en legt het bekken vast in plaats van de knie — chainen naar de knie haalt de femurlengte erbij in plaats van eraf. Wél bruikbaar als onafhankelijke controle in test A. Let op het misverstand eronder: de **3D**-onderbeenlengte ís constant; alleen de projectie varieert, en die variatie is juist het signaal waar de bol-snijding op werkt. De praktische zorg klopt wel — de lengte uit de video afleiden is onbetrouwbaar (zie `kalibreer_onderbeenlengte`). Uitweg: `methode='beenvlak'` heeft **helemaal geen lengte nodig**; draai beide methodes naast elkaar en laat A/C/D beslissen.
+**Lower-leg length vs. hip width.** The proposal to use hip width as an anchor has been checked and is not recommended as a ruler: hip width measures 28–44 px against 47–85 px for the lower leg (~60%, so ~1.7× noisier), gets shortened by torso rotation itself (that's exactly the `corner_ratio` signal), and pins down the pelvis rather than the knee — chaining to the knee then adds the femur length rather than removing it. It's still useful as an independent check in test A. Note the misunderstanding underneath it: the **3D** lower-leg length **is** constant; only the projection varies, and that variation is exactly the signal the sphere intersection works on. The practical worry is valid though — deriving the length from the video is unreliable (see `calibrate_lower_leg_length`). Way out: `method='leg_plane'` needs **no length at all**; run both methods side by side and let A/C/D decide.
 
-**Voorwaarde ingebouwd (11 augustus 2026): de kalibratie wordt bewaard en is herbruikbaar.** Zonder dat zou test D zeven keer handmatig natrekken vergen — zeven nét andere kalibraties, en dan meet je die spreiding in plaats van het effect van de correctie. Wat er opgeslagen wordt is de invoer (`KalibratieInvoer`: lijnen + lijnafstand/`f_px`/offsets/notitie + beeldmaat) in `instellingen_json`; de camerastand wordt eruit herberekend. Heropenen herstelt de correctie, de batch-flow vraagt de kalibratie één keer voor de hele rij, en `_kies_perspectief` biedt eerdere kalibraties van dezelfde beeldmaat aan om over te nemen. Zie CLAUDE.md voor de details.
+**A precondition built in (11 August 2026): the calibration is saved and reusable.** Without that, test D would require seven manual tracings by hand — seven slightly different calibrations, measuring that spread instead of the effect of the correction. What gets saved is the input (`CalibrationInput`: lines + line spacing/`f_px`/offsets/note + image size) in `settings_json`; the camera pose is recomputed from it. Reopening restores the correction, the batch flow asks for the calibration once for the whole row, and `_choose_perspective` offers earlier calibrations of the same image size to reuse. See CLAUDE.md for details.
 
 ---
 
-## Fase 8 — Lange video's: bruikbare fragmenten knippen in de app ✅
+## Phase 8 — Long recordings: trimming usable fragments in the app ✅
 
-> **Af (11 augustus 2026)** — zelftest (`python schaats_db.py`) groen in beide venvs incl. de v1→v3- en v2→v3-migratie en de opnames-round-trip; headless rooktest van de opnameslijst, het knipvenster (markeren, sneltoetsen S/E/Delete, balk tekenen, fragmentlijst) en de batch-aansluiting (voorgevulde rijen dragen `bron_*` tot in `sla_analyse_op`).
+> **Done (11 August 2026)** — self-test (`python skate_db.py`) green in both venvs incl. the v1→v3 and v2→v3 migration and the recordings round-trip; headless smoke test of the recordings list, the trim window (marking, S/E/Delete shortcuts, drawing the bar, fragment list), and the batch hookup (prefilled rows carry `source_*` through to `save_analysis`).
 >
-> **Wat er staat**, precies volgens het plan hieronder — het knippen levert de invoer van de bestaande batch-flow, dus aan de analysekant is niets veranderd:
-> - **`schaats_db`, schema v3**: `bronvideo`-tabel + `analyse.bron_id`/`bron_start_frame`/`bron_eind_frame`, met `synchroniseer_bronmap` / `lijst_bronvideos` / `bronvideo` / `wijzig_bronvideo` / `bron_fragmenten`. `open_db` maakt `opnames/` aan.
-> - **`schaats_analyse.knip_fragmenten()`**: één sequentiële pass, exact op de gemarkeerde frames, `mp4v`.
-> - **GUI**: tweede tabblad **"Opnames"** op de startpagina (status + notitie ter plekke te wijzigen, telling `3 fragmenten · 2 schaatsers`), **`FragmentKiezer`** + **`FragmentBalk`**, `VideoSpeler(snel_zoeken=, toon_overlay=)`, en `BatchAnalyseDialog(voorgevuld=...)`. De Info-dialoog van een analyse toont voortaan **"Uit opname: … (12:30–13:05)"**.
+> **What's there**, exactly per the plan below — trimming supplies the input for the existing batch flow, so nothing changed on the analysis side:
+> - **`skate_db`, schema v3**: a `source_video` table + `analysis.source_id`/`source_start_frame`/`source_end_frame`, with `sync_source_dir` / `list_source_videos` / `source_video` / `edit_source_video` / `source_fragments`. `open_db` creates `opnames/`.
+> - **`skate_analysis.trim_fragments()`**: one sequential pass, exactly on the marked frames, `mp4v`.
+> - **GUI**: a second tab **"Recordings"** on the start page (status + note editable in place, count "3 fragments · 2 skaters"), **`FragmentPicker`** + **`FragmentBar`**, `VideoPlayer(fast_seek=, show_overlay=)`, and `BatchAnalysisDialog(voorgevuld=...)`. The Info dialog for an analysis now shows **"From recording: … (12:30–13:05)"**.
 >
-> **Werkbaar op een echte opname (nagemeten 11 augustus 2026, na de eerste praktijktest — de GUI liep vast op `00005.MTS`, 4,2 GB AVCHD 1920×1080 @ 25 fps, 34.728 frames ≈ 23 min).** Het decoderen bleek níet het probleem (~9 ms per frame, een `grab()` ~3 ms, een seek ~80 ms) — het aantal aanroepen wel. Drie oorzaken, alle drie verholpen:
-> - **Eén frame terug = de video opnieuw doorspoelen vanaf frame 0.** `snel_zoeken` seekte alleen bij een sprong > 30 frames, dus juist de kleine stap achteruit viel in de sequentiële route: op frame 20.000 kostte dat ~84 s met een volledig bevroren venster. Nu seekt **elke** stap achteruit → 99 ms. Kleine sprongen vooruit blijven sequentieel (goedkoper dan een seek, en frame-voor-frame stappen rond een grens blijft exact).
-> - **Slepen aan de tijdlijn stapelde honderden seeks op.** De slider zet nu alleen het laatst gevraagde frame klaar; een `QTimer` met interval 0 tekent het zodra de wachtrij leeg is, zodat alle tussenwaarden vervallen. Gemeten: 300 slider-signalen in 1 ms verwerkt, daarna één keer tekenen.
-> - **Doorscannen kon helemaal niet.** De snelheidkeuze hield op bij 1×, dus één keer doorkijken duurde 23 minuten. Er staan nu **2×/4×/8×** in, uitgevoerd door frames **over te slaan** (4 frames per tik op het fps-tempo) i.p.v. sneller te decoderen — dat laatste haalt geen decoder.
-> - **Het venster paste niet op het laptopscherm.** Op 1280×800 (werkgebied 752 px) eiste het knipvenster 723 px minimaal; met de titelbalk erbij zakte de knoppenbalk onder de rand en was "Klaar" onvindbaar. De minima zijn verlaagd (video-ondergrens 400×200, kleinere fragmenttabel, krappere marges) → **553 px**, en `zet_venstergrootte` draait nu als laatste, tegen een complete layout. De andere dialogen zijn nagemeten en passen — **ook `KalibratieKiezer`** (hernagemeten 11 augustus 2026: minimum 1008×460, opent op 1150×700; de eerdere claim van 1724 px was onjuist).
-> - Bijvangst: `knip_fragmenten` gebruikt `grab()` zonder `retrieve()` voor frames buiten elk fragment. 10 s knippen op minuut 20 kost daarmee 96 s i.p.v. ~270 s — verwaarloosbaar naast de analyse (~2 s/frame) die erop volgt.
+> **Workable on a real recording (checked again 11 August 2026, after the first practical test — the GUI froze on `00005.MTS`, a 4.2 GB AVCHD 1920×1080 @ 25 fps recording, 34,728 frames ≈ 23 min).** Decoding wasn't the problem (~9 ms per frame, a `grab()` ~3 ms, a seek ~80 ms) — the number of calls was. Three causes, all three fixed:
+> - **One frame back meant rescanning the whole video from frame 0.** `fast_seek` only seeked on a jump > 30 frames, so the small backward step fell into the sequential route: at frame 20,000 that cost ~84 s with a fully frozen window. Now **every** backward step seeks → 99 ms. Small forward jumps stay sequential (cheaper than a seek, and stepping frame by frame around a boundary stays exact).
+> - **Dragging the timeline stacked up hundreds of seeks.** The slider now only queues the last requested frame; a `QTimer` with interval 0 draws it once the queue is empty, so every intermediate value drops out. Measured: 300 slider signals processed in 1 ms, then drawn once.
+> - **Scanning through wasn't possible at all.** The speed choice stopped at 1×, so watching through once took 23 minutes. There are now **2×/4×/8×**, implemented by **skipping** frames (4 frames per tick at the fps rate) instead of decoding faster — the latter can't outrun the decoder.
+> - **The window didn't fit the laptop screen.** At 1280×800 (workarea 752 px) the trim window required 723 px minimum; with the title bar added, the button bar sank below the edge and "Done" was unreachable. The minimums were lowered (video floor 400×200, a smaller fragment table, tighter margins) → **553 px**, and `set_window_size` now runs last, against a complete layout. The other dialogs were rechecked and fit — **including `CalibrationPicker`** (rechecked 11 August 2026: minimum 1008×460, opens at 1150×700; the earlier claim of 1724 px was wrong).
+> - Bonus: `trim_fragments` uses `grab()` without `retrieve()` for frames outside every fragment. Trimming 10 s at minute 20 costs 96 s instead of ~270 s that way — negligible next to the analysis (~2 s/frame) that follows.
 >
-> **Gemeten (11 augustus 2026):**
-> - **Seek-afwijking op echte iPhone-.MOV's** (de prijs van `snel_zoeken`): op `IMG_8997.mov` en `IMG_9001.mov` **0–1 frame** (0–33 ms). Op `Schaats frontaal.MOV`, waar `CAP_PROP_FRAME_COUNT` 108 frames meldt maar er 103 leesbaar zijn, loopt het op tot **4 frames (168 ms)** aan het eind van de clip — precies de VFR-drift waarvoor de weergavepagina nooit seekt. Voor een grens die je met het oog bepaalt is dat acceptabel; het fragment zelf blijft exact, want `knip_fragmenten` telt sequentieel vanaf frame 0.
-> - **Hercodering** (de A/B die punt B hieronder vroeg): `Schaats frontaal.MOV` uit zichzelf geknipt (103 frames, 1920×1080) en beide met dezelfde code geanalyseerd. **Dekking 100% in beide, zes afzetten in beide, dezelfde L-R-volgorde (RLRLRL), nul alternatiefouten**, en de eventgrenzen op één frame na identiek (35 vs. 36). De hoeken: 42,2→41,0 · 42,5→42,5 · 42,9→42,5 · 40,0→40,5 · 45,6→45,9 (en de afgekapte 50,0→51,5, die toch niet meetelt) — dus **maximaal 1,2° op een tellende afzet, meestal ≤ 0,5°**. Gewrichtsposities verschillen 1–2 px mediaan (p95 6–11 px) op een beeld van 1920 px breed. Conclusie: **cv2 met `mp4v` blijft de default.** De afwijking zit in dezelfde orde als de ±1° die fase 6 als acceptabel voorstelt, en de uitweg (ffmpeg stream-copy) zou een GOP-marge van 1–2 s aan de voorkant terugbrengen — precies wat hier niet gewenst is. Wordt dit ooit tóch storend, dan is de eerlijke oplossing een betere codec-instelling of ffmpeg **mét** hercodering, niet `-c copy`.
+> **Measured (11 August 2026):**
+> - **Seek deviation on real iPhone .MOV files** (the price of `fast_seek`): on `IMG_8997.mov` and `IMG_9001.mov`, **0–1 frame** (0–33 ms). On `Schaats frontaal.MOV`, where `CAP_PROP_FRAME_COUNT` reports 108 frames but only 103 are readable, it grows to **4 frames (168 ms)** near the end of the clip — exactly the VFR drift the view page never seeks over. For a boundary picked by eye that's acceptable; the fragment itself stays exact, since `trim_fragments` counts sequentially from frame 0.
+> - **Recoding** (the A/B step B asked for): `Schaats frontaal.MOV` trimmed from itself (103 frames, 1920×1080) and both analyzed with the same code. **100% coverage both ways, six pushes both ways, the same L-R order (RLRLRL), zero alternation errors**, and the event boundaries identical bar one frame (35 vs. 36). The angles: 42.2→41.0 · 42.5→42.5 · 42.9→42.5 · 40.0→40.5 · 45.6→45.9 (and the truncated 50.0→51.5, which doesn't count anyway) — so **at most 1.2° on a counted push, mostly ≤ 0.5°**. Joint positions differ 1–2 px median (p95 6–11 px) on a 1920-px-wide frame. Conclusion: **cv2 with `mp4v` stays the default.** The deviation sits in the same order as the ±1° phase 6 proposes as acceptable, and the alternative (ffmpeg stream copy) would bring back a 1–2 s GOP margin at the front — exactly what's not wanted here. If this ever becomes a real problem, the honest fix is a better codec setting or ffmpeg **with** recoding, not `-c copy`.
 >
-> **Afwijkingen van het plan hieronder:**
-> - De opnames zitten in een **tabblad** naast de schaatserslijst (niet als derde kolom): de werklijst hangt niet aan de schaatserselectie.
-> - **De doelschaatser wordt niet in het knipvenster aangewezen** (de openstaande vraag onderaan). `DoelKiezer` staat dus op frame 0 van elke clip — en dat is precies het beeld waarop "start" gedrukt werd, want er wordt exact op de gemarkeerde frames geknipt. De backend-verbouwing (`_kies_seed(..., doel_frame)`) is daarmee nog niet gedaan.
-> - `VideoSpeler` kreeg naast `snel_zoeken` ook **`toon_overlay`**: met lege `FrameResultaat`-objecten zou de overlay op élk frame "Geen pose gedetecteerd" zetten, en "Volg schaatser"/"Automatische zoom" zijn vinkjes die zonder analyse niets kunnen doen. Kleine sprongen (≤ `SEEK_DREMPEL_FRAMES`, 30) blijven sequentieel, zodat frame-voor-frame stappen rond een grens exact blijft.
-> - Bijvangst: de **Info-dialoog** toont de herkomst van een fragment (`analyse_meta` haalt `bron_naam` met een LEFT JOIN mee).
+> **Deviations from the plan below:**
+> - Recordings sit in a **tab** next to the skater list (not a third column): the work list doesn't hang off the skater selection.
+> - **The target skater isn't picked in the trim window** (the open question below). `TargetPicker` therefore stands on frame 0 of every clip — which is exactly the frame "start" was pressed on, since trimming happens exactly on the marked frames. The backend rework (`_choose_seed(..., doel_frame)`) hasn't been done for this yet.
+> - `VideoPlayer` got **`show_overlay`** alongside `fast_seek`: with empty `FrameResult` objects, the overlay would show "No pose detected" on every frame, and "Follow skater"/"Automatic zoom" are checkboxes that can't do anything without an analysis. Small jumps (≤ `SEEK_THRESHOLD_FRAMES`, 30) stay sequential, so stepping frame by frame around a boundary stays exact.
+> - Bonus: the **Info dialog** shows a fragment's origin (`analysis_meta` pulls in `bron_naam` with a LEFT JOIN).
 >
-> **Aanleiding uit de praktijk:** een training levert één opname van een half uur op. Die wordt nu buiten de app (Clipchamp) met de hand in bruikbare stukken geknipt — dat kost meer tijd dan de analyse zelf en het externe programma werkt slecht. Het knippen hoort in de app, náást de video die je toch al aan het bekijken bent.
+> **Motivation from practice:** one training session produces one half-hour recording. It currently gets cut into usable pieces by hand outside the app (Clipchamp) — that takes longer than the analysis itself and the external program works poorly. Trimming belongs in the app, right next to the video you're already watching anyway.
 
-**Doel:** een opname van een half uur openen, daarin de bruikbare stukken markeren (start/stop per stuk), en die stukken daarna in één keer laten analyseren — precies zoals de app nu al een losse clip analyseert.
+**Goal:** open a half-hour recording, mark the usable stretches in it (start/stop per stretch), and then have those stretches analyzed in one go — exactly like the app already analyzes a loose clip.
 
-> **Uitgangspunt: dit is een knipprogramma, en het knippen is volledig handmatig** (vastgelegd 10 augustus 2026). De app bepaalt **niets** zelf: niet wanneer de schaatser in beeld is, niet waar een stuk begint of eindigt, en er komt geen seconde marge bij of af. De trainer kijkt, drukt op start en stop, en dát zijn de grenzen. Alles wat het programma doet is die grenzen onthouden, tonen en er clips van wegschrijven. Elk voorstel om hier "slimheid" in te bouwen is bij voorbaat afgewezen — zie "Bewust overwogen en niet gekozen".
+> **Starting point: this is a trimming tool, and the trimming is entirely manual** (fixed 10 August 2026). The app decides **nothing** on its own: not when the skater is in frame, not where a stretch starts or ends, and no second of margin is added or removed. The trainer watches, presses start and stop, and those are the boundaries. Everything the program does is remember those boundaries, show them, and write clips from them. Every proposal to build "smartness" in here has been rejected up front — see "Deliberately considered and not chosen".
 
-### De flow zoals gevraagd
+### The requested flow
 
-1. Opname van een half uur kiezen uit de nieuwe lijst **"Opnames"** op de startpagina (`<bibliotheek>/opnames/`, gedeeld via Drive — zie hieronder).
-2. Doorlopen/scrubben; bij een bruikbaar stuk: **"Start bruikbaar beeld"** → **"Stop bruikbaar beeld"**. Herhalen voor stuk 2, 3, … x.
-3. Tijdens het markeren is **zichtbaar welke stukken al gemarkeerd zijn** (gekleurde blokken op een balk onder de tijdlijn) en welke stukken van deze bronvideo **in een eerdere sessie al geanalyseerd zijn**.
-4. Op **"Klaar — analyseer x fragmenten"**: per fragment een schaatser (en titel) kiezen, dan per fragment de doelschaatser aanwijzen, daarna draait de analyse zoals nu.
+1. Choose a half-hour recording from the new **"Recordings"** list on the start page (`<library>/opnames/`, shared via Drive — see below).
+2. Scrub through it; at a usable stretch: **"Start usable footage"** → **"Stop usable footage"**. Repeat for stretch 2, 3, … x.
+3. While marking, it's **visible which stretches are already marked** (colored blocks on a bar under the timeline) and which stretches of this source recording were **already analyzed in an earlier session**.
+4. On **"Done — analyze x fragments"**: choose a skater (and title) per fragment, then pick the target skater per fragment, and the analysis runs as it does now.
 
-### Architectuur: het knippen levert de invoer van de bestáánde batch-flow
+### Architecture: trimming supplies the input for the existing batch flow
 
-De kern van dit ontwerp is dat er ná het knippen **niets nieuws** hoeft te gebeuren: `BatchAnalyseDialog.taken` is al een lijst `{input_pad, schaatser_id, titel}` en `_nieuwe_batch_analyse` vraagt daar al per video doelschaatser + horizon bij op, waarna `BatchWorker` de rij afdraait en elke analyse zelf opslaat. Zodra elk fragment een gewoon videobestandje is, valt de hele nieuwe functie uiteen in **twee stappen die vóór die dialoog komen te staan**:
+The core of this design is that **nothing new** needs to happen after trimming: `BatchAnalysisDialog.taken` is already a list of `{input_pad, schaatser_id, titel}`, and `_new_batch_analysis` already asks for the target skater + horizon per video, after which `BatchWorker` runs the row and each analysis saves itself. Once every fragment is a plain video file, the whole new feature collapses into **two steps placed before that dialog**:
 
-- **A. `FragmentKiezer`** (nieuwe dialoog) — markeren op de bronvideo → lijst `(start_frame, eind_frame)`.
-- **B. `knip_fragmenten()`** (nieuwe helper) — die frameranges als losse clips wegschrijven → lijst bestandspaden.
+- **A. `FragmentPicker`** (new dialog) — marking on the source video → a list of `(start_frame, end_frame)`.
+- **B. `trim_fragments()`** (new helper) — write those frame ranges out as loose clips → a list of file paths.
 
-Daarna: `BatchAnalyseDialog` openen met die paden **voorgevuld** (rijen staan er al, de trainer vult alleen schaatser + titel in). Geen tweede analyse-pijplijn en geen tweede opslagroute — aan de analysekant verandert er niets. De schemabump hieronder gaat dan ook niet over het analyseren, maar over het bijhouden van de opnames zelf.
+Then: open `BatchAnalysisDialog` with those paths **prefilled** (the rows already exist, the trainer only fills in skater + title). No second analysis pipeline and no second storage route — nothing changes on the analysis side. The schema bump below is therefore not about analyzing but about keeping track of the recordings themselves.
 
-### A. `FragmentKiezer` — de knipdialoog
+### A. `FragmentPicker` — the trim dialog
 
-- **Hergebruik `VideoSpeler`** voor het afspelen: scrubslider, transportknoppen, snelheidcombo (op 4× door een half uur scannen) en zoom zitten er al in. De speler verwacht een `resultaten`-lijst (voor overlay, kader en sliderlengte); een lijst van `totaal_frames` lege `FrameResultaat`-objecten volstaat — `kader_reeks` geeft dan `None` en de automatische zoom valt terug op vaste zoom. **Eerst verifiëren** dat `laad()` daar niet over struikelt; zo niet, dan een kleine eigen speler zoals `DoelKiezer` er al een heeft.
-- **Twee knoppen + sneltoetsen**: "Start bruikbaar beeld" (`S`) en "Stop bruikbaar beeld" (`E`). Na "Stop" wordt het fragment **meteen aan de lijst toegevoegd** en zichtbaar in de balk; de knop springt terug naar "Start" voor het volgende stuk. Zolang er een start openstaat is alleen "Stop" actief (en andersom) — dan kan er geen half fragment ontstaan.
-- **Fragmentbalk** onder de tijdlijn: één widget zo breed als de slider, met per fragment een gekleurd blok op `start/totaal … eind/totaal`. Groen = zojuist gemarkeerd, grijs = in een eerdere sessie al geanalyseerd (zie hieronder), oranje = het lopende (nog niet gestopte) fragment. Klik op een blok → springt erheen en selecteert het; `Delete` gooit het weg. Dit is de enige echt nieuwe teken-code van de fase.
-- **Lijstje ernaast** met per fragment `#`, begin–eind als `m:ss`, duur, en een verwijderknop. Overlappen twee fragmenten elkaar, dan wordt dat **zichtbaar gemaakt** (het overlappende stuk in een afwijkende kleur) maar er wordt níets automatisch samengevoegd of ingekort — de trainer past het zelf aan of laat het zoals het is.
-- **Navigatiehulp**: knoppen ±1 s / ±10 s / ±1 min en een tijdinvoerveld. Op een half uur is de slider te grof om een afzet terug te vinden.
-- **Optioneel: de doelschaatser meteen hier aanwijzen** (te beslissen bij het bouwen). Wie een fragment markeert, kijkt op dat moment naar de schaatser die hij bedoelt — dat is het natuurlijke moment om hem aan te klikken, en het scheelt straks x losse `DoelKiezer`-dialogen. Technisch past dat goed bij de YOLO-backend: die verzamelt álle detecties offline en stikt vanaf het seed-tracklet **voor- én achterwaarts** (`_stik_keten`), dus een seed midden in de clip is even goed als een seed op frame 0. Nodig is dan `_kies_seed(..., doel_punt, doel_frame)` dat vanaf `doel_frame` zoekt i.p.v. vanaf 0, plus het framenummer meesturen in `instellingen_json`. De MediaPipe-backend is streaming en kan dat niet zonder verbouwing — die houdt gewoon de bestaande frame-0-route (het is de terugvalbackend). Zolang dit er niet is, blijft `DoelKiezer` op frame 0 van de clip staan — dat is precies het beeld waarop "start" werd gedrukt, want er wordt exact op de gemarkeerde frames geknipt (zie hieronder).
+- **Reuse `VideoPlayer`** for playback: the scrub slider, transport buttons, speed combo (at 4× for scanning through half an hour), and zoom are already there. The player expects a `resultaten` list (for the overlay, the box, and slider length); a list of `total_frames` empty `FrameResult` objects is enough — `box_sequence` then returns `None` and automatic zoom falls back to a fixed zoom. **Verify first** that `load()` doesn't choke on that; if it does, a small dedicated player like `TargetPicker` already has.
+- **Two buttons + shortcuts**: "Start usable footage" (`S`) and "Stop usable footage" (`E`). After "Stop" the fragment is **added to the list immediately** and shown on the bar; the button jumps back to "Start" for the next stretch. As long as a start is pending, only "Stop" is active (and vice versa) — so a half fragment can't happen.
+- **A fragment bar** under the timeline: one widget as wide as the slider, with a colored block per fragment at `start/total … end/total`. Green = just marked, gray = already analyzed in an earlier session (see below), orange = the running (not yet stopped) fragment. Clicking a block jumps to it and selects it; `Delete` removes it. This is the only genuinely new drawing code in this phase.
+- **A list alongside it** with, per fragment, `#`, start–end as `m:ss`, duration, and a delete button. If two fragments overlap, that's **made visible** (the overlapping part in a different color) but **nothing** is automatically merged or shortened — the trainer adjusts it themselves or leaves it as is.
+- **Navigation help**: ±1 s / ±10 s / ±1 min buttons and a time-entry field. On half an hour, the slider is too coarse to find a push again.
+- **Optional: pick the target skater right here** (to be decided during the build). Whoever is marking a fragment is, at that moment, looking at the skater they mean — that's the natural moment to click them, and it saves x separate `TargetPicker` dialogs later. Technically this fits the YOLO backend well: it collects all detections offline and stitches from the seed tracklet **both forward and backward** (`_stitch_chain`), so a seed in the middle of the clip is just as good as a seed at frame 0. What's needed is `_choose_seed(..., doel_punt, doel_frame)` that searches from `doel_frame` instead of from 0, plus sending the frame number along in `settings_json`. The MediaPipe backend is streaming and can't do this without rework — it just keeps the existing frame-0 route (it's the fallback backend). Until this exists, `TargetPicker` stays on frame 0 of the clip — exactly the frame "start" was pressed on, since trimming happens exactly on the marked frames (see below).
 
-### B. `knip_fragmenten()` — de clips wegschrijven
+### B. `trim_fragments()` — writing out the clips
 
-- **Eén sequentiële pass** over de bronvideo met `cv2.VideoCapture`, waarbij elk frame naar de `VideoWriter` van het fragment gaat waarin het valt. Zo wordt de video precies één keer gedecodeerd en hoeft er **nergens geseekt** te worden — de framenummering blijft exact die van de bron (zelfde motief als de eigen leeslus in `_detecteer_alles`). Voortgangsdialoog eromheen; een half uur decoderen kost enkele minuten, verwaarloosbaar naast de analyse die erop volgt.
-- **Codec**: `mp4v` (zit in de opencv-python-wheel, `avc1` is op Windows vaak niet beschikbaar). Er wordt dus **her-gecodeerd** — kwaliteitsverlies is voor pose-detectie verwaarloosbaar, maar meet het één keer: knip een bekende clip uit zichzelf en vergelijk de analyse met `python schaats_eval.py vergelijk oud.npz nieuw.npz`. Wijkt dat merkbaar af, dan is de uitweg **ffmpeg met `-c copy`** (geen hercodering, vrijwel instant) als `shutil.which("ffmpeg")` iets vindt, met de cv2-route als terugval. **Maar let op — dat botst met "geen marges":** stream-copy kan alleen op keyframes beginnen, dus het fragment valt aan de voorkant tot een GOP (~1–2 s) langer uit dan wat je markeerde. Dat is precies de stilzwijgende marge die hier niet gewenst is, en het maakt frame 0 van de clip een ander beeld dan waarop je "start" drukte — met alle gevolgen voor de doelkeuze. Daarom: **cv2 met hercodering is de default**, en ffmpeg alleen als de A/B uitwijst dat de hercodering de meting echt raakt. In dat geval is de eerlijke oplossing niet stream-copy maar ffmpeg mét hercodering van alleen de eerste GOP (`-ss` ná `-i`), of een betere codec-instelling in cv2.
-- **Schrijven naar een tijdelijke map**; `sla_analyse_op` kopieert de clip daarna zoals altijd naar `media/<uuid>/`. Dat is één extra kopie van een kort bestandje — niet de moeite om `sla_analyse_op` voor open te breken.
-- **Geen automatische marges — er wordt exact op de gemarkeerde frames geknipt** (besloten 10 augustus 2026). De trainer kijkt tijdens het markeren naar het beeld en bepaalt de grenzen zelf; het programma hoort daar niet stilzwijgend seconden bij of af te halen. Twee dingen die daarbij goed zijn om te weten, maar géén reden voor automatiek:
-  - Aan de **voorkant** valt sowieso niets te winnen: een stand-run die aan het begin is afgekapt telt gewoon mee (`bepaal_afzet_uit_strek`, `run['afgekapt']`) — daar mist alleen de load-fase, terwijl de push-voltooiing, waar de hoek uit komt, wél in beeld is. Bovendien zou lucht aan de voorkant de doelkeuze juist moeilijker maken: `DoelKiezer` krijgt **frame 0 van de clip** (`_lees_eerste_frame(pad)` in `_nieuwe_batch_analyse`) en `_kies_seed` zoekt het klikpunt in de eerste `KLIK_ZOEK_S` (6) seconden — sinds 26 augustus 2026, want met de oude 60 frames miste de klik een schaatser die pas na 3,4 s gedetecteerd werd — dus hoe verder de schaatser daar weg staat, hoe groter de kans op een misser, en bij een misser volgt de analyse de grootste beweger mét melding. Zo is frame 0 precies het beeld waarop "start" werd gedrukt.
-  - Aan de **achterkant** eindigt de laatste stand-run op het clip-einde in plaats van op een beenwissel; die afzet krijgt `ONV_AFGEKAPT`, blijft grijs zichtbaar in de tabel maar valt buiten gem/min/max. Wil je die laatste afzet meetellen, dan druk je op "stop" ná de beenwissel — een keuze die de trainer bij het kijken maakt, niet het programma.
+- **One sequential pass** over the source video with `cv2.VideoCapture`, sending each frame to the `VideoWriter` of the fragment it falls into. That way the video is decoded exactly once and there's **no seeking anywhere** — the frame numbering stays exactly that of the source (same motive as the dedicated read loop in `_detect_all`). A progress dialog around it; decoding half an hour costs a few minutes, negligible next to the analysis that follows.
+- **Codec**: `mp4v` (ships in the opencv-python wheel; `avc1` is often unavailable on Windows). So this **does recode** — a quality loss that's negligible for pose detection, but measure it once: trim a known clip from itself and compare the analysis with `python skate_eval.py compare old.npz new.npz`. If that deviates noticeably, the way out is **ffmpeg with `-c copy`** (no recoding, essentially instant) if `shutil.which("ffmpeg")` finds something, with the cv2 route as a fallback. **But note — that clashes with "no margins":** stream copy can only start on keyframes, so the fragment ends up longer at the front by a GOP (~1–2 s) than what was marked. That's exactly the silent margin that isn't wanted here, and it makes frame 0 of the clip a different image than the one "start" was pressed on — with consequences for target selection. So: **cv2 with recoding is the default**, and ffmpeg only if the A/B shows recoding genuinely affects the measurement. In that case the honest fix isn't stream copy but ffmpeg **with** recoding of just the first GOP (`-ss` after `-i`), or a better codec setting in cv2.
+- **Write to a temporary folder**; `save_analysis` then copies the clip as always to `media/<uuid>/`. That's one extra copy of a short file — not worth opening up `save_analysis` for.
+- **No automatic margins — trimming happens exactly on the marked frames** (decided 10 August 2026). The trainer watches the footage while marking and decides the boundaries themselves; the program has no business silently adding or removing seconds. Two things worth knowing here, but no reason for automation:
+  - There's nothing to gain at the **front** anyway: a stance run truncated at the start still counts (`determine_push_from_extension`, `run['afgekapt']`) — only the load phase is missing there, while the push completion the angle comes from is in frame. Air at the front would also make target selection harder: `TargetPicker` gets **frame 0 of the clip** (`_read_first_frame(pad)` in `_new_batch_analysis`) and `_choose_seed` looks for the click point in the first `CLICK_SEARCH_S` (6) seconds — since 26 August 2026, since with the old 60 frames the click missed a skater who wasn't detected until 3.4 s in — so the further away the skater stands there, the greater the odds of a miss, and on a miss the analysis follows the largest mover with a warning. That's how frame 0 ends up being exactly the frame "start" was pressed on.
+  - At the **back**, the last stance run ends at the clip's end instead of on a leg switch; that push gets `INCOMPLETE_TRUNCATED`, stays visible gray in the table but falls outside avg/min/max. If you want that last push counted, press "stop" after the leg switch — a choice the trainer makes while watching, not the program.
 
-### De opnames zelf in de bibliotheek: `bronvideo` (schema v3)
+### The recordings themselves in the library: `bronvideo` (schema v3)
 
-> **Besloten 11 augustus 2026.** De database kent nu alleen geanalyseerde clips. Er hoort ook een plek te zijn voor de **nog niet geanalyseerde opnames** — die map bestaat al en staat, net als de bibliotheek, **in de gedeelde Google Drive**. Daarmee is "wat moet er nog geknipt worden" geen persoonlijk lijstje maar een **werklijst voor het team**, en dát is wat de schemabump rechtvaardigt: hij levert niet alleen de grijze blokken in het knipvenster op, maar ook een overzicht van openstaand werk.
+> **Decided 11 August 2026.** The database currently only knows analyzed clips. There should also be a place for the **not-yet-analyzed recordings** — that folder already exists and, like the library, sits **in the shared Google Drive**. That makes "what still needs trimming" not a personal list but a **work list for the team**, and that's what justifies the schema bump: it delivers not just the gray blocks in the trim window, but also an overview of outstanding work.
 
-**De ontwerpregel: de map is de waarheid over wélke bestanden er zijn, de database over wat wij ervan weten.** De bestandslijst wordt bij het openen van schijf gescand, niet uit de DB gelezen — anders loopt de DB scheef zodra iemand een bestand hernoemt of weggooit en zit je aan opruimwerk vast. In de DB staat alleen wat je nooit van schijf kunt aflezen: status, aantekening, en welke analyses uit welk stuk van welke opname komen.
+**The design rule: the folder is the truth about which files exist, the database about what we know of them.** The file list is scanned from disk on open, not read from the DB — otherwise the DB would drift the moment someone renames or deletes a file, and you'd be stuck cleaning up after it. The DB only holds what you can never read off disk: status, a note, and which analyses came from which stretch of which recording.
 
-**Waar de opnames staan:** `<bibliotheek>/opnames/`, dus **binnen** de bibliotheekmap. Dan blijven alle paden relatief met forward slashes (de fase 1-discipline) en is er géén extra pad-instelling per trainer nodig. Staat de map er niet, dan maakt de app hem aan.
+**Where recordings live:** `<library>/opnames/`, i.e. **inside** the library folder. That way every path stays relative with forward slashes (the phase 1 discipline) and no extra per-trainer path setting is needed. If the folder doesn't exist, the app creates it.
 
-**Schema `user_version=3`** — één nieuwe tabel plus drie kolommen, allebei cloud-veilig via het bestaande `_migreer`-patroon (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN`, zoals bij v1→v2):
+**Schema `user_version=3`** — one new table plus three columns, both cloud-safe via the existing `_migrate` pattern (`CREATE TABLE IF NOT EXISTS` + `ALTER TABLE ADD COLUMN`, as in v1→v2):
 
 ```sql
-bronvideo(id INTEGER PRIMARY KEY,
-          bestand,            -- relatief pad binnen de bibliotheek (opnames/…)
-          naam, bytes,        -- identiteit: UNIQUE(naam, bytes)
-          fps, totaal_frames, -- één keer uitgelezen, scheelt elke keer openen
-          status,             -- 'nog doen' | 'bezig' | 'klaar' | 'onbruikbaar'
-          notitie,            -- vrije tekst ("training 3 aug, tempo-serie")
-          bijgewerkt_door, toegevoegd_op)
+source_video(id INTEGER PRIMARY KEY,
+          file,               -- relative path within the library (opnames/…)
+          name, bytes,        -- identity: UNIQUE(name, bytes)
+          fps, total_frames,  -- read once, saves reopening every time
+          status,             -- 'todo' | 'in_progress' | 'done' | 'unusable'
+          note,               -- free text ("training 3 aug, tempo series")
+          updated_by, added_at)
 
-analyse … + bron_id, bron_start_frame, bron_eind_frame   -- NULL bij een losse clip
+analysis … + source_id, source_start_frame, source_end_frame   -- NULL for a loose clip
 ```
 
-- **Identiteit = het relatieve pad** (`opnames/<bestandsnaam>`), `UNIQUE(bestand)`. Eén map kan geen twee bestanden met dezelfde naam bevatten, en omdat de map ín de bibliotheek zit is dat pad bij elke trainer hetzelfde — precies waarom de fase 1-discipline (alles relatief, forward slashes) hier zijn rente oplevert. Een hernoemd bestand geldt als nieuw; de oude rij blijft met zijn analyses bestaan en wordt getoond als "bestand niet gevonden".
-- **`bytes` is géén identiteit, alleen de sync-check.** Dat onderscheid is wezenlijk: een opname die bij een collega nog binnenkomt, is op dat moment *kleiner* dan wat er in de DB staat. Zat de grootte in de sleutel, dan zag de scan een half gedownload bestand aan voor een nieuwe opname en kwam er een tweede rij bij — een rommelige lijst en verdwenen fragmentgeschiedenis, precies wanneer je die nodig hebt.
-- **Oude analyses houden `bron_id` NULL** — dat klopt ook: die kwamen van een losse clip, niet uit een opname. Nergens een migratie die iets moet raden.
-- **`synchroniseer_bronmap(bieb)`** scant `opnames/`, voegt nieuwe bestanden toe met `INSERT OR IGNORE` (twee trainers die tegelijk dezelfde nieuwe opname zien botsen dan niet) en laat rijen van verdwenen bestanden staan. Draait bij het openen van de bibliotheek en bij "Vernieuwen" (fase 4-knop, doet dit er gewoon bij). **Schrijft alleen als er echt iets nieuws is** — anders zou elke app-start van elke trainer de gedeelde DB aanraken, en die hoort volgens de fase 4-discipline zo veel mogelijk in rust te zijn voor de syncer.
-- **De status zet je zelf.** Er wordt niets automatisch op "klaar" gezet als alle fragmenten geanalyseerd zijn: het programma kan niet weten of jij de opname af vindt. Het toont de telling (`3 fragmenten · 2 analyses`), jij zet de status. Zelfde lijn als de rest van deze fase.
+- **Identity = the relative path** (`opnames/<filename>`), `UNIQUE(file)`. One folder can't hold two files with the same name, and because the folder sits inside the library, that path is the same on every trainer's machine — exactly why the phase 1 discipline (everything relative, forward slashes) pays off here. A renamed file counts as new; the old row stays with its analyses and shows as "file not found".
+- **`bytes` is not identity, only the sync check.** That distinction matters: a recording still coming in from a colleague is, at that moment, *smaller* than what's in the DB. If the size were part of the key, the scan would take a half-downloaded file for a new recording and add a second row — a messy list and lost fragment history, exactly when you need it most.
+- **Old analyses keep `source_id` NULL** — which is also correct: they came from a loose clip, not from a recording. No migration has to guess anything.
+- **`sync_source_dir(bieb)`** scans `opnames/`, adds new files with `INSERT OR IGNORE` (two trainers spotting the same new recording at once don't collide) and leaves rows for vanished files in place. Runs when the library opens and on "Refresh" (the phase 4 button, which just does this too). **Only writes when there's genuinely something new** — otherwise every app start by every trainer would touch the shared DB, and per the phase 4 discipline it should stay at rest as much as possible for the syncer.
+- **You set the status yourself.** Nothing gets automatically set to "done" once every fragment is analyzed: the program can't know whether you consider the recording finished. It shows the count (`3 fragments · 2 analyses`), you set the status. Same principle as the rest of this phase.
 
-**Sync-status, nu écht nodig.** Google Drive Mirror zet alle bestanden lokaal, maar een opname van een half uur in 4K is minutenlang onderweg. De `video_bytes`-truc uit fase 4 werkt hier één op één: de trainer die de opname als eerste toevoegt legt `bytes` vast, en bij een collega wiens lokale bestand kleiner is, is de download nog bezig. `video_sync_status()` kan daar ongewijzigd voor gebruikt worden — melden en niet openen, in plaats van het knipvenster op een half bestand laten stuklopen.
+**Sync status, now genuinely needed.** Google Drive Mirror puts every file locally, but a half-hour 4K recording takes minutes to arrive. The `video_bytes` trick from phase 4 works here one-to-one: the trainer who adds the recording first records `bytes`, and if a colleague's local file is smaller, the download is still in progress. `video_sync_status()` can be reused unchanged for this — reporting and not opening, instead of letting the trim window crash on a half file.
 
-**Wat de GUI ermee doet:** de startpagina krijgt naast de schaatserslijst een **tweede weergave "Opnames"** (tabblad of knop): bestandsnaam, duur, status, notitie, en per opname `3 fragmenten · 2 analyses`. Dubbelklik → de `FragmentKiezer`. Status en notitie zijn ter plekke te wijzigen; `bijgewerkt_door` erbij, zodat zichtbaar is wie een opname op "klaar" zette — hetzelfde motief als `aangemaakt_door` bij een analyse.
+**What the GUI does with it:** the start page gets a **second view "Recordings"** (tab or button) next to the skater list: filename, duration, status, note, and per recording `3 fragments · 2 analyses`. Double-click → the `FragmentPicker`. Status and note are editable in place; `bijgewerkt_door` alongside, so it's visible who marked a recording "done" — the same motive as `created_by` on an analysis.
 
-**En het levert de grijze blokken:** met `bron_id` + `bron_start_frame`/`bron_eind_frame` op de analyse is "welke stukken van deze opname zijn al gedaan" één query in plaats van een scan door alle `instellingen_json`-velden. Het knipvenster tekent ze grijs, en je ziet bij het heropenen van dezelfde opname meteen waar je gebleven was. Bijvangst voor fase 2: analyses uit dezelfde training zijn voortaan als zodanig herkenbaar.
+**And it delivers the gray blocks:** with `source_id` + `source_start_frame`/`source_end_frame` on the analysis, "which stretches of this recording are already done" is one query instead of a scan through every `settings_json` field. The trim window draws them gray, and reopening the same recording immediately shows where you left off. Bonus for phase 2: analyses from the same training session become recognizable as such.
 
-### Valkuilen
+### Pitfalls
 
-- **Achteruit scrubben op een half uur is nu onwerkbaar.** `VideoSpeler._lees_frame_exact` seekt bewust nooit (VFR-video's geven een frame-onnauwkeurige seek) en spoelt bij een sprong terug de video vanaf frame 0 opnieuw door. Op een clip van 10 s is dat niets, op 50.000 frames is het onbruikbaar. **Dit is de enige echte blokkade van deze fase** en de oplossing is dat het knipvenster een ándere afweging maakt dan de weergavepagina: hier is het beeld een **kijkje, geen meting**, dus een `CAP_PROP_POS_FRAMES`-seek mag. Bouw dat als een expliciete vlag op de speler (bv. `snel_zoeken=True`) zodat de weergavepagina onaangeraakt blijft, en herstel na de seek de interne cursor (`_weergave_pos`) zodat vooruit afspelen daarna weer klopt.
+- **Scrubbing backward on half an hour is currently unworkable.** `VideoPlayer._read_frame_exact` deliberately never seeks (VFR videos give a frame-inaccurate seek) and, on a backward jump, rewinds the video from frame 0 and replays. On a 10 s clip that's nothing, on 50,000 frames it's unusable. **This is the only real blocker of this phase**, and the fix is that the trim window makes a different trade-off than the view page: here the footage is a **look, not a measurement**, so a `CAP_PROP_POS_FRAMES` seek is allowed. Build that as an explicit flag on the player (e.g. `fast_seek=True`) so the view page stays untouched, and restore the internal cursor (`_display_pos`) after the seek so forward playback is correct again afterward.
 
-  **Wat dat kost:** op een VFR-bron kan het getoonde beeld enkele frames afwijken van het gerapporteerde nummer, dus de knip komt maximaal een paar frames naast het beeld waarop je drukte. Voor een grens die je met het oog bepaalt is dat onzichtbaar (~0,1 s) — en het alternatief, nooit seeken, maakt het doorbladeren van een half uur onmogelijk. Het fragment zelf blijft wél exact: `knip_fragmenten()` telt sequentieel vanaf frame 0, dus binnen de clip loopt niets uit de pas. Meet één keer op een iPhone-.MOV hoe groot de afwijking in de praktijk is.
-- **VFR-bronnen**: de fragmenten worden met de gerapporteerde `info.fps` weggeschreven. De hele app rekent al met constante fps, dus dit is geen nieuwe afwijking — wel het noteren waard, want op een half uur loopt een VFR-drift verder op dan op 10 s.
-- **`_lees_eerste_frame` + `DoelKiezer` per fragment** werken ongewijzigd zodra elk fragment een echt bestand is; ze lezen simpelweg frame 0 van die clip. Dat is meteen het argument om écht te knippen in plaats van frameranges door de pijplijn te sluizen.
+  **What that costs:** on a VFR source, the shown frame can differ by a few frames from the reported number, so the trim lands at most a few frames from the picture you pressed on. For a boundary picked by eye that's invisible (~0.1 s) — and the alternative, never seeking, makes browsing half an hour impossible. The fragment itself stays exact: `trim_fragments()` counts sequentially from frame 0, so nothing drifts inside the clip. Measure once on an iPhone .MOV how big the deviation is in practice.
+- **VFR sources**: fragments are written out using the reported `info.fps`. The whole app already computes with constant fps, so this isn't a new deviation — worth noting anyway, since a VFR drift runs further on half an hour than on 10 s.
+- **`_read_first_frame` + `TargetPicker` per fragment** work unchanged once every fragment is a real file; they simply read frame 0 of that clip. That's the very argument for genuinely trimming instead of piping frame ranges through the pipeline.
 
-### Bewust overwogen en niet gekozen
+### Deliberately considered and not chosen
 
-- **Niet knippen, maar analyses naar de bronvideo + framerange laten wijzen.** Verleidelijk nu de opname toch al in de bibliotheek staat: nul extra bytes, geen hercodering. Toch niet doen, en de reden is de **weergave**, niet de opslag. `VideoSpeler._lees_frame_exact` seekt bewust nooit en spoelt sequentieel; een analyse die begint op frame 40.000 van de bronvideo zou bij elke opening en bij elke sprong terug een half uur video moeten doorspoelen. Daar bovenop breekt het `media/<uuid>/` als eenheid: de cascade bij verwijderen (een analyse wissen mag de opname van vijf andere analyses niet meenemen), `video_bytes`, de sync-melding, de duurkolom en de vergelijkpagina rekenen er allemaal op dat één analyse één eigen videobestand heeft. De extra opslag valt bovendien mee: de fragmenten samen zijn een fractie van de opname waar ze uit komen.
-- **Automatisch bruikbare stukken voorstellen** (een goedkope detectiepass die "frontale schaatser in beeld" zoekt — de `_BochtWacht`-machinerie doet feitelijk al zo'n classificatie): **afgewezen, en niet "voor later"**. De gevraagde functie is een knipprogramma; de trainer ziet zelf prima wat bruikbaar is en wil daar geen voorstel van de computer overheen. Bovendien zou zo'n voorpass precies de detectietijd kosten die deze fase juist bespaart. Als dit ooit terugkomt, dan als een apart idee met een eigen aanleiding — niet als onderdeel van fase 8.
+- **Not trimming, but pointing analyses at the source recording + a frame range.** Tempting now that the recording is already in the library: zero extra bytes, no recoding. Still not done, and the reason is **display**, not storage. `VideoPlayer._read_frame_exact` deliberately never seeks and rewinds sequentially; an analysis starting at frame 40,000 of the source recording would have to scan through half an hour of video on every open and every jump back. On top of that it breaks `media/<uuid>/` as a unit: cascading delete (deleting one analysis mustn't take five other analyses' recording with it), `video_bytes`, the sync message, the duration column, and the compare page all rely on one analysis having one video file of its own. The extra storage is minor anyway: the fragments together are a fraction of the recording they came from.
+- **Automatically suggesting usable stretches** (a cheap detection pass that looks for "frontal skater in frame" — the `_CornerGuard` machinery effectively already does this classification): **rejected, and not "for later".** The requested feature is a trimming tool; the trainer sees perfectly well what's usable and doesn't want a computer's suggestion laid over it. Such a pre-pass would also cost exactly the detection time this phase is meant to save. If this ever comes back, it should be a separate idea with its own motivation — not part of phase 8.
 
-**Klaar wanneer:** een opname van een half uur in `opnames/` zetten, hem in de nieuwe opnameslijst zien staan als "nog doen", daarin bijvoorbeeld zes bruikbare stukken markeren, op "Klaar" drukken en zonder verder handwerk zes analyses in de bibliotheek terugvinden — en bij het opnieuw openen van diezelfde opname zien welke stukken al gedaan zijn, ook op de pc van een collega.
+**Done when:** dropping a half-hour recording into `opnames/`, seeing it show up in the new recordings list as "todo", marking say six usable stretches in it, pressing "Done", and finding six analyses in the library without any further manual work — and, on reopening that same recording, seeing which stretches are already done, even on a colleague's PC.
 
-**Omvang:** 2 sessies, in twee losse stukken te bouwen. (a) Schema v3 + `synchroniseer_bronmap` + de opnameslijst op de startpagina — dat is `schaats_db`-werk met een zelftest-uitbreiding en staat op zichzelf. (b) Het knipvenster + `knip_fragmenten()` + de aansluiting op `BatchAnalyseDialog`; de fragmentbalk en het snel-zoeken zijn daar het echte werk, de rest is bestaande onderdelen aan elkaar knopen.
+**Scope:** 2 sessions, built in two separate pieces. (a) Schema v3 + `sync_source_dir` + the recordings list on the start page — that's `skate_db` work with a self-test extension and stands on its own. (b) The trim window + `trim_fragments()` + the hookup to `BatchAnalysisDialog`; the fragment bar and fast seeking are the real work there, the rest is wiring existing pieces together.
 
 ---
 
-## Losse eindjes in de doelkeuze (open, gevonden 26 augustus 2026)
+## Loose ends in target selection (open, found 26 August 2026)
 
-Beide kwamen boven water bij het repareren van de doelklik (`KLIK_ZOEK_S`, zie de fix in
-BUGS.md C2). Geen van beide is toen aangepakt: ze vielen buiten die vraag en verdienen een
-eigen A/B.
+Both surfaced while fixing the target click (`CLICK_SEARCH_S`, see the fix in
+BUGS.md C2). Neither was addressed at the time: they fell outside that question and
+deserve their own A/B.
 
-### 1. De stitch-poort groeit tot bijna de hele beeldbreedte
+### 1. The stitch gate grows to almost the whole frame width
 
-`_stik_keten` laat zijn afstandspoort lineair meegroeien met het gat
-(`STITCH_GATE_BASIS` + `STITCH_GATE_GROEI`·gat). Bij een gat dat net onder
-`STITCH_MAX_GAP_S` (2,0 s) blijft is dat **0,06 + 0,015 × 49 = 0,795** — op een
-genormaliseerd beeld van 1,0 breed is er dan feitelijk geen positie-eis meer over, en houdt
-alleen de kleurpoort nog iets tegen.
+`_stitch_chain` lets its distance gate grow linearly with the gap
+(`STITCH_GATE_BASIS` + `STITCH_GATE_GROWTH`·gap). At a gap just under
+`STITCH_MAX_GAP_S` (2.0 s), that's **0.06 + 0.015 × 49 = 0.795** — on a
+normalized frame 1.0 wide there's effectively no positional requirement left, and
+only the color gate still holds anything back.
 
-**Gemeten op `00005 8-41`** (offline replay op een gedumpte detectiepass): de keten begint
-met de frames 27 en 35 van ByteTrack-ID 16 op x ≈ 0,865, en plakt die over een gat van 49
-frames (1,96 s) aan de doelschaatser die op frame 84 op x = 0,378 staat — een werkelijke
-sprong van **0,490**, ruim binnen die poort van 0,795. Dat het om twee verschillende
-personen gaat is hard te maken zonder naar het beeld te kijken: **datzelfde ID 16 is in de
-frames 43–119 aantoonbaar ergens anders**, namelijk op x = 0,871 → 0,963 met een gestaag
-groeiende bbox (area 0,0136 → 0,0294). De keten beweert dus dat één persoon tegelijk links
-en rechts in beeld is. Dat de kleurpoort hem doorliet komt doordat `_splits_op_kleur` ID 16
-zelf al in tweeën had geknipt (27–35 tegen 43–136) — de kop was dus qua pakkleur niet meer
-dezelfde als de rest van dat ID.
+**Measured on `00005 8-41`** (an offline replay on a dumped detection pass): the chain
+starts with frames 27 and 35 of ByteTrack ID 16 at x ≈ 0.865, and glues that across a
+gap of 49 frames (1.96 s) onto the target skater standing at frame 84 at x = 0.378 — an
+actual jump of **0.490**, comfortably inside that gate of 0.795. That this is two
+different people can be shown without even looking at the footage: **that same ID 16
+is demonstrably somewhere else in frames 43–119**, namely at x = 0.871 → 0.963 with a
+steadily growing bbox (area 0.0136 → 0.0294). The chain thus claims one person is in
+two places in frame at once. That the color gate let it through is because
+`_split_by_color` had already cut ID 16 itself in two (27–35 vs. 43–136) — the head
+was, by suit color, no longer the same as the rest of that ID.
 
-**De schade was hier nul**: beide frames vallen in de bocht, dus ze leveren geen `lm_data`
-en geen meting op. Dat is geluk van deze clip. In een fragment zonder bocht zet zo'n kop
-meteen aan het begin een skelet op de verkeerde persoon, en dat is precies een plek waar de
-eerste stand-run begint.
+**The damage here was zero**: both frames fall in the corner, so they produce no
+`lm_data` and no measurement. That's this clip's luck. In a fragment without a corner,
+such a head would put a skeleton on the wrong person right at the start — precisely
+where the first stance run begins.
 
-**Richtingen** (nog niets van gekozen): een **plafond** op de poort, zoals de MediaPipe-
-tracker dat met `TRACK_GATE_MAX` al doet; of de groei koppelen aan de **voorspelde
-verplaatsing** in plaats van lineair aan het aantal frames; of de kleureis strenger maken
-naarmate het gat groeit. Let op dat dit de spiegeling is van de nearest-first-regel die in
-`_stik_keten` al zit: die koos bewust het kleinste gat omdat een verre sprong te veel
-vrijheid geeft — hier krijgt diezelfde verre sprong die vrijheid alsnog via de poort.
+**Directions** (nothing chosen yet): a **ceiling** on the gate, the way the MediaPipe
+tracker already does with `TRACK_GATE_MAX`; or coupling the growth to the **predicted
+displacement** instead of linearly to the frame count; or tightening the color
+requirement as the gap grows. Note that this mirrors the nearest-first rule already in
+`_stitch_chain`: that rule deliberately chose the smallest gap because a long jump
+allows too much freedom — here that same long jump gets that freedom back through the
+gate.
 
-**Omvang**: klein qua code, maar de A/B is het werk — dit raakt elke bestaande analyse, dus
-meten op meerdere clips (dekking, events, L-R-alternantie, botlengte-CV) vóór en ná, met
-`schaats_eval.py vergelijk`.
+**Scope**: small in code, but the A/B is the real work — this touches every existing
+analysis, so measure on several clips (coverage, events, L-R alternation, bone-length
+CV) before and after, with `skate_eval.py compare`.
 
-### 2. De MediaPipe-backend kent het klik-zoekmechanisme niet
+### 2. The MediaPipe backend has no click-search mechanism
 
-`DoelTracker._seed` (in `schaats_analyse.py`) pakt bij een muisklik de pose die het dichtst
-bij het klikpunt ligt in het **eerste frame waarin überhaupt iemand gedetecteerd is** —
-zonder afstandspoort, zonder zoekvenster en zonder melding. Een klik "lukt" daar dus altijd,
-desnoods op een omstander tien meter verderop, en de gebruiker hoort er niets over. De
-YOLO-backend heeft sinds 26 augustus 2026 wél een venster (`KLIK_ZOEK_S`), een poort
-(`KLIK_POORT_BASIS`/`_GROEI`) en een waarschuwing.
+`TargetTracker._seed` (in `skate_analysis.py`) takes, on a mouse click, the pose
+closest to the click point in the **first frame with any detection at all** — no
+distance gate, no search window, and no warning. A click there therefore always
+"succeeds", even on a bystander ten meters away, and the user hears nothing about it.
+The YOLO backend has, since 26 August 2026, a window (`CLICK_SEARCH_S`), a gate
+(`CLICK_GATE_BASE`/`_GROWTH`), and a warning.
 
-**Lage prioriteit**, want deze backend wordt in de praktijk niet gebruikt: de GUI kiest YOLO
-zodra torch/ultralytics er is (`IS_YOLO`) en in de gebundelde app zit MediaPipe niet eens.
-Het blijft de terugval voor een omgeving zonder torch, dus wegwerken hoeft niet — weten dat
-het verschil er is wel, want een analyse uit die backend is dan op een ander doel gebaseerd
-dan de trainer aanwees.
+**Low priority**, since this backend isn't used in practice: the GUI picks YOLO as
+soon as torch/ultralytics is present (`IS_YOLO`), and the bundled app doesn't even
+include MediaPipe. It stays the fallback for an environment without torch, so fixing
+it isn't urgent — but knowing the difference is there matters, since an analysis from
+that backend would then be based on a different target than the one the trainer
+pointed at.
 
-**Omvang**: klein (dezelfde poort/venster-logica in `_seed`), maar zonder testmateriaal in
-die venv is er weinig te valideren.
+**Scope**: small (the same gate/window logic in `_seed`), but with no test material in
+that venv there's little to validate.
 
-## Idee — OpenCV-filters als controle op het neurale net (nog niet uitgewerkt, geopperd 1 september 2026)
+## Idea — OpenCV filters as a check on the neural net (not yet worked out, raised 1 September 2026)
 
-Geopperd naar aanleiding van de vraag of de tool klassieke CV-filters (Canny, achtergrond-
-subtractie/silhouet) gebruikt om de schaatser te *vinden* — dat is nu niet zo (zie CLAUDE.md:
-Canny wordt alleen voor de ijslijn/horizon gebruikt, kleurhistogrammen alleen voor doelkeuze/
-tracking en de `middellijn_dev`-kwaliteitsvlag). Het idee hier is anders: niet het net
-vervangen door een filter, maar een filter **ernaast** zetten als onafhankelijke controle op
-wat het net teruggeeft.
+Raised in response to the question of whether the tool uses classic CV filters (Canny,
+background subtraction/silhouette) to *find* the skater — it currently doesn't (see
+CLAUDE.md: Canny is only used for the ice line/horizon, color histograms only for
+target selection/tracking and the `midline_dev` quality flag). The idea here is
+different: not replacing the net with a filter, but putting a filter **alongside** it
+as an independent check on what the net returns.
 
-**Wat dat zou kunnen zijn:**
-- Een silhouet-/achtergrondmasker (bv. `cv2.createBackgroundSubtractorMOG2`/KNN, of simpel
-  frame-differencing) rond de gerapporteerde bbox: klopt die met een bewegend object, of
-  staat hij op stilstaand ijs/boarding? Zou vroeg een foute doelkeuze of een tracker die op
-  een omstander is gesprongen kunnen signaleren, náást de bestaande kleurpoort
-  (`KLEUR_MATCH_MIN`/`KLEUR_SPLIT_MIN` in `schaats_yolo.py`).
-- Een randendetectie (Canny/contour) om te toetsen of een been-keypoint op een echte
-  rand/contour valt i.p.v. in de lucht — vergelijkbaar met wat `_middellijn_afwijking` al met
-  kleur-backprojection doet voor de knie, maar dan als generieke rand-toets in plaats van
-  kleur-specifiek.
-- Zou als **extra kwaliteitsvlag** naast bestaande signalen kunnen dienen (`middellijn_dev`,
-  de kleurpoorten, de RTMPose-keypointscore) — niet om automatisch te corrigeren, net zoals
-  `_middellijn_afwijking` nu ook alleen meet en niet corrigeert.
+**What that could look like:**
+- A silhouette/background mask (e.g. `cv2.createBackgroundSubtractorMOG2`/KNN, or
+  simple frame differencing) around the reported bbox: does it match a moving object,
+  or does it sit on stationary ice/boarding? Could flag an early wrong target choice or
+  a tracker that jumped onto a bystander, alongside the existing color gate
+  (`COLOR_MATCH_MIN`/`COLOR_SPLIT_MIN` in `skate_yolo.py`).
+- Edge detection (Canny/contour) to check whether a leg keypoint lands on a real
+  edge/contour rather than in thin air — similar to what `_midline_deviation` already
+  does with color backprojection for the knee, but as a generic edge check instead of
+  color-specific.
+- Could serve as an **extra quality flag** alongside existing signals (`midline_dev`,
+  the color gates, the RTMPose keypoint score) — not to auto-correct, the same way
+  `_midline_deviation` currently only measures and doesn't correct.
 
-**Wat dit kansrijker maakt sinds juli 2026:** de vaste aanname **frontaal + horizontale
-camera** (zie bovenaan dit document) betekent meestal ook een vaste camerapositie per clip —
-de achtergrond (ijs, boarding, publiek) verandert dan alleen door de bewegende schaatser(s),
-wat achtergrondsubtractie/frame-differencing een stuk betrouwbaarder maakt dan bij een
-pannende camera.
+**What makes this more promising since July 2026:** the fixed **frontal + horizontal
+camera** assumption (see the top of this document) usually also means a fixed camera
+position per clip — the background (ice, boarding, audience) then only changes because
+of the moving skater(s), which makes background subtraction/frame differencing a good
+deal more reliable than with a panning camera.
 
-**Nog volledig open:**
-- Geen enkele meting — dit is puur een richting, geen ontwerp. Eerst zou moeten blijken óf
-  zo'n filter iets signaleert wat de bestaande kleur-/scoresignalen nog niet doen (bv. op de
-  clips uit "Losse eindjes in de doelkeuze" hierboven, waar de kleurpoort een foute
-  doelkeuze doorliet).
-- Welke OpenCV-techniek (MOG2/KNN/frame-diff/Canny-contour) en op welk niveau
-  (bbox-plausibiliteit? los keypoint? heel frame?) — te kiezen ná een eerste proef, niet
-  vooraf.
-- Zoals bij elke wijziging aan de meting: pas invoeren na een A/B met `schaats_eval.py`
-  (dekking, events, botlengte-CV, gouden referentie) — een controlefilter dat zelf ruis
-  toevoegt is erger dan geen controle.
-- **Prioriteit: laag** t.o.v. fase 2 (de eerstvolgende geplande stap, zie bovenaan dit
-  document) — dit is een aantekening voor later, geen geplande fase.
+**Still fully open:**
+- No measurement at all — this is purely a direction, not a design. It would first
+  need to show that such a filter signals something the existing color/score signals
+  don't already catch (e.g. on the clips from "Loose ends in target selection" above,
+  where the color gate let a wrong target choice through).
+- Which OpenCV technique (MOG2/KNN/frame-diff/Canny-contour) and at what level
+  (bbox plausibility? a single keypoint? the whole frame?) — to be chosen after a
+  first trial, not up front.
+- As with any change to the measurement: only introduce after an A/B with
+  `skate_eval.py` (coverage, events, bone-length CV, golden reference) — a control
+  filter that adds its own noise is worse than no control at all.
+- **Priority: low** relative to phase 2 (the next planned step, see the top of this
+  document) — this is a note for later, not a planned phase.
 
-## Volgorde & omvang (grove inschatting)
+## Order & scope (rough estimate)
 
-| Fase | Wat | Omvang |
+| Phase | What | Scope |
 |---|---|---|
-| 0 | Serialisatie (`npz` + plain landmarks) | ✅ **af** (16 jul 2026) |
-| 1 | `schaats_db.py` + bibliotheek-GUI + nieuwe-analyse-flow | ✅ **af** (18 jul 2026) |
-| 2 | Voortgangsgrafiek, notities, export | klein, 1 sessie — *pas ná de analyse* (zie fase 2) |
-| — | Batch-analyse (extra, buiten de fasering) | ✅ **af** (20 jul 2026) |
-| — | Vergelijk schaatsers + `VideoSpeler`-refactor (extra) | ✅ **af** (27 jul 2026) |
-| — | Bochtdetectie: bocht niet meer analyseren (extra) | ✅ **af** (5 aug 2026) |
-| — | Appversie per analyse + info-dialoog (extra) | ✅ **af** (6 aug 2026) |
-| 3 | Skelet-editor met uitvloeien + undo | ✅ **af** (20 jul 2026; skelet plaatsen op gat-frames 31 jul 2026) |
-| 4 | Instellingen, gedeelde map, conflictafhandeling | ✅ **af** (20 jul 2026) |
-| 5 | Horizon via twee getrackte punten | *nice-to-have (niet nu — horizontale camera)*; middelgroot, 1–2 sessies (stap 4, punt-overdracht, is het meeste werk) |
-| 6 | Sneller analyseren | **stap 3 (lichter pass-1-model) eerst** — 1 sessie incl. A/B tegen de gouden referentie; export/DirectML apart experiment. Stappen 1/2/6 zijn randwerk (zie de meting in fase 6) |
-| 7 | Perspectiefcorrectie via baanlijnen | *nice-to-have (niet nu — frontale, horizontale camera)*; groot, 2–3 sessies (stap 3, de 3D-reconstructie, is onderzoekswerk — eerst valideren op testmateriaal) |
-| 8 | Fragmenten knippen in de app + `bronvideo`/opnames in de bibliotheek | ✅ **af** (11 aug 2026) |
-| — | Losse eindjes in de doelkeuze (stitch-poort, MediaPipe-klik) | **open** — code klein, de A/B is het werk; zie de eigen sectie hierboven |
-| — | Kleine schaatser volgen vanaf een getekend kader (kijkglas) | ✅ **af** (11 sep 2026) — zie de eigen sectie hierboven |
-| — | OpenCV-filters als controle op het neurale net (idee) | **open, ongepland** — nog geen ontwerp, lage prioriteit; zie de eigen sectie hierboven |
+| 0 | Serialization (`npz` + plain landmarks) | ✅ **done** (16 Jul 2026) |
+| 1 | `skate_db.py` + library GUI + new-analysis flow | ✅ **done** (18 Jul 2026) |
+| 2 | Progress graph, notes, export | small, 1 session — *only after the analysis is done* (see phase 2) |
+| — | Batch analysis (extra, outside the phasing) | ✅ **done** (20 Jul 2026) |
+| — | Compare skaters + `VideoPlayer` refactor (extra) | ✅ **done** (27 Jul 2026) |
+| — | Corner detection: no longer analyzing the corner (extra) | ✅ **done** (5 Aug 2026) |
+| — | App version per analysis + info dialog (extra) | ✅ **done** (6 Aug 2026) |
+| 3 | Skeleton editor with flow-out + undo | ✅ **done** (20 Jul 2026; placing skeletons on gap frames 31 Jul 2026) |
+| 4 | Settings, shared folder, conflict handling | ✅ **done** (20 Jul 2026) |
+| 5 | Horizon via two tracked points | *nice-to-have (not now — horizontal camera)*; medium, 1–2 sessions (step 4, handing off points, is most of the work) |
+| 6 | Faster analysis | **step 3 (a lighter pass-1 model) first** — 1 session incl. an A/B against the golden reference; export/DirectML as a separate experiment. Steps 1/2/6 are edge work (see the measurement in phase 6) |
+| 7 | Perspective correction via track lines | *nice-to-have (not now — frontal, horizontal camera)*; large, 2–3 sessions (step 3, the 3D reconstruction, is research work — validate on test material first) |
+| 8 | Trimming fragments in the app + `bronvideo`/recordings in the library | ✅ **done** (11 Aug 2026) |
+| — | Loose ends in target selection (stitch gate, MediaPipe click) | **open** — small code, the A/B is the work; see its own section above |
+| — | Following a small skater from a drawn box (spyglass) | ✅ **done** (11 Sep 2026) — see its own section above |
+| — | OpenCV filters as a check on the neural net (idea) | **open, unplanned** — no design yet, low priority; see its own section above |
 
-## Openstaande vragen (beslissen wanneer de fase begint)
+## Open questions (decide when the phase begins)
 
-- ~~**Fase 1**: video altijd kopiëren?~~ **Besloten (jul 2026): altijd kopiëren, origineel laten staan.**
-- ~~**Fase 1**: oude "losse" analyses importeerbaar?~~ **Besloten (jul 2026): niet nodig.**
-- ~~**Fase 3**: ook punten kunnen bewerken op frames zónder gedetecteerde pose (punt "plaatsen" i.p.v. verslepen)?~~ **Gebouwd (31 jul 2026): ja** — begeleide klikreeks van 8 punten met voorvulling uit de buurframes, plus een dekkingsteller. Zie de aanvulling bij fase 3.
-- ~~**Fase 4**: welke cloudprovider gebruikt het team feitelijk?~~ **Besloten (jul 2026): Google Drive** (Mirror-modus, dus alle bestanden lokaal op schijf). Conflictdetectie is provider-agnostisch (elk `*.db` naast `schaats.db`).
-- **Fase 5** *(nice-to-have, niet nu)*: onder de huidige aanname (horizontale camera) is deze fase niet nodig. Wordt pas relevant als er tóch met een schuine/schommelende camera gefilmd gaat worden; dán ook: pant de camera mee (punt-overdracht nodig) of staat hij op statief?
-- **Fase 6**: hoeveel meetafwijking is acceptabel voor het "snel"-profiel? (Voorstel: events moeten identiek blijven, hoeken mogen ±1° verschillen.) En: is een lichter pass-1-model überhaupt een *profiel*, of gewoon de nieuwe default? Als de A/B uitwijst dat `yolo26m` dezelfde dekking en events geeft, is er niets te kiezen — dan vervalt stap 5.
-- **Bochtdetectie**: er is nog geen clip uit de eigen opstelling die **ín de bocht begint**; de drempels (`BOCHT_IN`/`BOCHT_UIT`) staan nu op de marge uit vier TV-clips die in de bocht éindigen. Zodra zo'n clip er is: `python schaats_eval.py bocht analyse.npz` en zo nodig bijstellen.
-- **Fase 8**: ~~mag de knipdialoog een `CAP_PROP_POS_FRAMES`-seek gebruiken?~~ **Gebouwd (11 aug 2026): ja**, met een expliciete `snel_zoeken`-vlag op `VideoSpeler`; gemeten afwijking 0–1 frame op twee iPhone-.MOV's en tot 4 frames (168 ms) op een VFR-clip waar de framecount zelf al niet klopt. ~~Her-coderen met cv2 of stream-copy met ffmpeg?~~ **Besloten (11 aug 2026): cv2/`mp4v`** — zie de A/B bij fase 8. ~~Hoeveel marge rond een fragment?~~ **Besloten (10 aug 2026): geen enkele marge** — exact op de gemarkeerde frames knippen; de trainer beoordeelt de grenzen zelf tijdens het markeren. **Nog open:** mag de trainer de doelschaatser al in het knipvenster aanwijzen op een zelfgekozen frame, i.p.v. achteraf op frame 0 van de clip? Niet gebouwd; het vraagt `_kies_seed(..., doel_frame)` in de YOLO-backend plus het framenummer in `instellingen_json`, en frame 0 van een fragment is nu al precies het beeld waarop "start" gedrukt werd — dus de urgentie is klein geworden.
-- **Fase 7** *(nice-to-have, niet nu)*: onder de huidige aanname (frontaal, horizontaal) is de perspectiefvertekening klein en deze fase geen prioriteit. Wordt pas relevant bij een schuin geplaatste camera; dán ook: welke baanlijnen zijn scherp genoeg om na te trekken en is hun onderlinge afstand bekend (schaal in meters — zonder schaal werkt de hoekcorrectie ook, alleen snelheid/slaglengte niet)? En staat de camera dan op statief, of moet het lijn-tracken uit fase 5 mee?
+- ~~**Phase 1**: always copy the video?~~ **Decided (Jul 2026): always copy, leave the original in place.**
+- ~~**Phase 1**: import old "loose" analyses?~~ **Decided (Jul 2026): not needed.**
+- ~~**Phase 3**: also allow editing points on frames without a detected pose (point "placement" instead of dragging)?~~ **Built (31 Jul 2026): yes** — a guided click sequence of 8 points with a prefill from the neighboring frames, plus a coverage counter. See the phase 3 addition.
+- ~~**Phase 4**: which cloud provider does the team actually use?~~ **Decided (Jul 2026): Google Drive** (Mirror mode, so every file local on disk). Conflict detection is provider-agnostic (any `*.db` next to `skate.db`).
+- **Phase 5** *(nice-to-have, not now)*: under the current assumption (horizontal camera) this phase isn't needed. Becomes relevant only if filming ever does happen with a tilted/wobbling camera; then also: does the camera pan along (handing off points needed) or does it sit on a tripod?
+- **Phase 6**: how much measurement deviation is acceptable for the "fast" profile? (Proposal: events must stay identical, angles may differ ±1°.) And: is a lighter pass-1 model even a *profile*, or simply the new default? If the A/B shows `yolo26m` gives the same coverage and events, there's nothing to choose — then step 5 falls away.
+- **Corner detection**: there's still no clip from our own setup that **starts** in the corner; the thresholds (`CORNER_IN`/`CORNER_OUT`) are currently set on the margin from four TV clips that **end** in the corner. Once such a clip exists: `python skate_eval.py corner analysis.npz` and adjust if needed.
+- **Phase 8**: ~~may the trim dialog use a `CAP_PROP_POS_FRAMES` seek?~~ **Built (11 Aug 2026): yes**, with an explicit `fast_seek` flag on `VideoPlayer`; measured deviation 0–1 frame on two iPhone .MOV files and up to 4 frames (168 ms) on a VFR clip where the frame count itself is already off. ~~Recode with cv2 or stream-copy with ffmpeg?~~ **Decided (11 Aug 2026): cv2/`mp4v`** — see the A/B under phase 8. ~~How much margin around a fragment?~~ **Decided (10 Aug 2026): no margin at all** — trim exactly on the marked frames; the trainer judges the boundaries themselves while marking. **Still open:** may the trainer pick the target skater already in the trim window, on a frame of their own choosing, instead of afterward on frame 0 of the clip? Not built; it requires `_choose_seed(..., doel_frame)` in the YOLO backend plus the frame number in `settings_json`, and frame 0 of a fragment is already exactly the frame "start" was pressed on — so the urgency has become small.

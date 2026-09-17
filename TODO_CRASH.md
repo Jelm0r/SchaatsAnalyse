@@ -1,166 +1,179 @@
-# Te doen na de crash van 13-8-2026 (knippen + batch)
+# To do after the crash of 13 Aug 2026 (cut + batch)
 
-## Opnieuw opgetreden: 25-8-2026, nu in de gebundelde app (EXE.md stap 5)
+## Recurred: 25 Aug 2026, now in the bundled app (EXE.md step 5)
 
-Zelfde flow als 13 augustus — opname knippen, daarna de batch-analyse op het fragment —
-dus **dit is geen regressie van de bundeling**, maar dezelfde bug in een omgeving waar hij
-slechter zichtbaar is. Wat er precies gebeurde:
+Same flow as 13 August — cut a recording, then run batch analysis on the fragment —
+so **this is not a regression from bundling**, but the same bug in an environment
+where it's less visible. What exactly happened:
 
-- Fragment `00005 13-16.mp4` geknipt uit `00005.MTS` (84 frames, 1920×1080 @ 25 fps, 5,0 MB —
-  **het knippen zelf ging goed**, het bestand is compleet en leesbaar), daarna batch-analyse
-  gestart met nog een geopende analyse (`IMG_9001.mov`) op de weergavepagina.
-- Crash tijdens pass 1, bij frame 21 van 84 (de balk toont 21/168 omdat detectie- en
-  verfijningspass elk een schijf krijgen).
-- Vlak vóór de crash tekende Qt al niet meer correct: kop over de uitlegtekst heen, de
-  voortgangsbalk van de batch midden in de opnametabel, twee statusregels onder elkaar.
-- Windows-gebeurtenislogboek: `SchaatsAnalyse.exe` — **foutmodule `Qt6Gui.dll` 6.11.1.0,
-  uitzonderingscode `0xc0000005` (access violation), offset `0x00000000000e3880`**, gevolgd
-  door een tweede melding `0xc000041d` (fout in een callback). Dus een harde crash in de
-  Qt-tekenlaag, niet in de analyse: onnxruntime/DirectML deden op dat moment gewoon hun werk.
-- `%LOCALAPPDATA%\SchaatsAnalyse\schaatsanalyse.log` eindigt na
-  `Loading …yolo26x-pose-dml.onnx` **zonder traceback** — precies wat je bij een C++-crash
-  verwacht: Python komt er niet meer aan te pas. **Punt 3 hieronder is daarmee de eerste stap**,
-  want in de exe is er geen console en is dit logboek het enige spoor dat wij zelf schrijven.
-- Punt 4 is inmiddels achterhaald: het wisselbestand staat op automatisch beheerd
-  (commit limit 29,7 GB bij 15,2 GB RAM, piekgebruik 477 MB), dus geheugenkrapte is hier
-  geen waarschijnlijke verklaring meer.
+- Fragment `00005 13-16.mp4` cut from `00005.MTS` (84 frames, 1920×1080 @ 25 fps, 5.0
+  MB — **the cutting itself went fine**, the file is complete and readable), then a
+  batch analysis was started with another analysis (`IMG_9001.mov`) still open on the
+  view page.
+- Crash during pass 1, at frame 21 of 84 (the bar shows 21/168 because the detection
+  and refinement passes each get a half).
+- Just before the crash Qt was already drawing incorrectly: header over the
+  explanatory text, the batch progress bar in the middle of the recordings table, two
+  status lines stacked on top of each other.
+- Windows event log: `SkateAnalysis.exe` — **faulting module `Qt6Gui.dll` 6.11.1.0,
+  exception code `0xc0000005` (access violation), offset `0x00000000000e3880`**,
+  followed by a second notice `0xc000041d` (error in a callback). So a hard crash in
+  Qt's drawing layer, not in the analysis: onnxruntime/DirectML were just doing their
+  job at that moment.
+- `%LOCALAPPDATA%\SkateAnalysis\skateanalysis.log` ends after
+  `Loading …yolo26x-pose-dml.onnx` **with no traceback** — exactly what you'd expect
+  from a C++ crash: Python is no longer in the picture. **Point 3 below is therefore
+  the first step**, because in the exe there's no console and this log file is the
+  only trail we write ourselves.
+- Point 4 is now moot: the page file is set to automatically managed (commit limit
+  29.7 GB at 15.2 GB RAM, peak usage 477 MB), so memory pressure is no longer a
+  plausible explanation here.
 
-### Waar de crash zit: Qt's schermbeheer (25-8-2026, vastgesteld)
+### Where the crash lives: Qt's screen management (25 Aug 2026, established)
 
-De crash-offset uit het WER-rapport is terug te vertalen naar een functie door de
-**exporttabel van `Qt6Gui.dll`** te lezen en de dichtstbijzijnde export vóór de offset te
-zoeken (script in de scratchpad; PE-header → DataDirectory → exports, ~60 regels stdlib).
-Dat wijst beide keren dezelfde kant op:
+The crash offset from the WER report can be translated back into a function by
+reading the **export table of `Qt6Gui.dll`** and looking up the nearest export before
+the offset (script in the scratchpad; PE header → DataDirectory → exports, ~60 lines
+of stdlib). Both times it points the same way:
 
-| crash | offset | dichtstbijzijnde export |
+| crash | offset | nearest export |
 |---|---|---|
-| 20:46 | `0xe3880` | exact het begin van `QScreen::geometry()` |
+| 20:46 | `0xe3880` | exactly the start of `QScreen::geometry()` |
 | 21:25 | `0xe4a79` | `QScreen::virtualSiblings()` + `0x29` |
 
-Dat is het bekende beeld van een **dangling `QScreen`**: Windows herbouwt de
-schermconfiguratie, Qt gooit de oude `QScreen`-objecten weg, en wie er dan nog naar wijst
-valt om met `0xc0000005` (QTBUG-42985 en verwanten). Onze eigen code raakt `QScreen` maar
-op één plek aan — `zet_venstergrootte` in schaats_gui.py, mét `None`-check — en roept
-`geometry()`/`virtualSiblings()` nergens zelf aan: die gebruikt Qt intern bij het plaatsen
-van vensters. En de crashende flow opent er een paar achter elkaar (knipvenster,
-batch-dialoog, doelkiezer per clip).
+That's the well-known picture of a **dangling `QScreen`**: Windows rebuilds the
+screen configuration, Qt throws away the old `QScreen` objects, and whoever still
+points at one falls over with `0xc0000005` (QTBUG-42985 and relatives). Our own code
+touches `QScreen` in exactly one place — `set_window_size` in skate_gui.py, with a
+`None` check — and never calls `geometry()`/`virtualSiblings()` itself anywhere: Qt
+uses those internally when placing windows. And the crashing flow opens several
+windows in a row (cut window, batch dialog, target picker per clip).
 
-**Verdachte trigger: het Knipprogramma.** In het systeemlogboek staat op **20:45:49**
-activiteit van `Microsoft.ScreenSketch`, 19 seconden vóór de crash van 20:46:08 — een
-schermoverlay is precies het soort gebeurtenis dat de schermlijst laat herbouwen. Nog
-**niet getoetst**: na de crashlog-build liep de flow drie keer zonder crash (fragmenten van
-84, 252 en 62 frames), maar in geen van die runs is een screenshot gemaakt. De test die
-het beslist is dus: batch starten en er halverwege een paar keer Win+Shift+S doorheen.
+**Suspected trigger: the Snipping Tool.** The system log shows activity from
+`Microsoft.ScreenSketch` at **20:45:49**, 19 seconds before the 20:46:08 crash — a
+screen overlay is exactly the kind of event that makes the screen list get rebuilt.
+**Not yet tested**: after the crash-log build the flow ran three times without a
+crash (fragments of 84, 252, and 62 frames), but none of those runs involved a
+screenshot. The decisive test is therefore: start a batch and trigger Win+Shift+S a
+few times partway through.
 
-### Bevestigd met de stack (25-8-2026, 22:19-sessie)
+### Confirmed with the stack trace (25 Aug 2026, 22:19 session)
 
-Reproductie: knippen → batch-analyse, en er tijdens de analyse een paar keer **Win+Shift+S**
-doorheen. Drie eerdere runs zónder screenshots liepen door; deze crashte. Wat het logboek
-opving:
+Reproduction: cut → batch analysis, and hit **Win+Shift+S** a few times during the
+analysis. Three earlier runs without screenshots went through fine; this one
+crashed. What the log caught:
 
 ```
 Windows fatal exception: access violation
 
-Thread 0x00005d74 (most recent call first):     <- de analyse-worker, gewoon bezig
-  File "schaats_yolo.py", line 692 in _detecteer_alles
-  File "schaats_gui.py", line 1417 in run
+Thread 0x00005d74 (most recent call first):     <- the analysis worker, just running
+  File "skate_yolo.py", line 692 in _detect_all
+  File "skate_gui.py", line 1417 in run
 
-Current thread 0x00005528 (most recent call first):   <- hier knalde het
-  File "schaats_gui.py", line 6715 in main            (sys.exit(app.exec()))
+Current thread 0x00005528 (most recent call first):   <- this is where it blew up
+  File "skate_gui.py", line 6715 in main            (sys.exit(app.exec()))
 ```
 
-**De hoofdthread valt om in `app.exec()` met een Python-stack van één regel.** Dat is het
-bewijs dat de fout niet in onze code zit: zat hij in een slot van ons, dan stonden onze
-functies in die stack. De access violation treedt dus op in Qt-interne C++-code die door een
-Windows-bericht wordt aangeroepen (schermwijziging) — precies passend bij de
-`QScreen`-offsets hierboven. De worker stond ondertussen in `cap.read()` en is alleen
-meegesleurd.
+**The main thread goes down inside `app.exec()` with a one-line Python stack.** That's
+the proof the bug isn't in our code: if it were in one of our slots, our functions
+would show up in that stack. So the access violation happens in Qt-internal C++ code
+triggered by a Windows message (a screen change) — exactly matching the `QScreen`
+offsets above. The worker was meanwhile sitting in `cap.read()` and just got dragged
+down with it.
 
-Dit is de bekende Qt-bugfamilie op Windows: QTBUG-81359 (access violation in
-`QWindowsWindow::checkForScreenChanged` bij schermwijzigingen) en QTBUG-42985. Hier draait
-**PySide6 6.11.1**; 6.11.2 bestaat, maar de release notes noemen geen fix hiervoor.
+This is the well-known Qt bug family on Windows: QTBUG-81359 (access violation in
+`QWindowsWindow::checkForScreenChanged` on screen changes) and QTBUG-42985. This is
+running **PySide6 6.11.1**; 6.11.2 exists, but the release notes don't mention a fix
+for this.
 
-**Wat dit praktisch betekent:** de schade blijft beperkt tot de lopende video — `BatchWorker`
-slaat per clip op, dus eerder afgeronde video's van dezelfde batch staan al in de
-bibliotheek. En de crash kost geen meting: hij zit in de tekenlaag, niet in de pijplijn.
+**What this means in practice:** the damage stays limited to the video that was
+running — `BatchWorker` saves per clip, so videos already finished earlier in the
+same batch are already in the library. And the crash costs no measurement data: it
+sits in the drawing layer, not in the pipeline.
 
-### Poging tot een minimale reproductie: mislukt (25-8-2026, 22:25-22:50)
+### Attempt at a minimal reproduction: failed (25 Aug 2026, 22:25-22:50)
 
-Doel was een test van 30 seconden i.p.v. twee minuten, om PySide6-versies zuiver te kunnen
-vergelijken. Vier opstellingen, elk geprikkeld met 10-15 knip-overlays (`ms-screenclip:` +
-Esc, dus dezelfde gebeurtenis als Win+Shift+S):
+The goal was a 30-second test instead of two minutes, to be able to compare PySide6
+versions cleanly. Four setups, each poked with 10-15 snip overlays (`ms-screenclip:`
++ Esc, the same event as Win+Shift+S):
 
-| opstelling | uitkomst |
+| setup | outcome |
 |---|---|
-| kaal Qt-venster, 20 repaints/s + werkthread | 10× overleefd |
-| idem + elke 0,7 s een dialoog openen/sluiten (via `screen().availableGeometry()`) | 12× overleefd |
-| idem + **het echte YOLO-model op DirectML** in een thread (provider bevestigd) | 15× overleefd |
-| **de app zelf**, idle op de bibliotheekpagina | 15× overleefd |
+| bare Qt window, 20 repaints/s + worker thread | survived 10× |
+| same + opening/closing a dialog every 0.7 s (via `screen().availableGeometry()`) | survived 12× |
+| same + **the real YOLO model on DirectML** in a thread (provider confirmed) | survived 15× |
+| **the app itself**, idle on the library page | survived 15× |
 
-Dus: repaints, dialoogvensters, GPU-belasting via DirectML en de app-in-rust zijn **elk
-afzonderlijk niet genoeg**. De crash heeft de echte analyse-flow nodig (knippen → batch,
-mét de overlay ertussendoor). Dat maakt hem duur om te reproduceren — reken op twee minuten
-per poging — maar het sluit wel de goedkope verklaringen uit, en dat is precies wat een
-bugrapport aan Qt zou moeten vermelden.
+So: repaints, dialog windows, GPU load via DirectML, and the app at rest are **each
+individually not enough**. The crash needs the real analysis flow (cut → batch, with
+the overlay in between). That makes it expensive to reproduce — budget two minutes
+per attempt — but it does rule out the cheap explanations, and that's exactly what a
+bug report to Qt should state.
 
-Het testscript staat in de scratchpad (`qtcrash/minimaal.py` + `prikkel.ps1`); niet in de
-repo gezet omdat het gereedschap is, geen onderdeel van de app.
+The test script lives in the scratchpad (`qtcrash/minimal.py` + `poke.ps1`); not put
+in the repo since it's tooling, not part of the app.
 
-**Let op bij het debuggen:** twee draaiende sessies (exe én los script) schrijven in
-hetzelfde logboek, en dan is de volgorde niet meer te lezen. Dat heeft op 25-8 al één keer
-een verkeerde conclusie opgeleverd — de melding onder een exe-kop bleek van het losse
-script te komen. Eén tegelijk.
+**Careful when debugging:** two running sessions (the exe and a standalone script)
+write to the same log file, and then the ordering can no longer be read reliably.
+That already produced one wrong conclusion on 25 Aug — a notice under an exe header
+turned out to come from the standalone script. One at a time.
 
-**Volgende poging het beste in de venv** (`start_gui.bat`): daar is er wél een console met
-traceback en kost een codewijziging geen herbouw van 5 minuten.
+**The next attempt is best done in the venv** (`start_gui.bat`): there's a console
+with a traceback there, and a code change doesn't cost a 5-minute rebuild.
 
-### Aangepakt (25-8-2026, avond): minder vensters + PySide6 6.11.2
+### Addressed (25 Aug 2026, evening): fewer windows + PySide6 6.11.2
 
-Twee ingrepen, allebei op de enige twee plekken waar wij invloed hebben. De access violation
-zélf blijft Qt-intern — daar valt niets af te vangen — maar de **voorwaarde** ervoor is een
-verouderde `QScreen`-verwijzing in een venster dat Qt bij een schermwijziging afloopt, en het
-aantal van die vensters is wél van ons.
+Two interventions, both at the only two places where we have any influence. The
+access violation itself stays Qt-internal — nothing to catch there — but its
+**precondition** is a stale `QScreen` reference in a window that Qt walks past on a
+screen change, and the number of such windows is something we do control.
 
-**1. Vensterlek gedicht (was punt 1 hieronder, en het was groter dan gedacht).** Een `QDialog`
-met een parent blijft na `exec()` bestaan als verborgen top-level venster, mét native
-Windows-venster en `QScreen`-pointer. Alle elf modale kiezers lopen nu via
-`toon_dialoog(dlg)` in `schaats_gui.py` (`try: return dlg.exec()` / `finally:
-dlg.deleteLater()`), plus twee vensters die niet in die lijst stonden: de knip-voortgangs-
-`QProgressDialog` (`close()` verbergt alleen) en het **opstartscherm**, dat na `finish()` de
-héle sessie bleef leven. In de crashende flow — knippen → batch van zeven clips — scheelde
-dat ~16 achtergebleven vensters, waarvan een paar met een eigen `VideoSpeler` en
-`VideoCapture` erin. Dat verklaart vermoedelijk ook de **verhaspelde tekening** vlak vóór de
-crash (kop over de uitlegtekst, voortgangsbalk midden in de opnametabel).
+**1. Window leak plugged (was point 1 below, and it was bigger than expected).** A
+`QDialog` with a parent stays alive after `exec()` as a hidden top-level window,
+complete with a native Windows window and a `QScreen` pointer. All eleven modal
+pickers now go through `show_dialog(dlg)` in skate_gui.py (`try: return dlg.exec()` /
+`finally: dlg.deleteLater()`), plus two windows that weren't on that list: the cut
+progress `QProgressDialog` (`close()` only hides it) and the **splash screen**, which
+stayed alive for the whole session after `finish()`. In the crashing flow — cut →
+batch of seven clips — that accounted for ~16 leftover windows, some with their own
+`VideoPlayer` and `VideoCapture` inside. This probably also explains the **garbled
+drawing** right before the crash (header over the explanatory text, progress bar in
+the middle of the recordings table).
 
-*Nagemeten* (offscreen, `MainWindow` erbij; scripts in de scratchpad): drie kale `exec()`-en
-laten drie kiezers achter, zes aanroepen via de helper nul. `deleteLater()` en niet
-`WA_DeleteOnClose`, want elke aanroepplek leest de uitkomst pás ná `exec()` — apart getoetst
-dat de dialoog leesbaar blijft dwars door een `QProgressDialog` (die `processEvents` doet) en
-door een geneste dialoog heen, en pas verdwijnt zodra we terug zijn in de hoofd-event-lus,
-dus ruim vóór de analyse begint. Voor het opstartscherm geldt hetzelfde langs de andere weg:
-zijn `deleteLater()` staat vóór `app.exec()` (lus-niveau 0) en wordt opgeruimd zodra de lus
-start — ook dat is apart gemeten.
+*Re-measured* (offscreen, with `MainWindow`; scripts in the scratchpad): three bare
+`exec()` calls leave three pickers behind, six calls through the helper leave zero.
+`deleteLater()` and not `WA_DeleteOnClose`, because every call site reads the result
+only *after* `exec()` — separately confirmed that the dialog stays readable straight
+through a `QProgressDialog` (which pumps `processEvents`) and through a nested
+dialog, and only disappears once we're back in the main event loop, well before the
+analysis starts. The same holds for the splash screen the other way round: its
+`deleteLater()` runs before `app.exec()` (loop level 0) and gets cleaned up as soon
+as the loop starts — also measured separately.
 
-**2. PySide6 6.11.1 → 6.11.2** in `.venv-yolo`. Een gok: de release notes noemen deze bug
-niet. Rooktest gedaan (app start schoon offscreen), maar de exe is nog **niet** herbouwd.
+**2. PySide6 6.11.1 → 6.11.2** in `.venv-yolo`. A guess: the release notes don't
+mention this bug. Smoke-tested (app starts cleanly offscreen), but the exe hasn't
+been rebuilt **yet**.
 
-**Wat hiermee nog niet bewezen is:** dat de crash weg is. De reproductie kost twee minuten per
-poging (knippen → batch, mét Win+Shift+S ertussendoor) en die is na deze wijziging nog niet
-gedraaid. Doe hem in de venv (`start_gui.bat`), en pas als hij een paar rondes overleeft is
-een herbouw van de exe de moeite. Blijft hij crashen, dan is optie 3 aan de beurt: melden bij
-Qt (QTBUG-81359/QTBUG-42985-familie) — het rapport ligt met dit document zo goed als klaar.
+**What this doesn't prove yet:** that the crash is gone. Reproduction costs two
+minutes per attempt (cut → batch, with Win+Shift+S in between) and hasn't been run
+since this change. Do that in the venv (`start_gui.bat`), and only once it survives
+a few rounds is rebuilding the exe worth it. If it keeps crashing, option 3 is next:
+report it to Qt (QTBUG-81359/QTBUG-42985 family) — the report is essentially ready
+alongside this document.
 
-### Crash nummer vijf (25-8-2026, 23:45) — en die was zonder Win+Shift+S
+### Crash number five (25 Aug 2026, 23:45) — and this one had no Win+Shift+S
 
-**Belangrijkste voorbehoud vooraf: dit was de óúde exe.** `Report.wer` geeft
-`TargetAppVer=2026//08//25:19:33:50` en `Qt6Gui.dll 6.11.1.0`, terwijl de fix hierboven ná
-19:33 in de bron is gezet en `bouw.bat` niet is gedraaid. Er heeft dus geen enkele regel van
-de opruimactie meegedraaid; deze crash zegt niets over of die helpt.
+**Most important caveat up front: this was the OLD exe.** `Report.wer` gives
+`TargetAppVer=2026//08//25:19:33:50` and `Qt6Gui.dll 6.11.1.0`, while the fix above
+went into the source after 19:33 and `build.bat` hadn't been run. So not a single
+line of the cleanup ran during this crash; this crash says nothing about whether it
+helps.
 
-**De offsets zelf nagerekend** (eigen PE-exporttabellezer op `Qt6Gui.dll` uit de bundel, 10.590
-exports), want "dichtstbijzijnde export" is een heuristiek en die wilde ik niet erven:
+**Recomputed the offsets themselves** (a custom PE export-table reader on
+`Qt6Gui.dll` from the bundle, 10,590 exports), because "nearest export" is a
+heuristic I didn't want to inherit:
 
-| tijd | offset | functie | delta |
+| time | offset | function | delta |
 |---|---|---|---|
 | 20:46:08 | `0xe3880` | `QScreen::geometry()` | **+0** |
 | 20:46:34 | `0xe3880` | `QScreen::geometry()` | **+0** |
@@ -168,80 +181,86 @@ exports), want "dichtstbijzijnde export" is een heuristiek en die wilde ik niet 
 | 22:21:50 | `0xe4a79` | `QScreen::virtualSiblings()` | +0x29 |
 | 23:45:26 | `0xe4a7c` | `QScreen::virtualSiblings()` | +0x2c |
 
-`virtualSiblings()` loopt van `0xe4a50` tot `0xe4e60`, dus die drie offsets liggen er ruim
-binnen. En een crash op **+0** van een member-functie betekent dat de `this`-pointer zelf
-stuk is — niet een lege `d`-pointer maar een **weggegooid `QScreen`-object**. Use-after-free,
-hard bewijs.
+`virtualSiblings()` runs from `0xe4a50` to `0xe4e60`, so those three offsets fall
+comfortably inside it. And a crash at **+0** of a member function means the `this`
+pointer itself is broken — not an empty `d` pointer but a **discarded `QScreen`
+object**. Use-after-free, hard evidence.
 
-**Waarom er geen screenshot nodig was: deze machine heeft twee beeldschermen.** Het
-laptoppaneel (`\\.\DISPLAY1`, 1280×800) én een **EIZO EV2480** (1920×1080, boven het
-laptopscherm gepositioneerd: x=319, y=−1080). Beide op 100% DPI, dus geen gemengde schaling.
-De EIZO hangt aan **USB-C**: in `Microsoft-Windows-DeviceSetupManager/Admin` staat om 20:57
-een `USB Billboard Device` (dat is precies wat een DisplayPort-alt-mode-verbinding aanmeldt),
-een VIA-USB-hub (`VID_2109&PID_2817`) en twee EIZO-apparaten (`VID_056D` = EIZO), gevolgd om
-20:58:14 door de container `Generic Monitor (EV2480)`.
+**Why no screenshot was needed: this machine has two displays.** The laptop panel
+(`\\.\DISPLAY1`, 1280×800) and an **EIZO EV2480** (1920×1080, positioned above the
+laptop screen: x=319, y=−1080). Both at 100% DPI, so no mixed scaling. The EIZO
+hangs off **USB-C**: `Microsoft-Windows-DeviceSetupManager/Admin` shows a `USB
+Billboard Device` at 20:57 (exactly what a DisplayPort-alt-mode connection
+announces), a VIA USB hub (`VID_2109&PID_2817`) and two EIZO devices (`VID_056D` =
+EIZO), followed at 20:58:14 by the `Generic Monitor (EV2480)` container.
 
-Daarmee valt de hele "trigger"-vraag anders uit dan gedacht: **Win+Shift+S was nooit de
-oorzaak, alleen één manier om de schermlijst te laten herbouwen.** Een USB-C-beeldscherm
-levert er van zichzelf meer: de DP-link kan opnieuw trainen, de monitor kan in en uit
-energiebesparing zakken, de hub kan even wegvallen. Geen daarvan logt iets in het
-gebeurtenislogboek — nagekeken, tussen 23:30 en 23:47 staat er in `System` **niets**.
+That flips the whole "trigger" question around from what was assumed: **Win+Shift+S
+was never the cause, just one way to make the screen list get rebuilt.** A USB-C
+monitor produces more of those events on its own: the DP link can retrain, the
+monitor can drop in and out of power saving, the hub can briefly drop out. None of
+that logs anything to the event log — checked, between 23:30 and 23:47 `System` has
+**nothing**.
 
-**Nog een detail dat de moeite is:** de AMD-driver is `31.0.22048.7002` van **25-3-2024**, op
-een Windows-build uit 2026. Een ruim twee jaar oude driver die twee schermen aanstuurt
-waarvan één over USB-C, terwijl DirectML op diezelfde iGPU staat te rekenen. Een
-driver-update is geen bewezen oplossing maar wel de goedkoopste externe variabele die nog
-open staat.
+**One more detail worth noting:** the AMD driver is `31.0.22048.7002` from
+**25 Mar 2024**, on a 2026 Windows build. A driver over two years old, driving two
+displays one of which is over USB-C, while DirectML is doing math on that same iGPU
+at the same time. A driver update isn't a proven fix but is the cheapest remaining
+external variable.
 
-**Wat hierop gedaan is: het zichtbaar maken.** `_schermen_naar_logboek()` in `schaats_gui.py`
-hangt aan `screenAdded`/`screenRemoved`/`primaryScreenChanged` en per scherm aan
-`geometryChanged`/`availableGeometryChanged`/`refreshRateChanged`/`logicalDotsPerInchChanged`,
-en schrijft elke wijziging mét tijdstempel naar het logboek. Het staat direct achter het
-aanmaken van de `QApplication`, dus ook een wijziging tijdens de zware imports komt erin. Bij
-de volgende crash staat er dus zwart op wit óf er vlak ervoor een scherm kwam, ging of van
-maat veranderde — precies de regel die nu ontbreekt. Puur meten; het repareert niets.
-Getoetst tegen de echte opstelling:
-`[scherm 23:52:32] bij start: \\.\DISPLAY1 1280x800 op (0,0) @60Hz | EV2480 1920x1080 op (319,-1080) @60Hz`
+**What was done about this: making it visible.** `_screens_to_log()` in skate_gui.py
+hooks `screenAdded`/`screenRemoved`/`primaryScreenChanged` and, per screen,
+`geometryChanged`/`availableGeometryChanged`/`refreshRateChanged`/
+`logicalDotsPerInchChanged`, and writes every change with a timestamp to the log.
+It's wired up right after the `QApplication` is created, so even a change during the
+heavy imports gets captured. So at the next crash there will be black-and-white
+evidence of whether a screen appeared, disappeared, or changed size just before it —
+exactly the line that's currently missing. Pure measurement; it fixes nothing.
+Tested against the real setup:
+`[screen 23:52:32] at startup: \\.\DISPLAY1 1280x800 at (0,0) @60Hz | EV2480 1920x1080 at (319,-1080) @60Hz`
 
-**De opruimactie wint hierdoor wél aan plausibiliteit.** Wat er dangelt is een `QScreen*` die
-iemand nog vasthoudt. Elk verborgen top-level venster is zo'n houder, en een knip→batch liet
-er zestien achter. Met twee schermen waarvan één over USB-C is de kans dat de schermlijst
-tijdens een analyse van minuten herbouwd wordt, veel groter dan bij één vast paneel — en dat
-verklaart ook waarom de minimale reproducties van 22:25–22:50 niets deden: die openden geen
-kiezers en lieten dus niets achter om te dangelen.
+**This does make the cleanup more plausible.** What's dangling is a `QScreen*` that
+someone is still holding on to. Every hidden top-level window is such a holder, and a
+cut→batch left sixteen of them behind. With two displays, one of them over USB-C,
+the odds of the screen list getting rebuilt during a multi-minute analysis are much
+higher than with a single fixed panel — which also explains why the minimal
+reproductions from 22:25-22:50 did nothing: they never opened any pickers and so
+never left anything behind to dangle.
 
-### De test van 25-8 23:57 — geen crash, maar het logboek bleef leeg (opgelost)
+### The test of 25 Aug 23:57 — no crash, but the log stayed empty (resolved)
 
-De eerste knip→batch-run mét de opruimactie **liep gewoon door** (batch klaar, analyse
-opgeslagen). Alleen stond er in het logboek van die sessie niets: geen `[scherm ...]`-regel,
-geen ultralytics-uitvoer, alleen de sessiekop en de bekende afgehandelde `0x8001010d`.
+The first cut→batch run with the cleanup in place **just went through** (batch
+finished, analysis saved). Except that session's log had nothing in it: no
+`[screen ...]` line, no ultralytics output, just the session header and the familiar
+handled `0x8001010d`.
 
-Oorzaak, en het is een gat dat elke volgende diagnose zou hebben gekost: die sessie draaide
-op **`pythonw.exe`**. Dan is `sys.stderr` gewoon `None`, en `start_logboek()` leidde alleen
-om als de app bevroren was of `SCHAATSANALYSE_LOG` gezet was — geen van beide. Elke
-`sys.stderr.write` gooide dus een `AttributeError`, die in de diagnose-code netjes wordt
-weggevangen. Verwarrend genoeg stáát er wél een sessiekop: die schrijft `start_crashlog()`
-zelf als er niet omgeleid is, dus het logboek leest als "de app logt" terwijl er niets
-binnenkomt.
+The cause, and it's a gap that would have cost every future diagnosis: that session
+ran under **`pythonw.exe`**. There, `sys.stderr` is simply `None`, and `start_log()`
+only redirected when the app was frozen or `SKATEANALYSIS_LOG` was set — neither was
+true. So every `sys.stderr.write` raised an `AttributeError`, which the diagnostic
+code quietly swallows. Confusingly, a session header *did* appear: `start_crashlog()`
+writes that itself even when there's no redirection, so the log reads as "the app is
+logging" while nothing is actually coming in.
 
-`start_logboek()` leidt nu ook om als `sys.stderr`/`sys.stdout` `None` is. Getoetst door
-`sys.stderr` op `None` te zetten en de route te draaien: omleiding actief, en zowel een
-`[scherm ...]`-regel als een gewone `print` komen in het bestand terecht. NB: `start_gui.bat`
-gebruikt `python.exe` en had dit probleem niet — het treedt op via een snelkoppeling of
-starter die `pythonw.exe` aanroept.
+`start_log()` now also redirects when `sys.stderr`/`sys.stdout` is `None`. Tested by
+setting `sys.stderr` to `None` and running the route: redirection kicks in, and both
+a `[screen ...]` line and a plain `print` end up in the file. NB: `start_gui.bat`
+uses `python.exe` and never had this problem — it happens via a shortcut or launcher
+that invokes `pythonw.exe`.
 
-1. ~~**Kiezers opruimen.**~~ ✅ *25-8-2026* — zie hierboven; niet alleen de vier genoemde
-   kiezers maar alle elf `exec()`-plekken, plus de knip-voortgangsdialoog en het
-   opstartscherm.
-2. **Knip-voortgang fijner.** In `_knip_naar_tijdelijk` (`_melden`) niet in hele procenten
-   melden maar in promille, of `setValue` op frame-basis met een tijdsdrempel.
-3. ~~**Crashlog.**~~ ✅ *25-8-2026* — zit in `schaats_omgeving.start_crashlog()` (niet in
-   `main()` maar naast `start_logboek()`, dus vóór alle zware imports: een crash tijdens het
-   laden van torch of Qt telt ook). `faulthandler` op een eigen filedescriptor naar het
-   logbestand, plus `sys.excepthook` én `threading.excepthook`. Elke sessie eindigt met
-   `=== netjes afgesloten … ===`, zodat het ontbreken daarvan de crash aanwijst — nodig,
-   want Qt levert bij het opstarten stelselmatig een afgehandelde `0x8001010d` op die
-   faulthandler tóch meldt. Getoetst in de zelftest met een echte access violation.
-   **De volgende crash laat dus een stack achter; reproduceer hem in de venv.**
-4. ~~**Wisselbestand.**~~ Achterhaald: staat inmiddels op automatisch beheerd
-   (commit limit 29,7 GB bij 15,2 GB RAM).
+1. ~~**Clean up pickers.**~~ ✅ *25 Aug 2026* — see above; not just the four pickers
+   named but all eleven `exec()` sites, plus the cut progress dialog and the splash
+   screen.
+2. **Finer cut progress.** In `_clip_to_temp` (`_report_progress`), report in
+   per-mille instead of whole percent, or `setValue` on a frame basis with a time
+   threshold.
+3. ~~**Crash log.**~~ ✅ *25 Aug 2026* — lives in `skate_environment.start_crashlog()`
+   (not in `main()` but next to `start_log()`, so before all the heavy imports: a
+   crash while loading torch or Qt counts too). `faulthandler` on its own file
+   descriptor into the log file, plus `sys.excepthook` and `threading.excepthook`.
+   Every session ends with `=== cleanly closed … ===`, so its absence points to the
+   crash — needed, because Qt consistently produces a handled `0x8001010d` on
+   startup that faulthandler reports anyway. Tested in the self-test with a real
+   access violation. **The next crash will therefore leave a stack trace behind;
+   reproduce it in the venv.**
+4. ~~**Page file.**~~ Moot: it's now set to automatically managed (commit limit
+   29.7 GB at 15.2 GB RAM).
