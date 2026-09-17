@@ -670,6 +670,9 @@ def run_gui(args):
             for b in self.b_fasen:
                 b.setFocusPolicy(Qt.NoFocus)
             self.setFocusPolicy(Qt.StrongFocus)
+            self.refreshtimer = QTimer(self)
+            self.refreshtimer.timeout.connect(self.rij_verversen)
+            self.refreshtimer.start(10000)
 
             self.map = args.map or os.path.expanduser('~/SchaatsAnalyse-album')
             self.vul_videolijst()
@@ -681,21 +684,34 @@ def run_gui(args):
             self.videos = scan_videos(self.map)
             self.videolijst.blockSignals(True)
             self.videolijst.clear()
-            for v in self.videos:
+            for v in (self.videos or []):
                 stem = os.path.splitext(os.path.basename(v))[0]
                 p = video_paden(v)
+                naam = os.path.basename(v)
+                datum = bestandsdatum(v)
                 if os.path.exists(p['fasen']):
                     st = laad_fasen_json(p['fasen'])
                     ncorr = sum(1 for s in st if s.get('corrected'))
-                    status = f'{len(st)} slagen ({ncorr} gecorrigeerd)'
+                    status = f'✓ {len(st)} slagen ({ncorr} gecorrigeerd)'
                 elif os.path.exists(p['npz']):
-                    status = 'voorbereid (auto)'
+                    status = '✓ voorbereid (auto)'
+                elif os.path.exists(p['npz'] + '.preparing'):
+                    verstreken = int(time.time() - os.path.getmtime(p['npz'] + '.preparing'))
+                    if verstreken > 900:
+                        status = f'⚠ voorbewerken loopt al {verstreken // 60} min — check PinkBox'
+                    else:
+                        status = f'⏳ wordt voorbereid… ({verstreken}s)'
                 else:
-                    status = 'geen analyse — handmatig'
-                naam = os.path.basename(v)
-                datum = bestandsdatum(v)
+                    status = '· geen analyse — handmatig'
                 self.videolijst.addItem(QListWidgetItem(f'{naam}  {datum}\n{status}'))
             self.videolijst.blockSignals(False)
+            # geladen video opnieuw selecteren zodat de lijst meegaat
+            if getattr(self, 'video_pad', None):
+                for i, v in enumerate(self.videos):
+                    if v == self.video_pad:
+                        self.lijst_row = i
+                        self.videolijst.setCurrentRow(i)
+                        break
 
         def kies_map(self):
             d = QFileDialog.getExistingDirectory(self, 'Kies videomap', self.map)
@@ -712,17 +728,17 @@ def run_gui(args):
             self.toon()
 
         def laad_video(self, video_pad):
-            stem2x = os.path.splitext(os.path.basename(video_pad))[0] + '_2x.mp4'
-            alternatief = os.path.join(self.map, '2x', stem2x)
-            if os.path.exists(alternatief):
-                video_pad = alternatief
+            # data (npz/fasen) hoort bij het ORIGINELE pad; de 2x-versie is alleen de speel-kopie
             self.video_pad = video_pad
+            stem2x = os.path.splitext(os.path.basename(video_pad))[0] + '_2x.mp4'
+            kandidaat2x = os.path.join(self.map, '2x', stem2x)
+            self.speel_pad = kandidaat2x if os.path.exists(kandidaat2x) else video_pad
             p = video_paden(video_pad)
             os.makedirs(os.path.join(self.map, 'npz'), exist_ok=True)
             os.makedirs(os.path.join(self.map, 'fasen'), exist_ok=True)
-            self.cap = cv2.VideoCapture(video_pad)
+            self.cap = cv2.VideoCapture(self.speel_pad)
             if not self.cap.isOpened():
-                self.status.showMessage(f'video niet te lezen: {video_pad}', 6000)
+                self.status.showMessage(f'video niet te lezen: {self.speel_pad}', 6000)
                 return
             self.bewerk_i = None
             self.bewerk_fase = 0
@@ -731,6 +747,18 @@ def run_gui(args):
             if os.path.exists(p['npz']):
                 self.info, self.resultaten = laad_context(p['npz'])
                 n_vid = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                if n_vid and n_vid < self.info.totaal:
+                    # gedeeltelijke/kapotte 2x-kopie: terugvallen op het origineel
+                    self.speel_pad = video_pad
+                    self.cap.release()
+                    self.cap = cv2.VideoCapture(video_pad)
+                    n_vid = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+                if n_vid in (0, self.info.totaal):
+                    # mp4v-metadata bevat vaak geen frame count: tellen met grab()
+                    n_vid = 0
+                    while self.cap.grab():
+                        n_vid += 1
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 if n_vid and self.info.totaal and n_vid != self.info.totaal:
                     self.info, self.resultaten = hervorm_resultaten(
                         self.resultaten, self.info, n_vid)
@@ -790,9 +818,17 @@ def run_gui(args):
             cmd = (f'/usr/bin/scp -q {shlex.quote(self.video_pad)} '
                    f'"pinkbox:C:/Users/danie/GitHub/SchaatsAnalyse/runs/batch/" '
                    '&& /usr/bin/ssh pinkbox "schtasks /Run /TN SchaatsBatchA"')
+            os.makedirs(os.path.join(self.map, 'npz'), exist_ok=True)
+            open(p['npz'] + '.preparing', 'w').write(str(int(time.time())))
             subprocess.Popen(['/bin/zsh', '-c', cmd],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.vul_videolijst()
             self.status.showMessage('voorbewerking gestart op PinkBox — npz volgt via sync, daarna A', 8000)
+
+        def rij_verversen(self):
+            # status van de lijst periodiek verversen (npz kan tussentijds aankomen)
+            if self.map and self.videos:
+                self.vul_videolijst()
 
         def maak_rapport(self):
             if self.video_pad is None or not self.info:
