@@ -42,6 +42,7 @@ import csv
 import json
 import math
 import os
+import subprocess
 import sys
 
 import cv2
@@ -87,7 +88,11 @@ LEGENDA = """Sneltoetsen
   N        nieuwe slag op dit frame
   U        ongedaan maken
   S        opslaan
-  Esc / Q  afsluiten
+  R        rapport + overlayvideo
+  A        auto-detectie opnieuw (npz)
+  P        video naar PinkBox sturen (voorbewerken)
+  Esc      actie annuleren
+  Q        afsluiten
 
 Fasen (per slag)
   oranje   positionering (inefficiënt)
@@ -460,9 +465,15 @@ def run_gui(args):
             self.b_map.clicked.connect(self.kies_map)
             self.b_rapport = QPushButton('Rapport + overlay (R)')
             self.b_rapport.clicked.connect(self.maak_rapport)
+            self.b_auto = QPushButton('Auto-detect (A)')
+            self.b_auto.clicked.connect(self.auto_detect)
+            self.b_voor = QPushButton('Voorbewerken (P)')
+            self.b_voor.clicked.connect(self.voorbewerk)
             links = QVBoxLayout()
             links.addWidget(self.b_map)
             links.addWidget(self.videolijst, 1)
+            links.addWidget(self.b_auto)
+            links.addWidget(self.b_voor)
             links.addWidget(self.b_rapport)
             links_w = QWidget()
             links_w.setLayout(links)
@@ -530,7 +541,8 @@ def run_gui(args):
             self.setWindowTitle('Schaats-werkbank — fasen per slag')
             self.resize(1750, 900)
             for wdgt in (self.videolijst, self.lijst, self.b_redefine, self.b_new,
-                         self.b_undo, self.b_save, self.b_map, self.b_rapport):
+                         self.b_undo, self.b_save, self.b_map, self.b_rapport,
+                         self.b_auto, self.b_voor):
                 wdgt.setFocusPolicy(Qt.NoFocus)
             for b in self.b_fasen:
                 b.setFocusPolicy(Qt.NoFocus)
@@ -616,6 +628,38 @@ def run_gui(args):
                     item.setBackground(Qt.red)
                 self.lijst.addItem(item)
             self.lijst.blockSignals(False)
+
+        def auto_detect(self):
+            if self.video_pad is None:
+                return
+            p = video_paden(self.video_pad)
+            if not os.path.exists(p['npz']):
+                self.status.showMessage('geen npz — gebruik eerst Voorbewerken', 4000)
+                return
+            self.info, self.resultaten = laad_context(p['npz'])
+            self.slagen = automatische_fasen(self.resultaten, self.info, args.rotatie)
+            self.bewerk_i = None
+            self.bewerk_fase = 0
+            self.vul_lijst()
+            self.vul_videolijst()
+            self.toon()
+
+        def voorbewerk(self):
+            if self.video_pad is None:
+                return
+            p = video_paden(self.video_pad)
+            if os.path.exists(p['npz']):
+                self.status.showMessage('deze video is al voorbereid', 3000)
+                return
+            import subprocess, shlex
+            self.status.showMessage('video naar PinkBox sturen voor voorbewerking…')
+            QApplication.processEvents()
+            cmd = (f'/usr/bin/scp -q {shlex.quote(self.video_pad)} '
+                   f'"pinkbox:C:/Users/danie/GitHub/SchaatsAnalyse/runs/batch/" '
+                   '&& /usr/bin/ssh pinkbox "schtasks /Run /TN SchaatsBatchA"')
+            subprocess.Popen(['/bin/zsh', '-c', cmd],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.status.showMessage('voorbewerking gestart op PinkBox — npz volgt via sync, daarna A', 8000)
 
         def maak_rapport(self):
             if self.video_pad is None or not self.info:
@@ -810,6 +854,10 @@ def run_gui(args):
                 self.ongedaan()
             elif k == Qt.Key_R:
                 self.maak_rapport()
+            elif k == Qt.Key_A:
+                self.auto_detect()
+            elif k == Qt.Key_P:
+                self.voorbewerk()
             elif k == Qt.Key_S:
                 self.opslaan()
             elif k == Qt.Key_Escape:
