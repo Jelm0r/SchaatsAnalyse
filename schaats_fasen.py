@@ -179,17 +179,19 @@ def fase_van(slag, f):
     return None
 
 
-def teken_fase_banner(fr, fase, bewerken=False):
-    """Grote kleurenbalk bovenin: in welke fase zit dit frame."""
+def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None):
+    """Grote kleurenbalk bovenin: in welke fase zit dit frame / wat definieer je."""
     if fase is None:
         return fr
     kleur = BAND_KLEUR['positioning' if fase == 'positionering' else fase]
     tekst = fase.upper()
     if bewerken:
-        tekst += '  (DEFINIEER)'
+        tekst += f'  (DEFINIEER {gezet}/4)'
+    if tekst_extra:
+        tekst += '  — ' + tekst_extra
     w = fr.shape[1]
-    cv2.rectangle(fr, (w // 2 - 360, 10), (w // 2 + 360, 96), kleur, -1)
-    cv2.putText(fr, tekst, (w // 2 - 330, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.8,
+    cv2.rectangle(fr, (w // 2 - 380, 10), (w // 2 + 380, 96), kleur, -1)
+    cv2.putText(fr, tekst, (w // 2 - 360, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
                 (255, 255, 255), 5)
     return fr
 
@@ -308,6 +310,7 @@ def run_gui(args):
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.volgende)
             self.bewerk_i = None
+            self.bewerk_fase = 0   # 0..3: welke fasegrens je aan het definiëren bent
 
             self.video_label = QLabel(' laden…')
             self.video_label.setAlignment(Qt.AlignCenter)
@@ -388,6 +391,7 @@ def run_gui(args):
                 self.bewerk_i = None
             elif row >= 0:
                 self.bewerk_i = row
+                self.bewerk_fase = 0
                 self.f = slagen[row]['positioning_start']
                 self.timer.stop()
             self.vul_lijst()
@@ -437,13 +441,32 @@ def run_gui(args):
             r = resultaten[self.f] if self.f < len(resultaten) else None
             fr = teken_hulplijnen(fr, r)
             bewerk_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else None
-            fase = fase_van(bewerk_slag if bewerk_slag is not None else
-                            (slagen[slag_index_op_frame(self.f)] if slag_index_op_frame(self.f) is not None else None), self.f)
-            fr = teken_fase_banner(fr, fase, bewerken=bewerk_slag is not None)
+            if bewerk_slag is not None:
+                # definieer-modus: banner toont de fase die je NU definieert (1→2→3→4)
+                volgorde = list(FASEN_KEYS.values())
+                fase_key = volgorde[self.bewerk_fase]
+                fase = {'positioning_start': 'positionering', 'pushing_start': 'duw',
+                        'endpush_start': 'eind', 'end_frame': 'eind'}[fase_key]
+                gezet = [k for k in volgorde if k in bewerk_slag]
+                fr = teken_fase_banner(
+                    fr, fase, bewerken=True, gezet=len(gezet),
+                    tekst_extra=f"druk {self.bewerk_fase + 1} op frame {self.f}")
+            else:
+                fase = fase_van(slagen[slag_index_op_frame(self.f)]
+                                if slag_index_op_frame(self.f) is not None else None, self.f)
+                fr = teken_fase_banner(fr, fase, bewerken=False)
             kleuren = {'positionering': '#e05a00', 'duw': '#00c800', 'eind': '#ff7800', None: '#555'}
             namen = {'positionering': 'POSITIONERING (inefficiënt)', 'duw': 'DUWFASE (efficiënt)',
                      'eind': 'EIND-DUW (inefficiënt)', None: 'geen fase'}
-            self.fase_label.setText(namen[fase] + ('  —  DEFINITIE' if bewerk_slag is not None else ''))
+            if bewerk_slag is not None:
+                volgorde = list(FASEN_KEYS.values())
+                fase_key = volgorde[self.bewerk_fase]
+                gezet = [k for k in volgorde if k in bewerk_slag]
+                self.fase_label.setText(
+                    f"DEFINIEER slag {self.bewerk_i}: {namen[fase]} — druk {self.bewerk_fase + 1} "
+                    f"({len(gezet)}/4 gezet)")
+            else:
+                self.fase_label.setText(namen[fase])
             self.fase_label.setStyleSheet(
                 f'font-size: 20px; font-weight: bold; color: white; background: {kleuren[fase]};')
             schaal = (self.video_label.height() or 700) / fr.shape[0]
@@ -507,6 +530,8 @@ def run_gui(args):
                 s = slagen[self.bewerk_i]
                 s[FASEN_KEYS[ev.text()]] = self.f
                 s['corrected'] = True
+                # de definieerwijzer volgt de toets die je drukte, niet de fase van dit frame
+                self.bewerk_fase = max(self.bewerk_fase, int(ev.text()) - 1)
                 self.vul_lijst()
                 self.toon()
             elif k == Qt.Key_U:
