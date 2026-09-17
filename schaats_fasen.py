@@ -99,8 +99,15 @@ def laad_context(npz_pad):
 
 
 def automatische_fasen(resultaten, info, rotatie_graden=12.0, gewicht_frac=0.5):
-    """Per afzetgebeurtenis de vier fasegrenzen uit de algoritmische definitie."""
-    events = sa.segmeneer_afzetten(resultaten)
+    """Per afzetgebeurtenis de vier fasegrenzen uit de algoritmische definitie.
+
+    - pushing_start: frame waarop het heupmidden het dichtst boven het contactpunt
+      van het duwbeen hangt (gewicht boven het duwbeen).
+    - endpush_start: frame met de grootste heupas-rotatie t.o.v. de face-on-hoek van
+      deze slag (eerste meetbare frame): daar is de as maximaal voorbij de
+      rijrichting gedraaid en begint de inefficiëntie.
+    """
+    events = sa.segmenteer_afzetten(resultaten)
     slagen = []
     for ev in events:
         kant = 'l' if ev.been == 'links' else 'r'
@@ -108,29 +115,29 @@ def automatische_fasen(resultaten, info, rotatie_graden=12.0, gewicht_frac=0.5):
                     if resultaten[f].lm_data is not None]
         if not meetbaar:
             continue
-        # face-on-baseline: eerste meetbare frames van deze slag
-        basis = sorted(hipaxis_hoek(resultaten[f].lm_data) for f in meetbaar[:6])
-        basis_hoek = basis[len(basis) // 2]
-        duw_start = None
-        eind_start = None
+        basis_hoek = hipaxis_hoek(resultaten[meetbaar[0]].lm_data)
+        # gewicht boven het duwbeen: heupmidden het dichtst boven het blade-contact
+        afstanden = []
+        rotaties = []
         for f in meetbaar:
             lm = resultaten[f].lm_data
             hiel, teen = lm[f'{kant}_hiel'], lm[f'{kant}_teen']
             contact = ((hiel[0] + teen[0]) / 2.0, (hiel[1] + teen[1]) / 2.0)
-            heupm = ((lm['l_heup'][0] + lm['r_heup'][0]) / 2.0,
-                     (lm['l_heup'][1] + lm['r_heup'][1]) / 2.0)
-            heupbreedte = abs(lm['r_heup'][0] - lm['l_heup'][0]) or 1.0
-            boven = abs(heupm[0] - contact[0]) <= gewicht_frac * heupbreedte
-            if duw_start is None and boven:
-                duw_start = f
-            if duw_start is not None and abs(hoek_verschil(hipaxis_hoek(lm), basis_hoek)) >= rotatie_graden:
-                eind_start = f
-                break
+            heupm_x = (lm['l_heup'][0] + lm['r_heup'][0]) / 2.0
+            afstanden.append(abs(heupm_x - contact[0]))
+            rotaties.append(abs(hoek_verschil(hipaxis_hoek(lm), basis_hoek)))
+        duw_start = meetbaar[afstanden.index(min(afstanden))]
+        # eerste frame ná het duwbegin waar de rotatie de drempel passeert (calibratie);
+        # val terug op het rotatiepiek als de drempel nooit gehaald wordt
+        na_duw = [(f, rot) for f, rot in zip(meetbaar, rotaties) if f >= duw_start]
+        gepasseerd = next((f for f, rot in na_duw if rot >= rotatie_graden), None)
+        eind_start = gepasseerd if gepasseerd is not None else (
+            max(na_duw, key=lambda fr: fr[1])[0] if na_duw else ev.eind_frame)
         slagen.append({
             'been': ev.been,
             'positioning_start': ev.start_frame,
-            'pushing_start': duw_start if duw_start is not None else ev.start_frame,
-            'endpush_start': eind_start if eind_start is not None else ev.eind_frame,
+            'pushing_start': duw_start,
+            'endpush_start': eind_start,
             'end_frame': ev.eind_frame,
             'corrected': False,
         })
@@ -204,11 +211,6 @@ def fase_banden(fr, slagen, huidige):
                 continue
             cv2.line(fr, (s[sleutel], 0), (s[sleutel], h), kleur, 2)
     if slag:
-        grenzen = sorted((slag[k], FASEN_KLEUR[k]) for k in FASEN_KEYS.values() if k in slag)
-        for i in range(len(grenzen) - 1):
-            f0, k0 = grenzen[i]
-            f1, _ = grenzen[i + 1]
-            fase = FASEN_KEYS['1' if k0 == FASEN_KLEUR['positioning_start'] else '2'] if False else None
         # fasebanden: pos=oranje, duw=groen, eind=blauw
         if 'positioning_start' in slag and 'pushing_start' in slag:
             cv2.rectangle(fr, (slag['positioning_start'], 0), (slag['pushing_start'], 14),
@@ -408,8 +410,8 @@ if __name__ == '__main__':
     parser.add_argument('--input', required=True)
     parser.add_argument('--npz', required=True)
     parser.add_argument('--uit', default='fasen.json')
-    parser.add_argument('--rotatie', type=float, default=12.0,
-                        help='heuprotatie in graden die eind-duw triggert (standaard 12.0)')
+    parser.add_argument('--rotatie', type=float, default=10.0,
+                        help='heuprotatie in graden die eind-duw triggert (standaard 10.0)')
     parser.add_argument('--gewicht-frac', type=float, default=0.5,
                         help='heupmidden mag zo veel × heupbreedte van het contactpunt zitten (0.5)')
     parser.add_argument('--dump', action='store_true', help='alleen auto-fasen printen, geen GUI')
