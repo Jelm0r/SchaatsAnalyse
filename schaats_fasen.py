@@ -488,7 +488,7 @@ def run_gui(args):
             if self.bewerk_i is not None:
                 s = slagen[self.bewerk_i]
                 bewerk_tekst = (f'   BEWERKEN slag {self.bewerk_i} ('
-                                + ', '.join(f'{FASEN_NAAM[k]}={s[v]}' for k, v in FASEN_KEYS.items() if v in s)
+                                + ', '.join(f'{FASEN_NAAM[v]}={s[v]}' for k, v in FASEN_KEYS.items() if v in s)
                                 + ')')
             self.status.showMessage(f'frame {self.f}/{info.totaal} '
                                     f'({self.f / (info.fps or 30):.2f}s){bewerk_tekst}')
@@ -530,8 +530,8 @@ def run_gui(args):
                 s = slagen[self.bewerk_i]
                 s[FASEN_KEYS[ev.text()]] = self.f
                 s['corrected'] = True
-                # de definieerwijzer volgt de toets die je drukte, niet de fase van dit frame
-                self.bewerk_fase = max(self.bewerk_fase, int(ev.text()) - 1)
+                # definieerwijzer: na toets k is de volgende fase aan de beurt
+                self.bewerk_fase = min(3, int(ev.text()))
                 self.vul_lijst()
                 self.toon()
             elif k == Qt.Key_U:
