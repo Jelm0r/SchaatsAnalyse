@@ -325,8 +325,12 @@ def hervorm_resultaten(resultaten, info, target_n):
         r = sa.FrameResultaat(frame_nr=i, tijd=i / (info2.fps or 60.0))
         lm = arr2[i]
         if np.isnan(lm).all():
+            r.lm = None
             r.lm_data = None
         else:
+            # verwerk_afgeleiden bouwt lm_data uit r.lm — lever dus de Landmark-lijst aan
+            r.lm = [sa.Landmark(float(x), float(y), 0.0, float(v))
+                    for x, y, v in lm]
             r.lm_data = maak_lm_data(lm, info.w, info.h)
         r.pose_gevonden = bool(gev2[i])
         r.bocht = bool(bocht2[i])
