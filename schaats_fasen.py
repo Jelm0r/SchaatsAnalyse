@@ -302,8 +302,19 @@ def hervorm_resultaten(resultaten, info, target_n):
     bocht2 = np.interp(xs2, xs, bocht) >= 0.5
     horizon = np.array([r.horizon_deg for r in resultaten], dtype=float)
     horizon2 = np.interp(xs2, xs, horizon)
-    mid = np.array([(r.middellijn_dev[0] if r.middellijn_dev else 0,
-                     r.middellijn_dev[1] if r.middellijn_dev else 0) for r in resultaten], dtype=float)
+    def _mid(r):
+        # middellijn_dev kan tuple of dict (per knie) zijn, afhankelijk van backend
+        md = r.middellijn_dev
+        if md is None:
+            return (0.0, 0.0)
+        if isinstance(md, dict):
+            vals = [v for v in md.values() if isinstance(v, (int, float))]
+            a = vals[0] if len(vals) > 0 else 0.0
+            b = vals[1] if len(vals) > 1 else a
+            return (float(a), float(b))
+        return (float(md[0]), float(md[1]))
+
+    mid = np.array([_mid(r) for r in resultaten], dtype=float)
     mid2 = np.stack([np.interp(xs2, xs, mid[:, 0]), np.interp(xs2, xs, mid[:, 1])], axis=1)
 
     info2 = sa.VideoInfo(w=info.w, h=info.h, fps=(info.fps * target_n / n), totaal=target_n)
@@ -745,7 +756,11 @@ def run_gui(args):
             self.f = 0
             self.timer.stop()
             if os.path.exists(p['npz']):
-                self.info, self.resultaten = laad_context(p['npz'])
+                try:
+                    self.info, self.resultaten = laad_context(p['npz'])
+                except Exception as e:
+                    self.status.showMessage(f'npz onleesbaar ({e}) — handmatige modus', 6000)
+                    self.info, self.resultaten = lege_resultaten(video_pad)
                 n_vid = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
                 if n_vid and n_vid < self.info.totaal:
                     # gedeeltelijke/kapotte 2x-kopie: terugvallen op het origineel
@@ -760,8 +775,12 @@ def run_gui(args):
                         n_vid += 1
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 if n_vid and self.info.totaal and n_vid != self.info.totaal:
-                    self.info, self.resultaten = hervorm_resultaten(
-                        self.resultaten, self.info, n_vid)
+                    try:
+                        self.info, self.resultaten = hervorm_resultaten(
+                            self.resultaten, self.info, n_vid)
+                    except Exception as e:
+                        self.status.showMessage(f'hersampling mislukt ({e}) — origineel geladen', 6000)
+                        self.info, self.resultaten = laad_context(p['npz'])
             else:
                 self.info, self.resultaten = lege_resultaten(video_pad)
             if os.path.exists(p['fasen']):
