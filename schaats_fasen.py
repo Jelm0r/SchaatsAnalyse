@@ -386,10 +386,21 @@ def run_gui(args):
             self.lijst.blockSignals(False)
 
         def toggle_bewerk(self):
-            row = self.lijst.currentRow()
             if self.bewerk_i is not None:
                 self.bewerk_i = None
-            elif row >= 0:
+            else:
+                row = self.lijst.currentRow()
+                if row < 0:
+                    row = slag_index_op_frame(self.f)
+                    if row is None:
+                        vorige = [i for i, s in enumerate(slagen)
+                                  if s['positioning_start'] <= self.f]
+                        row = vorige[-1] if vorige else (0 if slagen else None)
+                if row is None:
+                    self.status.showMessage('geen slagen — druk N voor een nieuwe slag', 4000)
+                    self.toon()
+                    return
+                self.lijst.setCurrentRow(row)
                 self.bewerk_i = row
                 self.bewerk_fase = 0
                 self.f = slagen[row]['positioning_start']
@@ -525,8 +536,12 @@ def run_gui(args):
                 self.nieuwe_slag()
             elif k in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
                 if self.bewerk_i is None:
-                    self.status.showMessage('Redefine-modus uit (E) — geen slag te wijzigen', 3000)
-                    return
+                    i = slag_index_op_frame(self.f)
+                    if i is None:
+                        self.status.showMessage('geen slag op dit frame — E of N eerst', 3000)
+                        return
+                    self.bewerk_i = i
+                    self.bewerk_fase = 0
                 s = slagen[self.bewerk_i]
                 s[FASEN_KEYS[ev.text()]] = self.f
                 s['corrected'] = True
