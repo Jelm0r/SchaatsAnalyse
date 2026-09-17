@@ -218,6 +218,33 @@ def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None, fase_
     return fr
 
 
+_datum_cache = {}
+
+
+def bestandsdatum(video_pad):
+    """Opnamedatum uit de mp4-metadata (ffprobe creation_time), niet de exportdatum."""
+    import subprocess
+    import datetime
+    try:
+        mtime = os.path.getmtime(video_pad)
+    except OSError:
+        return ''
+    if video_pad in _datum_cache and _datum_cache[video_pad][0] == mtime:
+        return _datum_cache[video_pad][1]
+    try:
+        out = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format_tags=creation_time',
+             '-of', 'json', video_pad],
+            capture_output=True, text=True, timeout=10).stdout
+        ct = json.loads(out)['format']['tags']['creation_time']
+        dt = datetime.datetime.strptime(ct[:19], '%Y-%m-%dT%H:%M:%S')
+        datum = dt.strftime('%d %b %Y %H:%M')
+    except Exception:
+        datum = ''
+    _datum_cache[video_pad] = (mtime, datum)
+    return datum
+
+
 def scan_videos(d):
     if not os.path.isdir(d):
         return []
@@ -665,7 +692,9 @@ def run_gui(args):
                     status = 'voorbereid (auto)'
                 else:
                     status = 'geen analyse — handmatig'
-                self.videolijst.addItem(QListWidgetItem(f'{os.path.basename(v)}\n{status}'))
+                naam = os.path.basename(v)
+                datum = bestandsdatum(v)
+                self.videolijst.addItem(QListWidgetItem(f'{naam}  {datum}\n{status}'))
             self.videolijst.blockSignals(False)
 
         def kies_map(self):
