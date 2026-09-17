@@ -333,6 +333,16 @@ def run_gui(args):
             self.b_undo.clicked.connect(self.ongedaan)
             self.b_save = QPushButton('Opslaan (S)')
             self.b_save.clicked.connect(self.opslaan)
+            self.b_fasen = []
+            for toets, tekst in (('1', '1 Positionering'), ('2', '2 Duwfase'),
+                                 ('3', '3 Eind-duw'), ('4', '4 Einde slag')):
+                b = QPushButton(tekst)
+                b.clicked.connect(lambda _, t=toets: self.zet_fase(t))
+                self.b_fasen.append(b)
+            fase_knoppen = QHBoxLayout()
+            for b in self.b_fasen:
+                fase_knoppen.addWidget(b)
+
             knoppen = QHBoxLayout()
             for b in (self.b_redefine, self.b_new, self.b_undo, self.b_save):
                 knoppen.addWidget(b)
@@ -343,6 +353,7 @@ def run_gui(args):
             rechts = QVBoxLayout()
             rechts.addWidget(self.fase_label)
             rechts.addWidget(self.lijst, 1)
+            rechts.addLayout(fase_knoppen)
             rechts.addLayout(knoppen)
             rechts.addWidget(legend)
             rechts_w = QWidget()
@@ -362,6 +373,11 @@ def run_gui(args):
             self.setCentralWidget(w)
             self.status = QStatusBar()
             self.setStatusBar(self.status)
+            for wdgt in (self.lijst, self.b_redefine, self.b_new, self.b_undo, self.b_save):
+                wdgt.setFocusPolicy(Qt.NoFocus)
+            for b in self.b_fasen:
+                b.setFocusPolicy(Qt.NoFocus)
+            self.setFocusPolicy(Qt.StrongFocus)
             self.setWindowTitle('Fasen-marker v3')
             self.resize(1550, 900)
             self.vul_lijst()
@@ -415,6 +431,21 @@ def run_gui(args):
             slagen.sort(key=lambda x: x['positioning_start'])
             self.bewerk_i = slagen.index(s)
             self.timer.stop()
+            self.vul_lijst()
+            self.toon()
+
+        def zet_fase(self, toets):
+            if self.bewerk_i is None:
+                i = slag_index_op_frame(self.f)
+                if i is None:
+                    self.status.showMessage('geen slag op dit frame — E of N eerst', 3000)
+                    return
+                self.bewerk_i = i
+                self.bewerk_fase = 0
+            s = slagen[self.bewerk_i]
+            s[FASEN_KEYS[toets]] = self.f
+            s['corrected'] = True
+            self.bewerk_fase = min(3, int(toets))
             self.vul_lijst()
             self.toon()
 
@@ -535,20 +566,7 @@ def run_gui(args):
             elif k == Qt.Key_N:
                 self.nieuwe_slag()
             elif k in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
-                if self.bewerk_i is None:
-                    i = slag_index_op_frame(self.f)
-                    if i is None:
-                        self.status.showMessage('geen slag op dit frame — E of N eerst', 3000)
-                        return
-                    self.bewerk_i = i
-                    self.bewerk_fase = 0
-                s = slagen[self.bewerk_i]
-                s[FASEN_KEYS[ev.text()]] = self.f
-                s['corrected'] = True
-                # definieerwijzer: na toets k is de volgende fase aan de beurt
-                self.bewerk_fase = min(3, int(ev.text()))
-                self.vul_lijst()
-                self.toon()
+                self.zet_fase(ev.text())
             elif k == Qt.Key_U:
                 self.ongedaan()
             elif k == Qt.Key_S:
