@@ -475,16 +475,19 @@ def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None, doel=None):
         cv2.line(frame, (px, py - L), (px, py + L), (0, 255, 0), 3)
         cv2.circle(frame, (px, py), int(0.11 * h) or 28, (0, 255, 0), 3)
 
-    # COM-proxy: gemiddelde van beide heupen + hoofd (neus)
-    neus = None
-    if getattr(r, 'raw_lm', None) is not None and w and h and r.raw_lm[0][2] > 0.3:
-        neus = (int(r.raw_lm[0][0] * w), int(r.raw_lm[0][1] * h))
+    # stuurcentrum-proxy: midden tussen hoofd (neus) en schoudermidden
+    neus = schoum = None
+    if getattr(r, 'raw_lm', None) is not None and w and h:
+        if r.raw_lm[0][2] > 0.3:
+            neus = (int(r.raw_lm[0][0] * w), int(r.raw_lm[0][1] * h))
+        if r.raw_lm[11][2] > 0.3 and r.raw_lm[12][2] > 0.3:
+            schoum = (int((r.raw_lm[11][0] + r.raw_lm[12][0]) / 2 * w),
+                      int((r.raw_lm[11][1] + r.raw_lm[12][1]) / 2 * h))
     com = None
-    if neus is not None:
-        com = (int((lm['l_heup'][0] + lm['r_heup'][0] + neus[0]) / 3.0),
-               int((lm['l_heup'][1] + lm['r_heup'][1] + neus[1]) / 3.0))
+    if neus is not None and schoum is not None:
+        com = (int((neus[0] + schoum[0]) / 2.0), int((neus[1] + schoum[1]) / 2.0))
     if com is not None:
-        cv2.circle(frame, com, 6, (255, 100, 0), -1)   # oranje-rode stip: zwaartepunt-proxy
+        cv2.circle(frame, com, 6, (255, 100, 0), -1)   # oranje-rode stip: stuurcentrum (hoofd↔schouders)
 
     # been-as (magenta): alleen op het duwbeen, door midden(enkel,teen) en de knie
     for kant in ([duw_kant] if duw_kant in ('l', 'r') else []):
