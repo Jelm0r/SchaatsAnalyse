@@ -206,7 +206,7 @@ def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None, fase_
     return fr
 
 
-def teken_hulplijnen(frame, r, w=None, h=None):
+def teken_hulplijnen(frame, r, w=None, h=None, duw_kant=None):
     """Mini-skelet (incl. schouders/hoofd) + heupas + vooruit-as + been-assen + kantelhoeken."""
     lm = r.lm_data if r is not None else None
     if lm is None:
@@ -233,8 +233,8 @@ def teken_hulplijnen(frame, r, w=None, h=None):
         neus = rp(0)
         if r.raw_lm[0][2] > 0.3:
             cv2.circle(frame, neus, 7, (255, 255, 255), 1)
-    # been-as per been (magenta): door midden(enkel,teen) en de knie, verlengd boven de knie
-    for kant, y in (('l', 0), ('r', 0)):
+    # been-as (magenta): alleen op het duwbeen, door midden(enkel,teen) en de knie
+    for kant in ([duw_kant] if duw_kant in ('l', 'r') else []):
         enkel = lm[f'{kant}_enkel']
         teen = lm[f'{kant}_teen']
         knie = lm[f'{kant}_knie']
@@ -308,7 +308,9 @@ def main_rook(npz_pad, video_pad, uit_png, frame_nr=100, rotatie=10.0):
     cap.release()
     if not ok:
         raise SystemExit(f'frame {frame_nr} onleesbaar')
-    fr = teken_hulplijnen(fr, r, info.w, info.h)
+    huidige = next((s for s in slagen if s['positioning_start'] <= frame_nr <= s['end_frame']), None)
+    duw_kant = ('l' if huidige['been'] == 'links' else 'r') if huidige else None
+    fr = teken_hulplijnen(fr, r, info.w, info.h, duw_kant)
     lijn = tijdlijn_afbeelding(slagen, info.totaal, speelkop=frame_nr, w=fr.shape[1])
     combined = np.vstack([fr, lijn])
     cv2.imwrite(uit_png, combined)
@@ -512,7 +514,10 @@ def run_gui(args):
                 self.timer.stop()
                 return
             r = resultaten[self.f] if self.f < len(resultaten) else None
-            fr = teken_hulplijnen(fr, r, info.w, info.h)
+            duw_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else \
+                (slagen[slag_index_op_frame(self.f)] if slag_index_op_frame(self.f) is not None else None)
+            duw_kant = ('l' if duw_slag['been'] == 'links' else 'r') if duw_slag and duw_slag['been'] in ('links', 'rechts') else None
+            fr = teken_hulplijnen(fr, r, info.w, info.h, duw_kant)
             bewerk_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else None
             if bewerk_slag is not None:
                 # definieer-modus: banner toont de fase die je NU definieert (1→2→3→4)
