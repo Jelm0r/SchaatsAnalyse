@@ -166,6 +166,34 @@ def duw_pct(slag, fps=None):
         return None
 
 
+def fase_van(slag, f):
+    """Fasenaam waarin frame f zich bevindt binnen deze slag (of None)."""
+    if slag is None:
+        return None
+    if f < slag.get('pushing_start', slag.get('positioning_start', 0)):
+        return 'positionering'
+    if f < slag.get('endpush_start', 0):
+        return 'duw'
+    if f <= slag.get('end_frame', 0):
+        return 'eind'
+    return None
+
+
+def teken_fase_banner(fr, fase, bewerken=False):
+    """Grote kleurenbalk bovenin: in welke fase zit dit frame."""
+    if fase is None:
+        return fr
+    kleur = BAND_KLEUR['positioning' if fase == 'positionering' else fase]
+    tekst = fase.upper()
+    if bewerken:
+        tekst += '  (DEFINIEER)'
+    w = fr.shape[1]
+    cv2.rectangle(fr, (w // 2 - 360, 10), (w // 2 + 360, 96), kleur, -1)
+    cv2.putText(fr, tekst, (w // 2 - 330, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.8,
+                (255, 255, 255), 5)
+    return fr
+
+
 def teken_hulplijnen(frame, r):
     """Mini-skelet + heupas + loodrechte vooruit-as + rijrichting + kantelhoeken."""
     lm = r.lm_data if r is not None else None
@@ -289,6 +317,11 @@ def run_gui(args):
             self.lijst.itemClicked.connect(self.klik_slag)
             self.lijst.setFixedWidth(430)
 
+            self.fase_label = QLabel('geen fase')
+            self.fase_label.setAlignment(Qt.AlignCenter)
+            self.fase_label.setFixedHeight(46)
+            self.fase_label.setStyleSheet('font-size: 20px; font-weight: bold; color: #222; background: #555;')
+
             self.b_redefine = QPushButton('Redefine (E)')
             self.b_redefine.clicked.connect(self.toggle_bewerk)
             self.b_new = QPushButton('Nieuw (N)')
@@ -305,6 +338,7 @@ def run_gui(args):
             legend.setStyleSheet('font-size: 12px; color: #ccc;')
 
             rechts = QVBoxLayout()
+            rechts.addWidget(self.fase_label)
             rechts.addWidget(self.lijst, 1)
             rechts.addLayout(knoppen)
             rechts.addWidget(legend)
@@ -402,6 +436,16 @@ def run_gui(args):
                 return
             r = resultaten[self.f] if self.f < len(resultaten) else None
             fr = teken_hulplijnen(fr, r)
+            bewerk_slag = slagen[self.bewerk_i] if self.bewerk_i is not None else None
+            fase = fase_van(bewerk_slag if bewerk_slag is not None else
+                            (slagen[slag_index_op_frame(self.f)] if slag_index_op_frame(self.f) is not None else None), self.f)
+            fr = teken_fase_banner(fr, fase, bewerken=bewerk_slag is not None)
+            kleuren = {'positionering': '#e05a00', 'duw': '#00c800', 'eind': '#ff7800', None: '#555'}
+            namen = {'positionering': 'POSITIONERING (inefficiënt)', 'duw': 'DUWFASE (efficiënt)',
+                     'eind': 'EIND-DUW (inefficiënt)', None: 'geen fase'}
+            self.fase_label.setText(namen[fase] + ('  —  DEFINITIE' if bewerk_slag is not None else ''))
+            self.fase_label.setStyleSheet(
+                f'font-size: 20px; font-weight: bold; color: white; background: {kleuren[fase]};')
             schaal = (self.video_label.height() or 700) / fr.shape[0]
             klein = cv2.resize(fr, (int(fr.shape[1] * schaal), int(fr.shape[0] * schaal)))
             rgb = cv2.cvtColor(klein, cv2.COLOR_BGR2RGB)
