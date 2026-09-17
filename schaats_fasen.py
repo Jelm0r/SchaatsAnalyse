@@ -700,12 +700,17 @@ def run_gui(args):
                 p = video_paden(v)
                 naam = os.path.basename(v)
                 datum = bestandsdatum(v)
+                rapport_klaar = ' 📄 rapport' if os.path.exists(
+                    os.path.join(p['rapport'], 'rapport.csv')) else ''
                 if os.path.exists(p['fasen']):
                     st = laad_fasen_json(p['fasen'])
                     ncorr = sum(1 for s in st if s.get('corrected'))
-                    status = f'✓ {len(st)} slagen ({ncorr} gecorrigeerd)'
+                    if ncorr:
+                        status = f'✍ {ncorr}/{len(st)} slagen gecorrigeerd{rapport_klaar}'
+                    else:
+                        status = f'✓ {len(st)} slagen gemarkeerd (auto){rapport_klaar}'
                 elif os.path.exists(p['npz']):
-                    status = '✓ voorbereid (auto)'
+                    status = f'🤖 auto-detect klaar — nog niet gemarkeerd{rapport_klaar}'
                 elif os.path.exists(p['npz'] + '.preparing'):
                     verstreken = int(time.time() - os.path.getmtime(p['npz'] + '.preparing'))
                     if verstreken > 900:
@@ -713,7 +718,7 @@ def run_gui(args):
                     else:
                         status = f'⏳ wordt voorbereid… ({verstreken}s)'
                 else:
-                    status = '· geen analyse — handmatig'
+                    status = '○ geen analyse — handmatig of P voor automatisch'
                 self.videolijst.addItem(QListWidgetItem(f'{naam}  {datum}\n{status}'))
             self.videolijst.blockSignals(False)
             # geladen video opnieuw selecteren zodat de lijst meegaat
