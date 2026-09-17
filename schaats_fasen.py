@@ -179,7 +179,7 @@ def fase_van(slag, f):
     return None
 
 
-def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None):
+def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None, fase_frame=None):
     """Grote kleurenbalk bovenin: in welke fase zit dit frame / wat definieer je."""
     if fase is None:
         return fr
@@ -193,6 +193,12 @@ def teken_fase_banner(fr, fase, bewerken=False, gezet=0, tekst_extra=None):
     cv2.rectangle(fr, (w // 2 - 380, 10), (w // 2 + 380, 96), kleur, -1)
     cv2.putText(fr, tekst, (w // 2 - 360, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
                 (255, 255, 255), 5)
+    # live tweede regel in definitie-modus: in welke fase zit DIT frame
+    if bewerken and fase_frame is not None:
+        fkleur = BAND_KLEUR['positioning' if fase_frame == 'positionering' else fase_frame]
+        cv2.rectangle(fr, (w // 2 - 380, 104), (w // 2 + 380, 156), fkleur, -1)
+        cv2.putText(fr, f'dit frame: {fase_frame.upper()}', (w // 2 - 350, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 255, 255), 3)
     return fr
 
 
@@ -490,9 +496,11 @@ def run_gui(args):
                 fase = {'positioning_start': 'positionering', 'pushing_start': 'duw',
                         'endpush_start': 'eind', 'end_frame': 'eind'}[fase_key]
                 gezet = [k for k in volgorde if k in bewerk_slag]
+                fase_frame = fase_van(bewerk_slag, self.f)
                 fr = teken_fase_banner(
                     fr, fase, bewerken=True, gezet=len(gezet),
-                    tekst_extra=f"druk {self.bewerk_fase + 1} op frame {self.f}")
+                    tekst_extra=f"druk {self.bewerk_fase + 1} op frame {self.f}",
+                    fase_frame=fase_frame)
             else:
                 fase = fase_van(slagen[slag_index_op_frame(self.f)]
                                 if slag_index_op_frame(self.f) is not None else None, self.f)
@@ -504,9 +512,10 @@ def run_gui(args):
                 volgorde = list(FASEN_KEYS.values())
                 fase_key = volgorde[self.bewerk_fase]
                 gezet = [k for k in volgorde if k in bewerk_slag]
+                fase_frame = fase_van(bewerk_slag, self.f)
                 self.fase_label.setText(
                     f"DEFINIEER slag {self.bewerk_i}: {namen[fase]} — druk {self.bewerk_fase + 1} "
-                    f"({len(gezet)}/4 gezet)")
+                    f"({len(gezet)}/4 gezet)\ndit frame: {namen[fase_frame]}")
             else:
                 self.fase_label.setText(namen[fase])
             self.fase_label.setStyleSheet(
