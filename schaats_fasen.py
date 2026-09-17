@@ -40,6 +40,7 @@ CLI:
 import argparse
 import csv
 import json
+import shlex
 import math
 import os
 import subprocess
@@ -562,6 +563,24 @@ def main_rook(npz_pad, video_pad, uit_png, frame_nr=100, rotatie=10.0):
     print(f'[ROOK] {uit_png}')
 
 
+try:
+    from PySide6.QtWidgets import QLabel  # noqa: F401  (module-level voor KlikLabel)
+except ImportError:
+    QLabel = object  # rook/--dump-modus zonder Qt importeert dan nog
+
+
+class KlikLabel(QLabel):
+    def __init__(self, *a, **kw):
+        super().__init__(*a)
+        self.klik_callback = None
+        self.klik_modus = False
+
+    def mousePressEvent(self, ev):
+        if self.klik_modus and self.klik_callback:
+            self.klik_callback(ev.position())
+        super().mousePressEvent(ev)
+
+
 def run_gui(args):
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QImage, QPixmap
@@ -603,18 +622,24 @@ def run_gui(args):
             self.b_auto.clicked.connect(self.auto_detect)
             self.b_voor = QPushButton('Voorbewerken (P)')
             self.b_voor.clicked.connect(self.voorbewerk)
+            self.b_doel = QPushButton('Kies schaatser (K)')
+            self.b_doel.clicked.connect(self.kies_schaatser)
+            self.kies_modus = False
             links = QVBoxLayout()
             links.addWidget(self.b_map)
             links.addWidget(self.videolijst, 1)
             links.addWidget(self.b_auto)
             links.addWidget(self.b_voor)
+            links.addWidget(self.b_doel)
             links.addWidget(self.b_rapport)
             links_w = QWidget()
             links_w.setLayout(links)
 
             # midden: video + tijdlijn
-            self.video_label = QLabel(' kies een video…')
+            self.video_label = KlikLabel(' kies een video…')
             self.video_label.setAlignment(Qt.AlignCenter)
+            self.video_label.klik_callback = self.video_klik
+            self.video_label.klik_modus_bind = lambda v: setattr(self.video_label, 'klik_modus', v)
             self.tijd_label = QLabel()
             self.tijd_label.setFixedHeight(40)
             midden = QVBoxLayout()
@@ -676,7 +701,7 @@ def run_gui(args):
             self.resize(1750, 900)
             for wdgt in (self.videolijst, self.lijst, self.b_redefine, self.b_new,
                          self.b_undo, self.b_save, self.b_map, self.b_rapport,
-                         self.b_auto, self.b_voor):
+                         self.b_auto, self.b_voor, self.b_doel):
                 wdgt.setFocusPolicy(Qt.NoFocus)
             for b in self.b_fasen:
                 b.setFocusPolicy(Qt.NoFocus)
@@ -848,6 +873,49 @@ def run_gui(args):
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.vul_videolijst()
             self.status.showMessage('voorbewerking gestart op PinkBox — npz volgt via sync, daarna A', 8000)
+
+        def kies_schaatser(self):
+            if self.video_pad is None:
+                self.status.showMessage('geen video geladen', 3000)
+                return
+            self.kies_modus = not self.kies_modus
+            self.video_label.klik_modus = self.kies_modus
+            self.status.showMessage(
+                'KLIK op de schaatser die gevolgd moet worden — daarna wordt de clip '
+                'opnieuw geanalyseerd (paar minuten op PinkBox, daarna A)'
+                if self.kies_modus else 'kies-modus uit', 8000)
+
+        def video_klik(self, label_pos):
+            """Klik in 'kies schaatser'-modus → doel opgeven en heranalyseren op PinkBox."""
+            if not self.kies_modus or self.video_pad is None or not self.info:
+                return
+            pm = self.video_label.pixmap()
+            if pm is None or not pm.width():
+                return
+            px, py = label_pos.x(), label_pos.y()
+            if not (0 <= px < pm.width() and 0 <= py < pm.height()):
+                return
+            doel = (round(px / pm.width(), 4), round(py / pm.height(), 4))
+            stem = os.path.splitext(os.path.basename(self.video_pad))[0]
+            req = json.dumps({'stem': stem, 'doel': list(doel)})
+            reqpad = f'/tmp/doel_verzoek_{stem}.json'
+            with open(reqpad, 'w') as fh:
+                fh.write(req)
+            p = video_paden(self.video_pad)
+            os.makedirs(os.path.dirname(p['npz']), exist_ok=True)
+            open(p['npz'] + '.preparing', 'w').write(str(int(time.time())))
+            QApplication.processEvents()
+            cmd = (f'/usr/bin/scp -q {shlex.quote(reqpad)} '
+                   '"pinkbox:C:/Users/danie/GitHub/SchaatsAnalyse/runs/doel_verzoek.json" '
+                   '&& /usr/bin/ssh pinkbox "schtasks /Run /TN SchaatsDoel"')
+            subprocess.Popen(['/bin/zsh', '-c', cmd],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.kies_modus = False
+            self.video_label.klik_modus = False
+            self.vul_videolijst()
+            self.status.showMessage(
+                f'doel gezet op {doel} — heranalyse gestart op PinkBox, npz volgt via sync (daarna A)',
+                10000)
 
         def rij_verversen(self):
             # status van de lijst periodiek verversen (npz kan tussentijds aankomen)
@@ -1051,6 +1119,8 @@ def run_gui(args):
                 self.auto_detect()
             elif k == Qt.Key_P:
                 self.voorbewerk()
+            elif k == Qt.Key_K:
+                self.kies_schaatser()
             elif k == Qt.Key_S:
                 self.opslaan()
             elif k == Qt.Key_Escape:
